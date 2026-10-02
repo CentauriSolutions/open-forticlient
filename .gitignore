@@ -1,0 +1,11 @@
+# Large, regenerable reverse-engineering inputs (see tools/README.md)
+*.asm
+*.strings
+*_x86
+*_x86_64
+*.thin
+
+# Captured SAML callbacks may contain single-use tokens — never commit
+saml_callback*.log
+*.token
+test_uid
