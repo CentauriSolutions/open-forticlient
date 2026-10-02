@@ -9,6 +9,7 @@
 
 mod connect;
 mod control;
+mod doctor;
 mod profile;
 mod proto;
 mod saml;
@@ -48,6 +49,16 @@ USAGE:
     oftc connect [--profile NAME] [--insecure] [--no-auto-otp]
         Full bring-up: SAML -> CONNECT -> answer the OTP prompt -> watch STATUS,
         and never disconnect on lock. Logs every control-socket message.
+
+    oftc disconnect [--profile NAME]
+        Tear the tunnel down cleanly (sends DISCONNECT to the daemon).
+
+    oftc doctor [--dry-run] [--restore] [--yes]
+        Check that FortiClient (fctctld + iked) is installed and reachable, that
+        a PSK is configured, and whether FortiTray is running. FortiTray drops
+        the VPN on screen lock; doctor offers to disable it (and its launch
+        agents) via a macOS admin prompt. --dry-run prints the commands without
+        running; --restore re-enables FortiTray; --yes skips the confirmation.
 ",
         main = proto::MAIN_SOCKET
     );
@@ -94,6 +105,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("connect") => cmd_connect(&args),
         Some("send-connect") => cmd_send_connect(&args),
         Some("disconnect") => cmd_disconnect(&args),
+        Some("doctor") => doctor::doctor(&args),
         _ => usage(),
     }
 }
