@@ -92,3 +92,36 @@ require a different target such as Linux `x86_64-unknown-linux-musl`.)
 `build-connect --with-psk` writes the pre-shared key into the output file. That
 file (and `*.bin` generally) is git-ignored; never commit it. The SAML `tokenid`
 is single-use and is never written to disk.
+
+## Install / daily use
+
+The tunnel stays up only while a process holds fctctld's control socket, so
+`oftc` runs `connect` as a per-user LaunchAgent that launchd manages, and you
+poke it up/down. It must be a LaunchAgent (not a root daemon): SSO opens a
+browser and catches a loopback redirect, which only works in your GUI session.
+
+```
+oftc install            # copy binary + PSK to stable paths, load the agent,
+                        #   and disable FortiTray (needs a macOS admin prompt)
+oftc up                 # start a connect session: opens SSO, holds the tunnel
+oftc down               # disconnect cleanly and stop the agent
+oftc uninstall          # remove the agent and re-enable FortiTray
+```
+
+`install --keep-tray` installs only our agent (leaves FortiTray, which will
+still drop the VPN on lock). `oftc doctor` reports install/engine/PSK/FortiTray
+status and can disable FortiTray on its own (`--dry-run` previews the exact
+privileged commands; `--restore` re-enables it).
+
+Limits: a LaunchAgent dies at logout (tunnel drops at logout; lock is fine).
+SSO is interactive and the token is single-use, and this gateway does not
+advertise client-resume to the free client, so `up` always means a browser
+login and there is no silent reconnect after the SA is lost.
+
+## Secrets
+
+`build-connect --with-psk` writes the pre-shared key into the output file. That
+file (and `*.bin` generally) is git-ignored; never commit it. The SAML `tokenid`
+is single-use and is never written to disk. The plaintext PSK is read from
+`$FORTIGATE_PSK`, a git-ignored `.env` (`FORTIGATE_PSK=…`), or `~/.config/oftc/psk`
+(0600, where `oftc install` stores it for the agent) — never from the repo.

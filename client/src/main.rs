@@ -59,6 +59,19 @@ USAGE:
         the VPN on screen lock; doctor offers to disable it (and its launch
         agents) via a macOS admin prompt. --dry-run prints the commands without
         running; --restore re-enables FortiTray; --yes skips the confirmation.
+
+    oftc install [--profile NAME] [--keep-tray]
+        Install the oftc LaunchAgent (so launchd manages a persistent connect
+        session) and disable FortiTray's launch agents. --keep-tray installs our
+        agent only. Copies the binary + PSK to stable per-user locations.
+
+    oftc up / oftc down [--profile NAME]
+        Poke the installed agent: `up` starts a connect session (opens the SSO
+        browser, holds the tunnel across lock); `down` disconnects and stops it.
+
+    oftc uninstall [--purge] [--keep-tray-disabled]
+        Remove the oftc agent and re-enable FortiTray. --purge also removes the
+        stored PSK and logs; --keep-tray-disabled leaves FortiTray disabled.
 ",
         main = proto::MAIN_SOCKET
     );
@@ -106,6 +119,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("send-connect") => cmd_send_connect(&args),
         Some("disconnect") => cmd_disconnect(&args),
         Some("doctor") => doctor::doctor(&args),
+        Some("install") => doctor::install(&args),
+        Some("uninstall") => doctor::uninstall(&args),
+        Some("up") => doctor::up(&args),
+        Some("down") => doctor::down(&args),
         _ => usage(),
     }
 }

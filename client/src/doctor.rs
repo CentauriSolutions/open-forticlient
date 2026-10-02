@@ -17,8 +17,14 @@
 //! shows the standard authentication dialog. `--restore` undoes it.
 
 use std::error::Error;
+use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+
+/// Our LaunchAgent label (user GUI domain). Holds the fctctld control socket so
+/// the tunnel survives terminal-close and screen lock; poked up/down on demand.
+const OFTC_LABEL: &str = "com.open-forticlient.oftc";
 
 const FCT_APP: &str = "/Applications/FortiClient.app";
 const FCT_DAEMON: &str = "/Library/Application Support/Fortinet/FortiClient/bin/fctctld";
@@ -227,4 +233,225 @@ fn confirm(prompt: &str) -> Result<bool, Box<dyn Error>> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+// ───────────────────────────── install / up / down ──────────────────────────
+//
+// The tunnel lives only while a process holds fctctld's control socket, so we
+// run `oftc connect` as a user LaunchAgent that launchd manages, and poke it
+// up/down. It must be a LaunchAgent (not a root LaunchDaemon): SSO opens a
+// browser and catches a loopback redirect, which only works in the GUI session.
+
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+fn plist_path() -> String {
+    format!("{}/Library/LaunchAgents/{OFTC_LABEL}.plist", home())
+}
+fn install_bin() -> String {
+    format!("{}/Library/Application Support/open-forticlient/oftc", home())
+}
+fn log_path() -> String {
+    format!("{}/Library/Logs/open-forticlient/oftc.log", home())
+}
+fn psk_path() -> String {
+    format!("{}/.config/oftc/psk", home())
+}
+
+fn arg_val<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
+}
+
+fn mkdir_p(path: &str) -> std::io::Result<()> {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+fn launchctl(args: &[&str]) -> bool {
+    Command::new("/bin/launchctl")
+        .args(args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn plist_contents(bin: &str, profile: &str, log: &str, home: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{bin}</string>
+    <string>connect</string>
+    <string>--profile</string>
+    <string>{profile}</string>
+  </array>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>HOME</key><string>{home}</string></dict>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"#,
+        label = OFTC_LABEL,
+        bin = xml_escape(bin),
+        profile = xml_escape(profile),
+        home = xml_escape(home),
+        log = xml_escape(log),
+    )
+}
+
+/// Make the plaintext PSK available to the agent at ~/.config/oftc/psk (0600),
+/// since launchd runs oftc with no .env and no $FORTIGATE_PSK in scope.
+fn ensure_psk_file() -> Result<(), Box<dyn Error>> {
+    let path = psk_path();
+    if path_exists(&path) {
+        return Ok(());
+    }
+    match crate::profile::plaintext_psk_override() {
+        Some(psk) => {
+            mkdir_p(&path)?;
+            fs::write(&path, format!("{psk}\n"))?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            println!("  stored PSK at {path} (0600) for the background agent");
+        }
+        None => {
+            eprintln!(
+                "  warning: no plaintext PSK found. Put the FortiGate psksecret in {path} \
+                 (chmod 600) before `oftc up`, or export $FORTIGATE_PSK."
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn install(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let profile = arg_val(args, "--profile").unwrap_or("Office VPN").to_string();
+    let keep_tray = args.iter().any(|a| a == "--keep-tray");
+    let uid = console_uid();
+
+    if !(path_exists(FCT_DAEMON) && path_exists(FCT_IKED)) {
+        return Err("FortiClient (fctctld + iked) is not installed — oftc drives it, so install \
+             FortiClient 7.4.x first."
+            .into());
+    }
+
+    println!("Installing open-forticlient agent (profile {profile:?})…");
+
+    // 1. a stable copy of the binary the agent will run.
+    let exe = std::env::current_exe()?;
+    let bin = install_bin();
+    mkdir_p(&bin)?;
+    fs::copy(&exe, &bin)?;
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+    println!("  binary -> {bin}");
+
+    // 2. PSK where the agent can read it; 3. log dir.
+    ensure_psk_file()?;
+    mkdir_p(&log_path())?;
+
+    // 4. the LaunchAgent plist.
+    let plist = plist_path();
+    mkdir_p(&plist)?;
+    fs::write(&plist, plist_contents(&bin, &profile, &log_path(), &home()))?;
+    println!("  agent  -> {plist}");
+
+    // 5. load it into our GUI domain (no root needed for our own agent).
+    let domain = format!("gui/{uid}");
+    let target = format!("gui/{uid}/{OFTC_LABEL}");
+    let _ = launchctl(&["bootout", &target]); // ignore "not loaded"
+    if !launchctl(&["bootstrap", &domain, &plist]) {
+        eprintln!("  warning: `launchctl bootstrap {domain}` failed; try `oftc up` anyway.");
+    }
+    let _ = launchctl(&["enable", &target]);
+
+    // 6. neutralize FortiTray (root) unless asked to keep it.
+    if keep_tray {
+        println!("  (left FortiTray as-is; --keep-tray). It will still drop the VPN on lock.");
+    } else {
+        println!("  disabling FortiTray so it can't DISCONNECT on lock (needs admin)…");
+        run_privileged(
+            &disable_script(&uid),
+            "open-forticlient is installing: disable FortiTray (which drops the VPN on screen \
+             lock). The VPN engine fctctld/iked stays running.",
+        )?;
+    }
+
+    println!("\nInstalled. Bring the tunnel up with:  oftc up");
+    println!("Take it down with:  oftc down     Remove everything with:  oftc uninstall");
+    Ok(())
+}
+
+pub fn up(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let uid = console_uid();
+    if !path_exists(&plist_path()) {
+        return Err("not installed — run `oftc install` first".into());
+    }
+    let _ = args;
+    let target = format!("gui/{uid}/{OFTC_LABEL}");
+    if !launchctl(&["kickstart", "-k", &target]) {
+        return Err(format!("could not start the agent ({target}); is it installed?").into());
+    }
+    println!("Starting the oftc agent — a browser window will open for SSO.");
+    println!("  logs:  tail -f {}", log_path());
+    println!("  down:  oftc down");
+    Ok(())
+}
+
+pub fn down(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let profile = arg_val(args, "--profile").unwrap_or("Office VPN").to_string();
+    let uid = console_uid();
+    // Clean teardown: send DISCONNECT via the installed binary (falls back to
+    // this one). The holding agent sees STATUS 3 and exits on its own.
+    let bin = if path_exists(&install_bin()) {
+        install_bin()
+    } else {
+        std::env::current_exe()?.to_string_lossy().into_owned()
+    };
+    let _ = Command::new(&bin).args(["disconnect", "--profile", &profile]).status();
+    let _ = launchctl(&["kill", "SIGTERM", &format!("gui/{uid}/{OFTC_LABEL}")]);
+    println!("Tunnel disconnected and agent stopped.");
+    Ok(())
+}
+
+pub fn uninstall(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let keep_tray_disabled = args.iter().any(|a| a == "--keep-tray-disabled");
+    let purge = args.iter().any(|a| a == "--purge");
+    let uid = console_uid();
+
+    // stop + remove our agent.
+    let _ = down(args);
+    let _ = launchctl(&["bootout", &format!("gui/{uid}/{OFTC_LABEL}")]);
+    let _ = fs::remove_file(plist_path());
+    let _ = fs::remove_file(install_bin());
+    println!("Removed the oftc agent.");
+
+    // restore FortiTray unless the user wants it left disabled.
+    if keep_tray_disabled {
+        println!("Left FortiTray disabled (--keep-tray-disabled).");
+    } else {
+        println!("Re-enabling FortiTray (needs admin)…");
+        restore_tray(false)?;
+    }
+
+    if purge {
+        let _ = fs::remove_file(psk_path());
+        let _ = fs::remove_file(log_path());
+        println!("Purged PSK and logs.");
+    } else {
+        println!("Kept {} (use --purge to remove).", psk_path());
+    }
+    Ok(())
 }
