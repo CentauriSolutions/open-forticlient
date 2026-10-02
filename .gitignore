@@ -9,3 +9,12 @@
 saml_callback*.log
 *.token
 test_uid
+
+# Rust client build output and any assembled CONNECT bodies (may hold the PSK)
+client/target/
+*.bin
+connect-body.bin
+
+# Local secrets (plaintext PSK, etc.) — never commit
+.env
+.env.*

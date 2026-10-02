@@ -7,11 +7,24 @@ numeric tables below were dumped from the daemon's own name-map arrays
 
 ## Vendor IDs (IKE_SA_INIT)
 
-`ikev2_init_ike_sa_peer` sends **three 16-byte vendor IDs**, then conditionally a
-set of Fortinet notify payloads. One VID decodes to the ASCII string
-**`Fortinet Endpoint Control`** (MD5-based VID). The other two are binary
-(non-ASCII) 16-byte constants stored in the daemon's data segment — capture them
-from a live `IKE_SA_INIT` or from the `iked` `__const` section when implementing.
+`ikev2_init_ike_sa_peer` sends **three 16-byte vendor IDs** (each built with
+`ikev2_add_vendor_id`), then conditionally the Fortinet notify payloads. The
+three VID constants were read straight out of the daemon's `__TEXT,__const`
+(consecutive 16-byte slots at `0x1004bca40`/`0x50`/`0x60` in the thinned x86_64
+`iked`):
+
+| # | 16-byte VID (hex) | Meaning |
+|---|-------------------|---------|
+| 1 | `4c53427b6d465d1b337bb755a37a7fef` | binary constant (preimage unknown) |
+| 2 | `b4f01ca951e9da8d0bafbbd34ad3044e` | **MD5("Fortinet Endpoint Control")** — verified |
+| 3 | `c1dc4350476b98a429b91781914ca43e` | binary constant (preimage unknown) |
+
+VID #2 is confirmed to be the MD5 digest of the ASCII string `Fortinet Endpoint
+Control`. #1 and #3 are opaque 16-byte constants (likely MD5s of version-tagged
+strings); the raw bytes above are what a replacement must send verbatim to look
+like FortiClient. A non-Fortinet stack can send these three VIDs to masquerade,
+but see `FORTICLIENT_CONNECT` below for the part that can't be faked without the
+license blob.
 
 ## Fortinet-private notify types
 
@@ -28,6 +41,13 @@ Standard RFC 7296 notify types are present as usual. The **private** ones
 (Also present in the map: standard `FRAGMENTATION_SUPPORTED` 16430,
 `SIGNATURE_HASH_ALGORITHMS` 16431, `REDIRECT*`, `TICKET_*`.)
 
+**Wire encodings verified** from each `ikev2_add_*` builder (the notify type is a
+little-endian 16-bit word written at payload offset +2, so the stored word is
+byte-swapped relative to the wire value): `network_id` writes `0x50f0` → wire
+**0xF050**; `adc_emssn` writes `0x03f1` → wire **0xF103**; `forticlient_connect`
+writes `0x00f1` → wire **0xF100**; `client_resume` passes `0xf118` straight to
+`ikev2_add_notify` → wire **0xF118**. All four match the table.
+
 ### `FORTICLIENT_CONNECT` (0xF100) — the licensing gate
 
 `ikev2_add_forticlient_connect` calls `LicGenRawLicenseInfo2(g_fct_user,
@@ -39,6 +59,13 @@ a non-FortiClient IKE stack (strongSwan) may be rejected and we must either
 reproduce the (free-tier) license blob or reuse Fortinet's `iked` (ROADMAP §C).
 The string `Forticlient Connect License` / `FORTICLIENT_CONNECT` sits right next
 to the free-client checks, so this needs a live test.
+
+Confirmed in this build: `ikev2_add_forticlient_connect` is called from **both**
+`ikev2_init_ike_sa_peer` (IKE_SA_INIT) and `ikev2_init_ike_auth` (IKE_AUTH), and
+its payload is `LicGenRawLicenseInfo2(g_fct_user, g_fct_reg_status, g_fct_emssn,
+g_fct_ems_tenant_id, …)` tagged with the 2-byte `0x00f1` family word. So a stock
+strongSwan IKE_AUTH (§B) would omit it; whether this gateway rejects that is the
+open blocker in Issue 3 and the §B-vs-§C decision point.
 
 ### `CLIENT_RESUME` (0xF118) + `IKE_SESSION_RESUME`
 

@@ -3,29 +3,36 @@
 Ordered cheapest-to-most-work. §0 and §A may make a full client unnecessary; do
 them first.
 
-## §0 — Zero-code: suppress the client's lock-disconnect (investigate first)
+## §0 — Zero-code: suppress the client's lock-disconnect (RESOLVED: no local knob)
 
-The teardown is gated by a flag (`-[LegacyIpsecBridge setDisconnectOnSleep:]`,
-function `_ipsec_system_sleep`, log `System sleep disconnect enabled`). If that
-flag is driven by a readable/writable preference or EMS/sysconf key, flipping it
-is the entire fix — no client needed.
+**Outcome (Issue 1, done).** The teardown *is* gated by a flag, but it is not a
+local preference. `AppDelegate.systemWillSleep(_:)` skips the entire stop block
+iff `VpnManager.enableClientResumption` is true, and that field is set only from
+the **gateway-advertised** `allowClientResumption` option
+(`ipsecFgtOptions(…ClientResumption:)` → `enableClientResumption = (arg != 0)`),
+otherwise initialized to 0. There is no `fctsysconf.plist`/`vpn.plist`/`data/`
+key and no env var to flip. See FINDINGS §1/§6.
 
-**Next steps**
+So §0 collapses into **§A**: the only lever that flips the client's own flag is
+the gateway telling it resumption is allowed. Two fallbacks remain if the gateway
+won't advertise it to this free client:
 
-1. Disassemble `_ipsec_system_sleep` and the writer of `disconnectOnSleep`; find
-   whether it reads a plist key, an env var, an EMS policy, or is hard-coded.
-2. Grep `conf/fctsysconf.plist`, `conf/vpn.plist`, `data/` for the key; try
-   toggling in a copy and relaunching FortiTray.
-3. If hard-coded `true` with no knob, §0 is out — move to §A/§C.
-
-Also re-confirm the community workaround (downgrade to `7.4.1.1716`, which has no
-lock-disconnect code path) as a stopgap, weighing the security tradeoff of
-pinning an old build.
+- **Stopgap:** downgrade to `7.4.1.1716`, which has no lock-disconnect code path
+  (Issue 9) — independent of the gateway, at the cost of pinning an old build.
+- **Real fix:** §C — replace the component that issues the lock-time
+  `DISCONNECT`, so lock survival no longer depends on Fortinet (Issue 6).
 
 ## §A — Server-side: enable IKEv2 session resumption (operator has FortiGate admin)
 
 Makes a dropped tunnel *resumable* without a fresh SAML login. Requires FortiOS
 **7.4.4+**.
+
+> **Tested 2026-10-02 — NO-GO (Issue 2).** Admin enabled `client-resume` and
+> reconnected; `fctctld` logged `Enable Client Resumption: 0` (the gateway did not
+> advertise it to this free client), and the next lock still tore the tunnel down.
+> Server-side alone does not fix the lock drop here. Primary fix is now §C.
+> (Re-test only if the gateway turns out to be < 7.4.4 or the wrong phase1 was
+> edited — either would flip the logged value to non-zero.)
 
 ```
 config vpn ipsec phase1-interface
@@ -36,18 +43,29 @@ config vpn ipsec phase1-interface
 end
 ```
 
-**Caveat / must-test:** per Fortinet's own note, FortiClient only *acts on* resume
-on a network change or wake-from-sleep, and the macOS client still issues an
-explicit disconnect on **lock**. So §A most reliably helps the sleep/roam case; it
-may not by itself stop the lock-triggered drop unless §0's client behavior is also
-addressed. Worth testing the combination:
+**What we now know (and the real risk).** Disassembly proves the *client half*:
+if the gateway advertises `allowClientResumption`, FortiTray sets
+`enableClientResumption = true` and `systemWillSleep` skips the lock teardown
+entirely (FINDINGS §1). So if the FortiGate advertises resume to this client, the
+lock drop stops with **zero client code**. The unproven link — and the likely
+home of the known "free client" defect — is whether the gateway advertises
+`allowClientResumption=1` to a **free/unregistered** FortiClient at all. There is
+no way to force the flag locally (it is private state, reset to 0, written only
+from the gateway option), so this can only be settled by testing on the gateway.
 
-- enable `client-resume` server-side, **and**
-- a profile that permits keep-running (so the client takes the
-  `tunnelConnectWithoutReauth` branch instead of the disconnect branch).
+**Precise pass/fail signal (no guessing).** After `set client-resume enable` and
+a reconnect, lock the screen and read
+`~/Library/Application Support/Fortinet/FortiClient/Logs/fortitray.log`:
+- **Fix took** if, after `AppDelegate … System is going to sleep`, there is **no**
+  `Stop current VPN` / `checkAndStopVPN` and the tunnel stays up (no SAML on
+  return).
+- **Bug persists** if `Stop current VPN` still follows the sleep line — meaning
+  the gateway did not advertise resume to this client, and §A cannot fix it.
 
-Test matrix: {client-resume off/on} × {keep-running off/on} × {lock, display-sleep,
-real-sleep, wifi-roam} → record which combinations survive without a SAML prompt.
+Test matrix: {client-resume off/on} × {keep-running off/on} × {lock,
+display-sleep, real-sleep, wifi-roam} → record which survive without a SAML
+prompt, and in each case whether `fortitray.log` shows the stop. If the "on" rows
+still stop on lock, go to §C.
 
 ## §B — strongSwan + a thin SAML shim (open stack, uncertain acceptance)
 
@@ -70,6 +88,16 @@ independently.
 The daemon `iked` already speaks the exact dialect (vendor IDs, notifies, EAP,
 license blob). The bug lives in **FortiTray**, not `iked`. So: keep `iked`, write
 a small controller that does what FortiTray does **minus the lock teardown**.
+
+Two shapes (full build plan + phases in Issue 6; a Phase-0 check of whether
+`fctctld` accepts a non-FortiTray peer decides between them):
+- **§C-a interposer** — relay `/var/run/fctvpnctrl.sock` and flip the one
+  `allowClientResumption` byte in the daemon→tray options message (and/or drop the
+  lock-time `DISCONNECT`); FortiTray then sets `enableClientResumption=true` and
+  skips the teardown itself. Smallest change; keeps all of Fortinet's stack.
+- **§C-b replacement** — stop FortiTray; our controller runs SAML, sends
+  `CONNECT`, answers the OTP prompt, consumes `STATUS`, and never sends
+  `DISCONNECT` on lock. More code, no socket-interposition dependency.
 
 **What the controller must do**
 
@@ -99,16 +127,30 @@ lines of orchestration. It is also the least "novel protocol" risk.
 
 ## Recommended sequence
 
-1. **§0 investigation** (hours) — may end the project immediately.
-2. **§A** (operator has admin; minutes to configure) + measure the test matrix.
-3. If a client is still needed: **§C** (reuse `iked`) as the primary path, with
-   **§B** (strongSwan) as the fully-open fallback, decided by whether the gateway
-   accepts a non-FortiClient IKE_AUTH.
+1. **§A** (operator has admin; minutes to configure) — enable `client-resume` and
+   read the pass/fail signal above. If the lock drop stops, we are done with zero
+   client code. (§0 is resolved: there is no local knob; §A is the only lever.)
+2. If §A does not stop the lock drop (the likely outcome if the free tier is not
+   advertised resume), **§C** (reuse `iked`, replace the tray) is the primary fix
+   — now substantially de-risked: the control protocol is mapped
+   ([`control-socket.md`](control-socket.md)), the vendor IDs are recovered, and
+   `iked` has no blocking entitlements (Issue 10). It guarantees lock survival
+   because *our* controller decides whether to send `DISCONNECT`.
+3. **§B** (strongSwan) stays the fully-open alternative, gated on whether the
+   gateway accepts a non-FortiClient IKE_AUTH without `FORTICLIENT_CONNECT`
+   (Issue 3).
+4. **Stopgap in parallel:** 7.4.1 downgrade (Issue 9) if an immediate,
+   gateway-independent reprieve is needed while §C is built.
 
 ## Cross-cutting open questions
 
-- Does this gateway's free tier require `FORTICLIENT_CONNECT`? (gates §B vs §C)
-- Which EAP method does the token use? (capture a live EAP exchange)
-- Exact 2 binary vendor IDs. (capture live, or pull from `iked` `__const`)
-- `fctvpnctrl_woker.sock` message schema. (reverse `ikectl`)
-- Can `iked` be driven outside Fortinet's launchd/entitlement context?
+- Does this gateway advertise `allowClientResumption` to the free client? (the
+  §A make-or-break — testable now, Issue 2.)
+- Does this gateway's free tier require `FORTICLIENT_CONNECT`? (gates §B vs §C,
+  Issue 3.)
+- Which EAP method does the token use? (capture a live EAP exchange — Issue 8.
+  Likely GTC; the token is fed as an OTP via `fct_eap_peer_set_otp`.)
+- ~~Exact binary vendor IDs~~ — **recovered** (ike-dialect.md).
+- ~~`fctvpnctrl_woker.sock` message schema~~ — **recovered** (control-socket.md).
+- ~~Can `iked` run outside Fortinet's launchd/entitlement context~~ — **answered**
+  (Issue 10): minimal entitlements; reuse the launchd job, replace the tray.

@@ -19,15 +19,24 @@ that simply **does not disconnect on lock**.
 
 Research / documentation stage. No client implemented yet. What we have:
 
-- ✅ Root cause of the lock-disconnect confirmed from logs + binary.
+- ✅ Root cause of the lock-disconnect **fully localized**: `FortiTray`'s
+  `AppDelegate.systemWillSleep` tears the tunnel down on lock unless
+  `VpnManager.enableClientResumption` is set — and that flag is **driven by the
+  gateway**, not any local preference. There is no plist to flip.
 - ✅ The full SAML-over-IPsec authentication handshake reverse-engineered and the
   initial HTTP step reproduced against the live gateway.
-- ✅ The FortiClient IKEv2 dialect (vendor IDs, Fortinet-private notify payloads,
-  EAP token flow) mapped from the `iked` daemon.
+- ✅ The FortiClient IKEv2 dialect mapped from `iked`: all three IKE_SA_INIT
+  vendor IDs recovered as hex, the Fortinet-private notifies
+  (`FORTICLIENT_CONNECT` 0xF100, `CLIENT_RESUME` 0xF118, …) and the EAP-OTP token
+  flow confirmed.
+- ✅ The `fctctld` control-socket protocol mapped end-to-end (framing + command
+  opcodes + how the SAML token is delivered as the EAP OTP) — see
+  [`docs/control-socket.md`](docs/control-socket.md).
 - ✅ Reusable tooling (a Mach-O/Swift disassembly annotator; a loopback SAML
   callback catcher).
-- 🔜 Decide between the three implementation strategies in
-  [`docs/ROADMAP.md`](docs/ROADMAP.md).
+- 🔜 **Next:** test server-side `client-resume` on the FortiGate (Issue 2, cheap,
+  may be blocked by the free-tier defect); build the §C controller that reuses
+  `iked` and never disconnects on lock (Issue 6, the robust fix).
 
 ## Layout
 
@@ -38,6 +47,7 @@ Research / documentation stage. No client implemented yet. What we have:
 | [`docs/FINDINGS.md`](docs/FINDINGS.md) | Root-cause analysis, component map, log evidence. |
 | [`docs/saml-ipsec-protocol.md`](docs/saml-ipsec-protocol.md) | The reverse-engineered SAML→IKEv2/EAP handshake. |
 | [`docs/ike-dialect.md`](docs/ike-dialect.md) | Fortinet's IKEv2 vendor IDs, notify codes, and config attributes. |
+| [`docs/control-socket.md`](docs/control-socket.md) | The `fctctld` `vpn_control` socket protocol (how a §C controller drives `iked`). |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Candidate implementation strategies and open questions. |
 | [`tools/annotate_macho.py`](tools/annotate_macho.py) | Annotate an x86-64 `objdump` listing of a Swift/ObjC Mach-O. |
 | [`tools/saml_catch.py`](tools/saml_catch.py) | Minimal loopback HTTP server that logs the SAML redirect. |
@@ -49,9 +59,11 @@ Work items are tracked in-repo as one Markdown file per issue under
 [`Issues/`](Issues/), each with YAML front matter (`id`, `title`, `status`,
 `assignee`, `created`, and optional `priority`/`labels`/`depends_on`) and a short
 body. The structure and conventions are documented in [`AGENTS.md`](AGENTS.md).
-The highest-value open items are **Issue 1** (is the lock-disconnect a toggleable
-preference? — possible zero-code fix) and **Issue 2** (enable/test server-side
-`client-resume` on the FortiGate).
+Issue 1 (is the lock-disconnect a local toggle?) is **resolved** — it is gated by
+a gateway-driven flag, no local knob. The live items are **Issue 2** (test
+server-side `client-resume` on the FortiGate — cheapest, but may be blocked by the
+free-client defect) and **Issue 6** (the §C controller that reuses `iked` and
+never disconnects on lock — the fix that doesn't depend on the gateway).
 
 ## Scope and intent
 
