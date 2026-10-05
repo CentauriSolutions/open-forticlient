@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oftc // saml</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230a0f0a'/%3E%3Cpath d='M3 4l4 4-4 4' stroke='%233dff7a' stroke-width='2' fill='none'/%3E%3Crect x='8' y='11' width='5' height='2' fill='%233dff7a'/%3E%3C/svg%3E">
+<style>
+  :root { --bg: #0a0f0a; --fg: #3dff7a; --dim: #1f9a4a; --bad: #ff4d4d; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body {
+    color: var(--fg);
+    font: 15px/1.55 ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; box-sizing: border-box;
+    text-shadow: 0 0 6px rgba(61, 255, 122, .45);
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px);
+  }
+  main { width: 100%; max-width: 640px; }
+  pre.banner { margin: 0 0 1.2em; line-height: 1.1; font-size: 13px; white-space: pre; overflow: hidden; }
+  .l { white-space: pre-wrap; word-break: break-all; min-height: 1.55em; }
+  .d { color: var(--dim); }
+  .bad { color: var(--bad); text-shadow: 0 0 6px rgba(255, 77, 77, .45); }
+  .big { margin-top: 1em; font-size: 1.15em; }
+  .cur { display: inline-block; width: .6em; background: var(--fg); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  body.ok .fail, body.fail .ok { display: none; }
+  @media (max-width: 480px) { body { font-size: 13px; } pre.banner { font-size: 10px; } }
+  @media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
+</style>
+</head>
+<body class="{{STATE}}">
+<main>
+<pre class="banner" aria-label="OFTC">  ___  ___ _____ ___
+ / _ \| __|_   _/ __|
+| (_) | _|  | || (__
+ \___/|_|   |_| \___|  open-forticlient</pre>
+<div id="log">
+  <div class="l ok"><span class="d">&gt; intercepting saml assertion .......... </span>[ok]</div>
+  <div class="l ok"><span class="d">&gt; tokenid captured (single-use) ........ </span>[ok]</div>
+  <div class="l ok"><span class="d">&gt; handing off to IKEv2 / EAP ........... </span>[ok]</div>
+  <div class="l ok big">ACCESS GRANTED. close this tab, operator.</div>
+
+  <div class="l fail"><span class="d">&gt; intercepting saml assertion .......... </span><span class="bad">[FAIL]</span></div>
+  <div class="l fail"><span class="d">&gt; no tokenid in that request. check the terminal.</span></div>
+  <div class="l fail big bad">ACCESS DENIED.</div>
+</div>
+<div class="l" id="prompt">{{USER}}:~$ <span class="cur">&nbsp;</span></div>
+</main>
+<script>
+// Type the log out line by line. Without JS, everything is simply shown.
+(function () {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  var lines = [].filter.call(document.querySelectorAll("#log .l"), function (el) {
+    return getComputedStyle(el).display !== "none";
+  });
+  var prompt = document.getElementById("prompt");
+  var queue = lines.map(function (el) {
+    var segs = [].map.call(el.childNodes, function (n) {
+      return { node: n, text: n.textContent };
+    });
+    segs.forEach(function (s) { s.node.textContent = ""; });
+    return segs;
+  });
+  prompt.style.visibility = "hidden";
+  var li = 0, si = 0, ci = 0;
+  function tick() {
+    if (li >= queue.length) { prompt.style.visibility = ""; return; }
+    var segs = queue[li], s = segs[si];
+    if (!s) { li++; si = 0; ci = 0; return setTimeout(tick, 140); }
+    s.node.textContent = s.text.slice(0, ++ci);
+    if (ci >= s.text.length) { si++; ci = 0; }
+    setTimeout(tick, s.text.charAt(ci) === "." ? 3 : 9);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

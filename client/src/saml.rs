@@ -165,15 +165,23 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let creds = parse_callback(&req);
-                // Always answer so the browser tab shows a friendly message.
-                let page = b"<html><body><h3>open-forticlient: SAML callback captured. \
-                             You can close this tab.</h3></body></html>";
+                // The callback lands on "/"; anything else (favicon, probes) gets
+                // a bare 404 rather than a misleading status page.
+                let on_root = req
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|p| p == "/" || p.starts_with("/?"));
+                let (status, page) = if on_root {
+                    ("200 OK", callback_page(creds.as_ref()))
+                } else {
+                    ("404 Not Found", String::new())
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     page.len()
                 );
                 let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.write_all(page);
+                let _ = stream.write_all(page.as_bytes());
                 let _ = stream.flush();
                 if let Some(c) = creds {
                     return Ok(c);
@@ -189,6 +197,37 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+const CALLBACK_HTML: &str = include_str!("callback.html");
+
+/// The browser-tab page: success or failure, with the prompt showing the SAML
+/// username (else the local `$USER`). The username comes from the request, so
+/// it is HTML-escaped.
+fn callback_page(creds: Option<&Credentials>) -> String {
+    let user = creds
+        .map(|c| c.username.clone())
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "operator".into());
+    CALLBACK_HTML
+        .replace("{{STATE}}", if creds.is_some() { "ok" } else { "fail" })
+        .replace("{{USER}}", &html_escape(&user))
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Pull tokenid+username from the request line query, or from an HTML form body
@@ -269,6 +308,16 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_page_escapes_username_and_sets_state() {
+        let c = Credentials { username: "<x>@y".into(), tokenid: "t".into(), uid: String::new() };
+        let page = callback_page(Some(&c));
+        assert!(page.contains(r#"<body class="ok">"#));
+        assert!(page.contains("&lt;x&gt;@y:~$"));
+        assert!(!page.contains("{{"));
+        assert!(callback_page(None).contains(r#"<body class="fail">"#));
+    }
 
     #[test]
     fn extracts_saml_url_from_js() {

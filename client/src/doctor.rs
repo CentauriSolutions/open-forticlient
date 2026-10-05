@@ -338,7 +338,7 @@ fn ensure_psk_file() -> Result<(), Box<dyn Error>> {
 }
 
 pub fn install(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let profile = arg_val(args, "--profile").unwrap_or("Office VPN").to_string();
+    let profile = crate::profile::resolve_profile(arg_val(args, "--profile"));
     let keep_tray = args.iter().any(|a| a == "--keep-tray");
     let uid = console_uid();
 
@@ -411,7 +411,7 @@ pub fn up(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn down(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let profile = arg_val(args, "--profile").unwrap_or("Office VPN").to_string();
+    let profile = crate::profile::resolve_profile(arg_val(args, "--profile"));
     let uid = console_uid();
     // Clean teardown: send DISCONNECT via the installed binary (falls back to
     // this one). The holding agent sees STATUS 3 and exits on its own.

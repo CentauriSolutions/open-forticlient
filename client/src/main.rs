@@ -143,7 +143,7 @@ fn cmd_probe(args: &[String]) -> Result<(), Box<dyn Error>> {
 /// Assemble the CONNECT body from the installed config and write it out, so we
 /// can inspect it and (later) diff the iked.conf fctctld generates from it.
 fn cmd_build_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let name = arg_val(args, "--profile").unwrap_or_else(|| "Office VPN".to_string());
+    let name = profile::resolve_profile(arg_val(args, "--profile").as_deref());
     let out = arg_val(args, "--out").unwrap_or_else(|| "connect-body.bin".to_string());
     let with_psk = has_flag(args, "--with-psk");
 
@@ -172,7 +172,7 @@ fn cmd_build_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// Run only the SAML flow and print the result (token masked by default).
 fn cmd_saml(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let name = arg_val(args, "--profile").unwrap_or_else(|| "Office VPN".to_string());
+    let name = profile::resolve_profile(arg_val(args, "--profile").as_deref());
     let p = profile::Profile::load(&name)?;
     if p.server.is_empty() {
         return Err(format!("no Server for profile {name:?} (try --profile \"Office VPN\")").into());
@@ -189,7 +189,7 @@ fn cmd_saml(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// Review and (optionally) pin the gateway's TLS certificate.
 fn cmd_trust(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let name = arg_val(args, "--profile").unwrap_or_else(|| "Office VPN".to_string());
+    let name = profile::resolve_profile(arg_val(args, "--profile").as_deref());
     let p = profile::Profile::load(&name)?;
     if p.server.is_empty() {
         return Err(format!("no Server for profile {name:?} (try --profile \"Office VPN\")").into());
@@ -255,7 +255,7 @@ fn cmd_send_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
 fn cmd_disconnect(args: &[String]) -> Result<(), Box<dyn Error>> {
     use std::io::ErrorKind;
     use std::time::Instant;
-    let name = arg_val(args, "--profile").unwrap_or_else(|| "Office VPN".to_string());
+    let name = profile::resolve_profile(arg_val(args, "--profile").as_deref());
     let p = profile::Profile::load(&name)?;
     let mut body = vec![0u8; 0x40];
     let s = p.server.as_bytes();
@@ -283,7 +283,7 @@ fn cmd_disconnect(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let name = arg_val(args, "--profile").unwrap_or_else(|| "Office VPN".to_string());
+    let name = profile::resolve_profile(arg_val(args, "--profile").as_deref());
     let p = profile::Profile::load(&name)?;
     if p.server.is_empty() {
         return Err(format!("no Server for profile {name:?} (try --profile \"Office VPN\")").into());

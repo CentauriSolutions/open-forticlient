@@ -67,6 +67,60 @@ fn p_u32(plist: &str, keypath: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// The profile names configured under `Profiles` in vpn.plist (direct children).
+/// Parses `plutil -p` output: Profiles sits at 2-space indent, its profile-name
+/// children at 4 (`    "NAME" => {`), deeper keys at 6+ (excluded).
+pub fn list_profiles() -> Vec<String> {
+    let out = match std::process::Command::new("plutil").args(["-p", VPN_PLIST]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut names = Vec::new();
+    let mut in_profiles = false;
+    for line in text.lines() {
+        if !in_profiles {
+            if line.starts_with("  \"Profiles\" =>") {
+                in_profiles = true;
+            }
+            continue;
+        }
+        if line == "  }" {
+            break; // end of the Profiles dict
+        }
+        if let Some(rest) = line.strip_prefix("    \"") {
+            if let Some(end) = rest.find("\" => {") {
+                names.push(rest[..end].to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Resolve the profile to use: an explicit `--profile` wins; otherwise, if the
+/// machine has exactly one configured profile, use it (so colleagues needn't
+/// know its name). Falls back to "Office VPN" and warns when it is ambiguous.
+pub fn resolve_profile(explicit: Option<&str>) -> String {
+    if let Some(name) = explicit {
+        return name.to_string();
+    }
+    let all = list_profiles();
+    match all.len() {
+        1 => {
+            eprintln!("using the only configured profile: {:?} (pass --profile to override)", all[0]);
+            all.into_iter().next().unwrap()
+        }
+        0 => "Office VPN".to_string(),
+        _ => {
+            eprintln!(
+                "multiple profiles found ({}); defaulting to \"Office VPN\" — pass --profile \"NAME\" to pick one.",
+                all.join(", ")
+            );
+            "Office VPN".to_string()
+        }
+    }
+}
+
 /// The operator-supplied plaintext pre-shared key. fctctld encrypts the
 /// CONNECT-body PSK into iked.conf, so we must hand it the plaintext (the
 /// FortiGate phase1 `psksecret`), not vpn.plist's already-encrypted `AuthInfo`.
