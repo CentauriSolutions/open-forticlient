@@ -18,3 +18,8 @@ connect-body.bin
 # Local secrets (plaintext PSK, etc.) — never commit
 .env
 .env.*
+
+# Never commit the FortiClient device key
+local.key
+**/local.key
+*.key
