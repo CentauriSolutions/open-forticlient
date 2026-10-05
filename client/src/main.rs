@@ -81,6 +81,10 @@ USAGE:
     oftc show-psk [--profile NAME]
         Print the plaintext pre-shared key (decrypted from AuthInfo, or the
         override) to stdout. It is a secret — handle with care.
+
+    oftc dump-profile [--profile NAME]
+        Print the profile's fields with Enc values redacted + classified
+        (PSK-like / saved-username / email-like). Safe to share for diagnosis.
 ",
         main = proto::MAIN_SOCKET
     );
@@ -134,6 +138,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("down") => doctor::down(&args),
         Some("show-psk") => doctor::show_psk(&args),
         Some("status") => doctor::status(&args),
+        Some("dump-profile") => doctor::dump_profile(&args),
         _ => usage(),
     }
 }

@@ -633,3 +633,74 @@ fn iface_has_ip(ip: &str) -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(ip))
         .unwrap_or(false)
 }
+
+// ───────────────────────────── dump-profile (diagnostic) ────────────────────
+
+/// Print a profile's fields with every `Enc …` value redacted and classified
+/// (PSK-like / saved-username / email-like / undecryptable). Safe to share: no
+/// secret values are printed. Helps locate where a machine actually stores the
+/// PSK when `AuthInfo` turns out to be the saved username.
+pub fn dump_profile(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let name = crate::profile::resolve_profile(arg_val(args, "--profile"));
+    let p = crate::profile::Profile::load(&name)?;
+
+    println!("open-forticlient profile dump\n");
+    println!(
+        "  FortiClient version: {}",
+        run_trimmed(
+            "defaults",
+            &["read", "/Applications/FortiClient.app/Contents/Info.plist", "CFBundleShortVersionString"],
+        )
+        .unwrap_or_else(|| "unknown".into())
+    );
+    println!("  profile: {name:?}\n");
+
+    let out = Command::new("plutil")
+        .args(["-p", "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist"])
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let header = format!("\"{name}\" => {{");
+
+    let mut in_block = false;
+    for line in text.lines() {
+        if !in_block {
+            if line.starts_with("    \"") && line.contains(&header) {
+                in_block = true;
+            }
+            continue;
+        }
+        if line == "    }" {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("      \"") else {
+            continue;
+        };
+        let Some((key, val)) = rest.split_once("\" => ") else {
+            continue;
+        };
+        let val = val.trim();
+        let is_enc = val
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .map(|v| v.starts_with("Enc "))
+            .unwrap_or(false);
+        if is_enc {
+            let enc = val.trim_matches('"');
+            println!("  {key} = Enc <redacted>  ->  {}", classify_enc(enc, &p.user));
+        } else {
+            println!("  {key} = {val}");
+        }
+    }
+    Ok(())
+}
+
+fn classify_enc(enc: &str, user: &str) -> String {
+    match crate::fctcrypt::decrypt_enc(enc) {
+        None => "did NOT decrypt (a different FortiClient build can change the Enc scheme)".into(),
+        Some(d) if !user.is_empty() && d == *user => {
+            "saved username (equals the profile's User) — NOT the PSK".into()
+        }
+        Some(d) if d.contains('@') => "email-like — NOT the PSK".into(),
+        Some(d) => format!("PSK-like: a {}-char key (oftc would use this)", d.len()),
+    }
+}
