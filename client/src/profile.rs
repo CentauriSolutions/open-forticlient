@@ -241,12 +241,18 @@ impl Profile {
         // Prefer an operator-supplied plaintext PSK; otherwise decrypt the
         // profile's own `AuthInfo` (the `Enc …` blob) — FortiClient's encryption
         // uses a key hardcoded in its binaries, so this works locally with no
-        // root or prompt (see fctcrypt.rs / docs/fct-enc-crypto.md). That means
-        // a correctly-configured machine needs zero PSK setup.
+        // root or prompt (see fctcrypt.rs / docs/fct-enc-crypto.md).
+        //
+        // Caveat: `AuthInfo` is "the saved credential", which is the PSK on some
+        // profiles but the saved SAML username on others. If it decrypts to the
+        // profile's own username, it is NOT the PSK — ignore it so we don't send
+        // the gateway an email as the key (that profile must use an override).
+        let username = p.user.clone();
         p.psk = plaintext_psk_override()
             .or_else(|| {
                 plutil_extract(VPN_PLIST, &format!("{base}.AuthInfo"))
                     .and_then(|enc| crate::fctcrypt::decrypt_enc(&enc))
+                    .filter(|dec| !dec.is_empty() && *dec != username)
             })
             .unwrap_or_default();
         p.psk_is_plaintext = !p.psk.is_empty();

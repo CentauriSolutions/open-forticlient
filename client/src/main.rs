@@ -305,10 +305,11 @@ fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
         // AuthInfo could not be decrypted — e.g. a FortiClient build whose `Enc`
         // key/scheme differs from the one oftc reverse-engineered.
         return Err(
-            "no pre-shared key available. oftc could not decrypt the profile's AuthInfo \
-             (a different FortiClient build can change the `Enc` scheme), and no override is \
-             set. Provide the FortiGate phase1 psksecret in PLAINTEXT via $FORTIGATE_PSK, a \
-             .env (FORTIGATE_PSK=…), or ~/.config/oftc/psk, then retry."
+            "no usable pre-shared key. The profile's AuthInfo is not the PSK (it either did \
+             not decrypt, or it holds the saved SAML username rather than the key), and no \
+             override is set. Get the FortiGate phase1 psksecret from an admin (they can run \
+             `oftc show-psk`) and provide it via $FORTIGATE_PSK, a .env (FORTIGATE_PSK=…), or \
+             ~/.config/oftc/psk, then retry."
             .into(),
         );
     }

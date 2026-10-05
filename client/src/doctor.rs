@@ -519,8 +519,10 @@ pub fn show_psk(args: &[String]) -> Result<(), Box<dyn Error>> {
     let name = crate::profile::resolve_profile(arg_val(args, "--profile"));
     let p = crate::profile::Profile::load(&name)?;
     if p.psk.is_empty() {
-        return Err("no PSK available: the profile's AuthInfo could not be decrypted and no \
-             override is set"
+        return Err("no PSK to show: the profile's AuthInfo is not the PSK (it did not decrypt, \
+             or it holds the saved SAML username), and no override is set. On a profile where \
+             AuthInfo *is* the PSK (e.g. an admin's), this prints it; otherwise set \
+             $FORTIGATE_PSK."
             .into());
     }
     eprintln!("# plaintext pre-shared key for profile {name:?} — secret, handle with care:");
