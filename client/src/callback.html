@@ -28,6 +28,11 @@
   .cur { display: inline-block; width: .6em; background: var(--fg); animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   body.ok .fail, body.fail .ok { display: none; }
+  #in { position: absolute; left: -9999px; opacity: 0; }
+  #prompt { cursor: text; }
+  #rain { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none;
+          opacity: 0; transition: opacity .6s; }
+  #rain.on { opacity: 1; }
   @media (max-width: 480px) { body { font-size: 13px; } pre.banner { font-size: 10px; } }
   @media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
 </style>
@@ -48,7 +53,10 @@
   <div class="l fail"><span class="d">&gt; no tokenid in that request. check the terminal.</span></div>
   <div class="l fail big bad">ACCESS DENIED.</div>
 </div>
-<div class="l" id="prompt">{{USER}}:~$ <span class="cur">&nbsp;</span></div>
+<div id="out"></div>
+<div class="l" id="prompt"><span id="ps">{{USER}}:~$ </span><span id="typed"></span><span class="cur">&nbsp;</span></div>
+<canvas id="rain" aria-hidden="true"></canvas>
+<input id="in"autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="terminal input">
 </main>
 <script>
 // Type the log out line by line. Without JS, everything is simply shown.
@@ -76,6 +84,129 @@
     setTimeout(tick, s.text.charAt(ci) === "." ? 3 : 9);
   }
   tick();
+})();
+
+// A toy shell. Nothing here reaches oftc — the listener is already closed.
+(function () {
+  var input = document.getElementById("in");
+  var typed = document.getElementById("typed");
+  var out = document.getElementById("out");
+  var ps = document.getElementById("ps").textContent;
+  var user = ps.replace(/:~\$ $/, "");
+  var hist = [], hi = 0;
+
+  function print(text, cls) {
+    var el = document.createElement("div");
+    el.className = "l" + (cls ? " " + cls : "");
+    el.textContent = text;
+    out.appendChild(el);
+  }
+
+  var cmds = {
+    help: function () {
+      return "commands: help whoami status ls cat uname date echo sudo hack clear exit";
+    },
+    whoami: function () { return user; },
+    status: function () {
+      return document.body.className === "ok"
+        ? "saml: ok   tokenid: handed to oftc   tunnel: see your terminal"
+        : "saml: no tokenid received. re-run `oftc up`.";
+    },
+    ls: function () { return "tokenid  README"; },
+    cat: function (a) {
+      if (a[0] === "tokenid") return "nice try. it's single-use and already spent.";
+      if (a[0] === "README") return "open-forticlient: a small open client for FortiGate IKEv2 + SAML.";
+      return "cat: " + (a[0] || "") + ": No such file or directory";
+    },
+    uname: function () { return "Darwin oftc 0.1.0 loopback"; },
+    date: function () { return new Date().toString(); },
+    echo: function (a) { return a.join(" "); },
+    sudo: function () {
+      return user + " is not in the sudoers file. This incident will be reported.";
+    },
+    hack: function () {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) return "you're already in.";
+      rain(function () { print("you're already in."); });
+    },
+    clear: function () { out.textContent = ""; },
+    exit: function () {
+      window.close();
+      return "the browser won't let a page close itself. ⌘W will.";
+    }
+  };
+  cmds.logout = cmds.exit;
+
+  // Matrix rain for ~4s (any key ends it early), then fade out and call done.
+  var raining = null;
+  function rain(done) {
+    if (raining) return;
+    var c = document.getElementById("rain"), x = c.getContext("2d");
+    var dpr = window.devicePixelRatio || 1, size = 16;
+    c.width = innerWidth * dpr; c.height = innerHeight * dpr;
+    x.scale(dpr, dpr);
+    x.fillStyle = "#0a0f0a"; x.fillRect(0, 0, innerWidth, innerHeight);
+    x.font = size + "px ui-monospace, Menlo, monospace";
+    var glyphs = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789OFTC";
+    var drops = [];
+    for (var i = 0; i < Math.ceil(innerWidth / size); i++) drops.push(-Math.random() * 20);
+    var start = performance.now(), last = 0;
+    c.classList.add("on");
+    raining = function () {
+      raining = null;
+      c.classList.remove("on");
+      setTimeout(function () { x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, c.width, c.height); }, 600);
+      done();
+    };
+    (function frame(t) {
+      if (!raining) return;
+      if (t - start > 4000) return raining();
+      requestAnimationFrame(frame);
+      if (t - last < 45) return;
+      last = t;
+      x.fillStyle = "rgba(10, 15, 10, .08)"; x.fillRect(0, 0, innerWidth, innerHeight);
+      for (var i = 0; i < drops.length; i++) {
+        var y = drops[i] * size;
+        x.fillStyle = Math.random() < .1 ? "#c8ffd9" : "#3dff7a";
+        x.fillText(glyphs.charAt(Math.floor(Math.random() * glyphs.length)), i * size, y);
+        if (y > innerHeight && Math.random() > .975) drops[i] = 0;
+        drops[i]++;
+      }
+    })(start);
+  }
+
+  function run(line) {
+    print(ps + line);
+    var words = line.trim().split(/\s+/), name = words.shift();
+    if (!name) return;
+    var fn = Object.prototype.hasOwnProperty.call(cmds, name) && cmds[name];
+    var res = fn ? fn(words) : "zsh: command not found: " + name;
+    if (res) print(res, fn ? "" : "bad");
+  }
+
+  function focus() { input.focus({ preventScroll: true }); }
+  document.addEventListener("click", focus);
+  input.addEventListener("input", function () { typed.textContent = input.value; });
+  input.addEventListener("keydown", function (e) {
+    if (raining) { raining(); e.preventDefault(); return; }
+    if (e.key === "Enter") {
+      var line = input.value;
+      if (line.trim()) hist.push(line);
+      hi = hist.length;
+      run(line);
+    } else if (e.key === "ArrowUp" && hi > 0) {
+      input.value = hist[--hi];
+    } else if (e.key === "ArrowDown" && hi < hist.length) {
+      input.value = hist[++hi] || "";
+    } else if (e.key === "l" && e.ctrlKey) {
+      out.textContent = "";
+    } else {
+      return;
+    }
+    if (e.key === "Enter" || e.key === "l") input.value = "";
+    typed.textContent = input.value;
+    e.preventDefault();
+  });
+  focus();
 })();
 </script>
 </body>
