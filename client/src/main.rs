@@ -289,12 +289,17 @@ fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
     if p.server.is_empty() {
         return Err(format!("no Server for profile {name:?} (try --profile \"Office VPN\")").into());
     }
-    if !p.psk_is_plaintext {
-        eprintln!(
-            "warning: no plaintext PSK found. fctctld encrypts the CONNECT-body PSK,\n\
-             so it needs the FortiGate phase1 psksecret in PLAINTEXT — not vpn.plist's\n\
-             already-encrypted AuthInfo. Set it in $FORTIGATE_PSK or a .env file\n\
-             (FORTIGATE_PSK=…) or ~/.config/oftc/psk, or the gateway will reject auth."
+    if p.psk.is_empty() {
+        // Fail loudly rather than sending an empty PSK (which the gateway
+        // rejects as "wrong PSK" with no hint why). Reached when the profile's
+        // AuthInfo could not be decrypted — e.g. a FortiClient build whose `Enc`
+        // key/scheme differs from the one oftc reverse-engineered.
+        return Err(
+            "no pre-shared key available. oftc could not decrypt the profile's AuthInfo \
+             (a different FortiClient build can change the `Enc` scheme), and no override is \
+             set. Provide the FortiGate phase1 psksecret in PLAINTEXT via $FORTIGATE_PSK, a \
+             .env (FORTIGATE_PSK=…), or ~/.config/oftc/psk, then retry."
+            .into(),
         );
     }
     // 1. SAML -> (username, tokenid)
