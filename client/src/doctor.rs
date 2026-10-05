@@ -333,8 +333,16 @@ fn plist_contents(bin: &str, profile: &str, log: &str, home: &str) -> String {
     <string>connect</string>
     <string>--profile</string>
     <string>{profile}</string>
+    <string>--supervise</string>
   </array>
   <key>RunAtLoad</key><false/>
+  <!-- KeepAlive is false ON PURPOSE. `connect --supervise` self-heals: one
+       process stays alive and re-runs SSO->CONNECT after any drop (so a long
+       suspend reconnects on wake). We do NOT want launchd to drive reconnection
+       — a conditional KeepAlive ({{SuccessfulExit:false}}) wedges across the
+       sleep/wake power transition (the respawn pends on a semaphore that never
+       fires), which is exactly the bug this replaced. launchd only loads the
+       job; `oftc up` starts it, `oftc down` boots it out. -->
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Interactive</string>
   <key>EnvironmentVariables</key>
@@ -440,11 +448,18 @@ pub fn up(args: &[String]) -> Result<(), Box<dyn Error>> {
         return Err("not installed — run `oftc install` first".into());
     }
     let _ = args;
+    let domain = format!("gui/{uid}");
     let target = format!("gui/{uid}/{OFTC_LABEL}");
+    // `down` boots the agent out, so (re)load it before starting.
+    let _ = launchctl(&["bootstrap", &domain, &plist_path()]);
+    let _ = launchctl(&["enable", &target]);
     if !launchctl(&["kickstart", "-k", &target]) {
         return Err(format!("could not start the agent ({target}); is it installed?").into());
     }
-    println!("Starting the oftc agent — a browser window will open for SSO.");
+    println!("Agent started — it holds the tunnel across screen lock and self-reconnects if the");
+    println!("SA drops (e.g. after a long suspend): the session re-runs SSO + CONNECT in-process,");
+    println!("backing off between attempts. A browser tab opens for SSO on each (re)connect; a");
+    println!("cached IdP login completes it silently.");
     println!("  logs:  tail -f {}", log_path());
     println!("  down:  oftc down");
     Ok(())
@@ -453,16 +468,18 @@ pub fn up(args: &[String]) -> Result<(), Box<dyn Error>> {
 pub fn down(args: &[String]) -> Result<(), Box<dyn Error>> {
     let profile = crate::profile::resolve_profile(arg_val(args, "--profile"));
     let uid = console_uid();
-    // Clean teardown: send DISCONNECT via the installed binary (falls back to
-    // this one). The holding agent sees STATUS 3 and exits on its own.
     let bin = if path_exists(&install_bin()) {
         install_bin()
     } else {
         std::env::current_exe()?.to_string_lossy().into_owned()
     };
+    // Order matters: the agent SUPERVISES, so a bare DISCONNECT would just make it
+    // re-SSO and reconnect. Kill the supervisor FIRST — `bootout` SIGTERMs the
+    // process and unloads the job (closing its socket, which drops the tunnel) —
+    // and only THEN send a DISCONNECT to clean up any iked/daemon state left over.
+    let _ = launchctl(&["bootout", &format!("gui/{uid}/{OFTC_LABEL}")]);
     let _ = Command::new(&bin).args(["disconnect", "--profile", &profile]).status();
-    let _ = launchctl(&["kill", "SIGTERM", &format!("gui/{uid}/{OFTC_LABEL}")]);
-    println!("Tunnel disconnected and agent stopped.");
+    println!("Tunnel disconnected and agent unloaded (won't auto-reconnect until `oftc up`).");
     Ok(())
 }
 

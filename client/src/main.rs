@@ -19,7 +19,7 @@ mod tls;
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn usage() -> ! {
     eprintln!(
@@ -47,9 +47,13 @@ USAGE:
         offer to pin it for trust-on-first-use. Run once if the gateway uses a
         self-signed or internal-CA cert.
 
-    oftc connect [--profile NAME] [--insecure] [--no-auto-otp]
+    oftc connect [--profile NAME] [--insecure] [--no-auto-otp] [--supervise]
         Full bring-up: SAML -> CONNECT -> answer the OTP prompt -> watch STATUS,
         and never disconnect on lock. Logs every control-socket message.
+        --supervise keeps the session alive forever: after any drop (e.g. the SA
+        dies during a long suspend) it re-runs SSO + CONNECT in-process, with
+        backoff. This is how the installed LaunchAgent runs; interactive use is
+        single-shot so you can see an error and stop.
 
     oftc disconnect [--profile NAME]
         Tear the tunnel down cleanly (sends DISCONNECT to the daemon).
@@ -318,8 +322,26 @@ fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
             .into(),
         );
     }
-    // 1. SAML -> (username, tokenid)
-    let creds = saml::obtain(&saml_config(&p, args))?;
+
+    // --supervise: self-heal. One `connect` process stays alive and re-runs the
+    // whole SSO->CONNECT flow after any drop (screen lock survives without this;
+    // a long *suspend* kills the SA — the gateway DPDs it out — and the only cure
+    // is to reconnect on wake). We do the reconnect in-process rather than leaning
+    // on launchd's KeepAlive, because a conditional KeepAlive respawn gets wedged
+    // across the sleep/wake power transition (pended on a semaphore that never
+    // fires). The launchd agent runs us with --supervise; interactive `connect`
+    // stays single-shot so a human can see the error and stop.
+    if has_flag(args, "--supervise") {
+        return supervise(&p, args);
+    }
+    connect_once(&p, args)
+}
+
+/// One full bring-up attempt: SAML -> CONNECT -> hold the socket until the
+/// session ends (clean DISCONNECT, daemon close, or STATUS 3 error).
+fn connect_once(p: &profile::Profile, args: &[String]) -> Result<(), Box<dyn Error>> {
+    // 1. SAML -> (username, tokenid). Fresh every call: the tokenid is single-use.
+    let creds = saml::obtain(&saml_config(p, args))?;
     eprintln!("SAML OK: username={} tokenid={}", creds.username, mask(&creds.tokenid));
 
     // 2-3. CONNECT -> (delay) push OTP over the socket (iked needs the token in
@@ -332,6 +354,39 @@ fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
             arg_val(args, "--otp-delay").and_then(|s| s.parse().ok()).unwrap_or(2),
         ),
     };
-    control::run(&p, &creds, &opts)?;
-    Ok(())
+    control::run(p, &creds, &opts)
+}
+
+/// Supervise a persistent session: reconnect forever, backing off so a hard
+/// failure (gateway down, no network on wake) doesn't spin or spam SSO windows.
+/// Runs until the process is killed (e.g. `oftc down` boots the agent out, which
+/// SIGTERMs us). Never returns Ok — only an unrecoverable setup error escapes.
+fn supervise(p: &profile::Profile, args: &[String]) -> Result<(), Box<dyn Error>> {
+    const MIN_BACKOFF: Duration = Duration::from_secs(2);
+    // Cap kept short so recovery after a *sustained* outage is snappy: once the
+    // network is back, the next retry is at most this far off. The common case
+    // (wake from suspend, network already up) succeeds on the first MIN_BACKOFF
+    // retry and never climbs. Offline retries are cheap and open no browser
+    // (the bootstrap POST fails before the SSO tab), so a short cap costs little.
+    const MAX_BACKOFF: Duration = Duration::from_secs(20);
+    // A session that stayed up at least this long counts as "healthy": the next
+    // drop is treated as a fresh incident, so we recover fast instead of carrying
+    // a grown backoff from an earlier flap.
+    const HEALTHY: Duration = Duration::from_secs(30);
+
+    let mut backoff = MIN_BACKOFF;
+    eprintln!("supervising: will re-SSO and reconnect after any drop (Ctrl-C / `oftc down` to stop).");
+    loop {
+        let started = Instant::now();
+        match connect_once(p, args) {
+            Ok(()) => eprintln!("session ended (daemon closed the socket); reconnecting…"),
+            Err(e) => eprintln!("session ended: {e}; reconnecting…"),
+        }
+        if started.elapsed() >= HEALTHY {
+            backoff = MIN_BACKOFF;
+        }
+        eprintln!("   waiting {}s, then re-running SSO…", backoff.as_secs());
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
 }
