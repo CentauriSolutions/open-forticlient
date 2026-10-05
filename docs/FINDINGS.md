@@ -170,6 +170,36 @@ resume context (gated in `_ikev2_init_ike_sa_peer`), and the generated
 `iked.conf` carries no resume directive — it is driven by the FGT-advertised
 option, not local config.
 
+### 7a. …but a real suspend still kills the free-client SA — so we reconnect
+
+In practice §7's suspend/resume does **not** keep the SA alive across a long
+suspend for this client (consistent with Issue 2: the gateway advertises no
+client-resume to it). Measured by closing the lid and reading `fctctl.log` on
+wake: iked logs `racoon error report: -306` (dead peer) ~20–30s after wake and
+closes the SA (`Close ipsec connection … status: 4` then `3`), and `fctctld`
+sends `STATUS` code 3 to whoever holds the control socket. Survival is
+**timing-dependent**: a ~56s nap survived intact (ESP-in-TCP + macOS
+`TCPKeepAlive` carried it), while 218s / 231s / 269s suspends variously dropped
+or survived — you cannot rely on it. Screen *lock* (no suspend) always survives;
+that is the §C win and is unaffected.
+
+So the client must reconnect itself on wake. `oftc connect --supervise`
+(`client/src/main.rs`) does it **in-process**: on the `STATUS 3` it re-runs the
+whole SSO→CONNECT flow with exponential backoff (2s→20s, reset after a healthy
+session), re-establishing phase2 with a fresh single-use token. One process spans
+the entire drop→reconnect, so there is no window where nothing holds the socket.
+
+**launchd cannot be the reconnector.** The agent first tried
+`KeepAlive={SuccessfulExit:false}` to have launchd relaunch a single-shot
+`connect` after it exited on `STATUS 3`. It silently failed across exactly the
+sleep/wake transition we care about: a *conditional* KeepAlive is a semaphore,
+and the respawn pended during the power transition and never fired — observed in
+`launchctl print` as `runs = 1`, `last exit code = 1`, `pended nondemand spawn =
+semaphore`, with the job sitting `not running` indefinitely. The LaunchAgent now
+runs `connect --supervise` with `KeepAlive=false`; launchd only loads the job
+(`oftc up` starts it, `oftc down` boots it out), and reconnection is entirely the
+process's own job.
+
 ## 8. IKE identity confirmed from this build's `iked`
 
 The three IKE_SA_INIT vendor IDs and the Fortinet-private notifies were read

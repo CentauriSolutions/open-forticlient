@@ -103,7 +103,8 @@ browser and catches a loopback redirect, which only works in your GUI session.
 ```
 oftc install            # copy binary + PSK to stable paths, load the agent,
                         #   and disable FortiTray (needs a macOS admin prompt)
-oftc up                 # start a connect session: opens SSO, holds the tunnel
+oftc up                 # start a supervised session: opens SSO, holds the
+                        #   tunnel, and auto-reconnects after a drop
 oftc down               # disconnect cleanly and stop the agent
 oftc uninstall          # remove the agent and re-enable FortiTray
 ```
@@ -113,10 +114,24 @@ still drop the VPN on lock). `oftc doctor` reports install/engine/PSK/FortiTray
 status and can disable FortiTray on its own (`--dry-run` previews the exact
 privileged commands; `--restore` re-enables it).
 
-Limits: a LaunchAgent dies at logout (tunnel drops at logout; lock is fine).
-SSO is interactive and the token is single-use, and this gateway does not
-advertise client-resume to the free client, so `up` always means a browser
-login and there is no silent reconnect after the SA is lost.
+The agent self-heals. `connect --supervise` holds the tunnel across screen lock,
+and after a drop it cannot prevent — a long **suspend** kills the SA (the gateway
+DPDs it out ~20–30s after wake) — it re-runs SSO + CONNECT **in-process** with
+backoff (2s→20s), so the tunnel comes back on wake without `oftc up`. Each
+reconnect re-runs SSO because the token is single-use: a live Okta session
+completes it silently, a lapsed one shows the login page once. (Short suspends,
+<~1 min, often survive outright via the ESP-in-TCP keepalive — survival is
+timing-dependent, which is exactly why the reconnect path exists.)
+
+launchd `KeepAlive` is intentionally **off**: the supervising process, not
+launchd, drives reconnection. A conditional `KeepAlive` ({`SuccessfulExit:false`})
+respawn pends on a semaphore that never fires across the sleep/wake power
+transition — the original "didn't reconnect after wake" bug. launchd only loads
+the job; `up` starts it, `down` boots it out (it can't crash-restart the process,
+so a panic stays down until the next `up`).
+
+Limits: a LaunchAgent dies at logout (tunnel drops at logout; lock and suspend
+are fine).
 
 ## Secrets
 
