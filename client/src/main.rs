@@ -73,6 +73,14 @@ USAGE:
     oftc uninstall [--purge] [--keep-tray-disabled]
         Remove the oftc agent and re-enable FortiTray. --purge also removes the
         stored PSK and logs; --keep-tray-disabled leaves FortiTray disabled.
+
+    oftc status [--profile NAME]
+        Show config + tunnel state: server, PSK source, whether the tunnel is up,
+        whether an oftc session is holding it, and if FortiTray is running.
+
+    oftc show-psk [--profile NAME]
+        Print the plaintext pre-shared key (decrypted from AuthInfo, or the
+        override) to stdout. It is a secret — handle with care.
 ",
         main = proto::MAIN_SOCKET
     );
@@ -124,6 +132,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("uninstall") => doctor::uninstall(&args),
         Some("up") => doctor::up(&args),
         Some("down") => doctor::down(&args),
+        Some("show-psk") => doctor::show_psk(&args),
+        Some("status") => doctor::status(&args),
         _ => usage(),
     }
 }

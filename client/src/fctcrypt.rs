@@ -61,7 +61,10 @@ pub fn decrypt_enc(s: &str) -> Option<String> {
     }
     let keystream = openssl_aes_ecb_encrypt(aes_key, &counters)?;
     let pt: Vec<u8> = ct.iter().zip(&keystream).map(|(c, k)| c ^ k).collect();
-    String::from_utf8(pt).ok()
+    // FortiClient stores a NUL-terminated string (the ciphertext includes the
+    // terminator and any trailing bytes), so the key ends at the first NUL.
+    let end = pt.iter().position(|&b| b == 0).unwrap_or(pt.len());
+    String::from_utf8(pt[..end].to_vec()).ok()
 }
 
 /// `cat` selects the salt/key sizes, keyed off the password length (see the

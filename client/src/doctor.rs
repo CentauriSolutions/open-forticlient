@@ -508,3 +508,126 @@ mod tests {
         assert!(!agent_disabled(out, "com.fortinet.missing"));
     }
 }
+
+// ───────────────────────────── show-psk / status ────────────────────────────
+
+const FCTCTL_LOG: &str = "/Library/Application Support/Fortinet/FortiClient/Logs/fctctl.log";
+
+/// Print the plaintext pre-shared key (decrypted from AuthInfo, or the override)
+/// to stdout — e.g. to hand to a colleague on the same gateway. It is a secret.
+pub fn show_psk(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let name = crate::profile::resolve_profile(arg_val(args, "--profile"));
+    let p = crate::profile::Profile::load(&name)?;
+    if p.psk.is_empty() {
+        return Err("no PSK available: the profile's AuthInfo could not be decrypted and no \
+             override is set"
+            .into());
+    }
+    eprintln!("# plaintext pre-shared key for profile {name:?} — secret, handle with care:");
+    println!("{}", p.psk);
+    Ok(())
+}
+
+/// Show the current config + tunnel state at a glance.
+pub fn status(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let name = crate::profile::resolve_profile(arg_val(args, "--profile"));
+    let p = crate::profile::Profile::load(&name)?;
+
+    println!("open-forticlient status\n");
+    println!("  profile : {name:?}");
+    println!("  server  : {}:{}", p.server, p.saml_port);
+    let psk_src = if crate::profile::plaintext_psk_override().is_some() {
+        "operator override ($FORTIGATE_PSK / .env / ~/.config/oftc/psk)"
+    } else if !p.psk.is_empty() {
+        "decrypted from the profile's AuthInfo"
+    } else {
+        "NONE — connect will fail (set $FORTIGATE_PSK)"
+    };
+    println!("  PSK     : {psk_src}");
+
+    let iked = proc_running("iked");
+    let held = Command::new("pgrep")
+        .args(["-f", "oftc connect"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let (last_event, vpnip) = fctctl_status();
+
+    println!();
+    if iked {
+        let ip = vpnip.unwrap_or_default();
+        let on_iface = !ip.is_empty() && iface_has_ip(&ip);
+        let tail = if on_iface {
+            format!(", internal IP {ip} on a utun interface")
+        } else if !ip.is_empty() {
+            format!(", last internal IP {ip}")
+        } else {
+            String::new()
+        };
+        println!("  tunnel  : UP (iked running{tail})");
+    } else {
+        println!("  tunnel  : DOWN (iked not running)");
+    }
+    println!(
+        "  held by : {}",
+        if held {
+            "an oftc session holding the control socket"
+        } else {
+            "nothing (if a tunnel is up, fctctld may tear it down)"
+        }
+    );
+    if let Some(ev) = last_event {
+        println!("  last    : {ev}");
+    }
+
+    println!();
+    if proc_running("FortiTray") {
+        println!("  [WARN] FortiTray is running — it will DISCONNECT the VPN on screen lock.");
+        println!("         Run `oftc doctor` (or `oftc install`) to disable it.");
+    } else {
+        println!("  [ ok ] FortiTray not running — the lock teardown is neutralized.");
+    }
+    Ok(())
+}
+
+/// Scan fctctld's log for the most recent ipsec event + assigned internal IP.
+fn fctctl_status() -> (Option<String>, Option<String>) {
+    let text = match fs::read_to_string(FCTCTL_LOG) {
+        Ok(t) => t,
+        Err(_) => return (None, None),
+    };
+    let mut last_event = None;
+    let mut vpnip = None;
+    for line in text.lines() {
+        if (line.contains("Ipsec phase2") && line.contains("established"))
+            || line.contains("Close ipsec connection")
+            || line.contains("Received racoon error report")
+        {
+            last_event = Some(summarize_log(line));
+        }
+        if let Some(idx) = line.find("Internal Addr4:") {
+            let v = line[idx + "Internal Addr4:".len()..].trim();
+            if !v.is_empty() {
+                vpnip = Some(v.to_string());
+            }
+        }
+    }
+    (last_event, vpnip)
+}
+
+/// "20261005 10:12:41.091 TZ=-0700 [ipsec:INFO] ipsec_control:1196 <msg>" → "10:12:41  <msg>".
+fn summarize_log(line: &str) -> String {
+    let ts = line.split_whitespace().nth(1).unwrap_or("?");
+    let msg = line
+        .rsplit_once("ipsec_control:")
+        .map(|(_, rest)| rest.splitn(2, ' ').nth(1).unwrap_or(rest).trim())
+        .unwrap_or_else(|| line.trim());
+    format!("{ts}  {msg}")
+}
+
+fn iface_has_ip(ip: &str) -> bool {
+    Command::new("ifconfig")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(ip))
+        .unwrap_or(false)
+}
