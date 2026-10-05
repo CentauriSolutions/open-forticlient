@@ -3,10 +3,10 @@
 Goal: decrypt vpn.plist `AuthInfo` (and the `psk "Enc …"` in iked.conf) locally,
 so `oftc` can obtain the plaintext pre-shared key without an operator pasting it.
 
-**Status: algorithm identified; NOT yet reproduced bit-exactly.** Two
-known-plaintext validation sweeps did not converge, so the exact byte layout in
-`_derive_key`/`_fcrypt_init` still needs register-level tracing before a working
-implementation.
+**Status: DONE.** Fully reverse-engineered, validated against a known plaintext
+(the decrypted `AuthInfo` matches the real PSK, and the derived magic + HMAC both
+check out), and implemented in `client/src/fctcrypt.rs` (`decrypt_enc`). `oftc`
+now recovers the plaintext PSK straight from the profile with no operator setup.
 
 ## The big result: it is device-independent
 
@@ -46,40 +46,50 @@ HMAC-SHA1 1000× with a big-endian block counter (textbook **PBKDF2-HMAC-SHA1**)
 `_encr_data` increments a 16-byte counter and `_aes_encrypt_block`s it then XORs
 (**AES-CTR**), and the tag is **HMAC-SHA1 truncated to 10 bytes**.
 
-## Container layout (what the 68-byte `AuthInfo` blob is)
+## Container layout (what the blob is) — the byte order is salt-first
 
 ```
-[2-byte magic][salt][ciphertext][10-byte HMAC-SHA1]
+[salt][2-byte magic][ciphertext][10-byte HMAC-SHA1]
 ```
 
-- `magic` is *derived* from PBKDF2(key, salt) and re-checked on decrypt (format/
-  integrity gate), so it is not a fixed constant.
-- `ct` length == plaintext length (CTR is a stream), so for our 43-byte PSK:
-  `2 + salt(13) + ct(43) + 10 = 68`.
-- The AES key, the CTR counter seed, the HMAC key, and the magic are all carved
-  out of the PBKDF2 output (`_derive_key` → one buffer, sliced in `_fcrypt_init`).
+(The encrypt path writes the PRNG salt at the front, then the 2-byte magic, then
+the ciphertext, then the 10-byte tag.) `magic` is *derived* from PBKDF2(key,salt)
+and re-checked on decrypt, so it is not a fixed constant. `ct` length == plaintext
+length (CTR is a stream). For our 43-byte PSK the 68-byte `AuthInfo` blob is
+`salt(12) + magic(2) + ct(43) + mac(10) = 67`… note the ciphertext is actually 44
+here because the stored plaintext is 44 bytes; the first 43 are the PSK.
 
-## What still needs pinning (the open RE)
+## Exact parameters (validated)
 
-Two sweeps over `{saltlen, AES-128/256, derive-offset, counter-start/endianness,
-pre-increment}` vs the known plaintext did **not** match, so at least one of these
-differs from the textbook guess and must be read from the asm exactly:
+`cat` is chosen from the key length (iked `_do_encrypt_decrypt_buffer`): keylen
+`<8`→error, `8..31`→1, `32..47`→2, `48..128`→3. The hardcoded KEY is 38 bytes →
+**cat = 2**, giving:
 
-1. `_derive_key` dklen and whether the salt is passed verbatim or formatted.
-2. The slice offsets in `_fcrypt_init` (AES key vs CTR seed vs HMAC key vs magic)
-   and the AES key size (the `8 + 8·cat` / `4 + 4·cat` sizing from `cat`).
-3. The exact CTR counter init + increment (the code forces a regen on the first
-   byte via `ctx+0x1c8 = 0x10`, incrementing the low 8 bytes little-endian).
+| quantity | formula (cat) | cat=2 value |
+|---|---|---|
+| salt length | `4 + 4·cat` | 12 bytes |
+| AES key bytes | `8 + 8·cat` | 24 → **AES-192** |
+| derived length | `2·aeslen + 2` | 50 bytes |
 
-Addresses (thinned x86_64 iked): `_enc_dec_str`, `_do_encrypt_decrypt_buffer`,
-`_fcrypt_init`, `_derive_key`, `_encr_data`, `_fcrypt_end` — all resolvable by
-name in `otool -tV`.
+`D = PBKDF2-HMAC-SHA1(KEY, salt, iters=1000, dkLen=50)`, then:
 
-## Implementation note (when reproduced)
+- AES key   = `D[0 .. 24]`
+- HMAC key  = `D[24 .. 48]`
+- magic     = `D[48 .. 50]`  (must equal the blob's 2 magic bytes)
+- cipher    = **AES-192-CTR**, 16-byte counter block = `u64_LE(counter) ‖ 8 zero`,
+  counter starts at 0 and is **incremented before each block** (so blocks use
+  counter = 1, 2, 3, …), keystream ⊕ ciphertext.
+- MAC       = `HMAC-SHA1(HMAC_key, ciphertext)[0 .. 10]` (verified on decrypt).
 
-Decryption is `PBKDF2-HMAC-SHA1 → AES-CTR ⊕ → verify HMAC-SHA1/10`. A std-only
-build has none of these; options are the RustCrypto crates (`pbkdf2`, `hmac`,
-`sha1`, `aes`, `ctr`) — clean but breaks the zero-dependency goal — or shelling
-to `openssl`. Wire the result into `oftc install`: decrypt `AuthInfo` once, write
-the plaintext to `~/.config/oftc/psk` (0600). Fragile across FortiClient releases
-(the salt/KDF/key could change), so keep the `$FORTIGATE_PSK` path as a fallback.
+Addresses (thinned x86_64 iked, all resolvable by name in `otool -tV`):
+`_enc_dec_str`, `_do_encrypt_decrypt_buffer`, `_fcrypt_init`, `_derive_key`,
+`_encr_data`, `_fcrypt_end`.
+
+## Implementation
+
+`client/src/fctcrypt.rs` implements SHA-1 / HMAC-SHA1 / PBKDF2-HMAC-SHA1 in pure
+Rust (RFC test vectors in-module) and shells `openssl enc -aes-192-ecb` for the
+CTR keystream (consistent with `tls.rs`). `profile.rs` calls `decrypt_enc` on the
+profile's `AuthInfo` whenever no `$FORTIGATE_PSK`/`.env`/`~/.config/oftc/psk`
+override is set, so a configured machine needs **zero** PSK setup. The override
+path remains as an escape hatch.

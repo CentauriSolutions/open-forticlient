@@ -10,6 +10,7 @@
 mod connect;
 mod control;
 mod doctor;
+mod fctcrypt;
 mod profile;
 mod proto;
 mod saml;

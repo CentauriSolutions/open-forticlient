@@ -76,10 +76,15 @@ pub fn doctor(args: &[String]) -> Result<(), Box<dyn Error>> {
         path_exists(crate::proto::MAIN_SOCKET),
         crate::proto::MAIN_SOCKET,
     );
+    // A PSK is available if the operator set one, OR we can decrypt the profile's
+    // own AuthInfo (FortiClient's Enc uses a hardcoded key — see fctcrypt.rs).
+    let psk_ok = crate::profile::Profile::load(&crate::profile::resolve_profile(None))
+        .map(|p| p.psk_is_plaintext)
+        .unwrap_or(false);
     check(
-        "plaintext PSK configured",
-        crate::profile::plaintext_psk_override().is_some(),
-        "set $FORTIGATE_PSK, a .env FORTIGATE_PSK=…, or ~/.config/oftc/psk",
+        "PSK available (override or decrypted from AuthInfo)",
+        psk_ok,
+        "no $FORTIGATE_PSK/.env/~/.config/oftc/psk and AuthInfo could not be decrypted",
     );
 
     let uid = console_uid();
@@ -94,13 +99,18 @@ pub fn doctor(args: &[String]) -> Result<(), Box<dyn Error>> {
 
     // 3. FortiTray — the lock-disconnect culprit.
     println!();
-    if !proc_running("FortiTray") {
-        println!("[ ok ] FortiTray is not running — the lock teardown is already neutralized.");
-        println!("       If it returns after login/reboot, re-run `oftc doctor`.");
+    if tray_neutralized(&uid) {
+        println!("[ ok ] FortiTray is stopped and its launch agents are disabled — the lock");
+        println!("       teardown is neutralized and stays that way across login/reboot.");
         return Ok(());
     }
 
-    println!("[WARN] FortiTray is RUNNING. It DISCONNECTs the VPN on every screen lock.");
+    if proc_running("FortiTray") {
+        println!("[WARN] FortiTray is RUNNING. It DISCONNECTs the VPN on every screen lock.");
+    } else {
+        println!("[WARN] FortiTray isn't running, but its launch agents aren't disabled, so it");
+        println!("       will come back at next login and DISCONNECT the VPN on screen lock.");
+    }
     println!("       To use oftc as the keep-alive client, disable it. This stops FortiTray");
     println!("       and disables its two launch agents ({}),", TRAY_AGENTS.join(", "));
     println!("       and leaves fctctld/iked — the VPN engine oftc drives — untouched.");
@@ -141,6 +151,35 @@ fn restore_tray(dry: bool) -> Result<(), Box<dyn Error>> {
     println!("[ ok ] Re-enabled FortiTray's launch agents. FortiTray starts on next login");
     println!("       (or launch FortiClient now). Note: the stock lock-disconnect behavior returns.");
     Ok(())
+}
+
+/// True when `disable_script` has already taken effect: FortiTray isn't running
+/// and both tray agents are disabled and unloaded. All of this is readable
+/// without root, so callers can skip the admin prompt.
+fn tray_neutralized(uid: &str) -> bool {
+    if proc_running("FortiTray") || proc_running("FCTLauncher") {
+        return false;
+    }
+    let Some(disabled) = run_trimmed("launchctl", &["print-disabled", &format!("gui/{uid}")]) else {
+        return false;
+    };
+    TRAY_AGENTS.iter().all(|label| {
+        agent_disabled(&disabled, label)
+            && !Command::new("launchctl")
+                .args(["print", &format!("gui/{uid}/{label}")])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+    })
+}
+
+/// Whether `launchctl print-disabled` output lists `label` as `=> disabled`.
+fn agent_disabled(print_disabled: &str, label: &str) -> bool {
+    let quoted = format!("\"{label}\"");
+    print_disabled.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with(&quoted) && l.ends_with("=> disabled")
+    })
 }
 
 /// The root shell script that stops FortiTray and disables its launch agents.
@@ -328,10 +367,9 @@ fn ensure_psk_file() -> Result<(), Box<dyn Error>> {
             println!("  stored PSK at {path} (0600) for the background agent");
         }
         None => {
-            eprintln!(
-                "  warning: no plaintext PSK found. Put the FortiGate psksecret in {path} \
-                 (chmod 600) before `oftc up`, or export $FORTIGATE_PSK."
-            );
+            // No operator override — that's fine: oftc decrypts the profile's
+            // own AuthInfo at runtime (fctcrypt), so the agent needs nothing.
+            println!("  PSK: will be decrypted from the profile's AuthInfo at run time");
         }
     }
     Ok(())
@@ -380,6 +418,8 @@ pub fn install(args: &[String]) -> Result<(), Box<dyn Error>> {
     // 6. neutralize FortiTray (root) unless asked to keep it.
     if keep_tray {
         println!("  (left FortiTray as-is; --keep-tray). It will still drop the VPN on lock.");
+    } else if tray_neutralized(&uid) {
+        println!("  FortiTray already disabled — skipping the admin step.");
     } else {
         println!("  disabling FortiTray so it can't DISCONNECT on lock (needs admin)…");
         run_privileged(
@@ -454,4 +494,17 @@ pub fn uninstall(args: &[String]) -> Result<(), Box<dyn Error>> {
         println!("Kept {} (use --purge to remove).", psk_path());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_print_disabled() {
+        let out = "disabled services = {\n\t\t\"com.fortinet.forticlient.fortitray\" => enabled\n\t\t\"com.fortinet.fct_launcher\" => disabled\n\t\t\"com.fortinet.fortiagent\" => enabled\n\t}";
+        assert!(agent_disabled(out, "com.fortinet.fct_launcher"));
+        assert!(!agent_disabled(out, "com.fortinet.fortiagent"));
+        assert!(!agent_disabled(out, "com.fortinet.missing"));
+    }
 }

@@ -122,6 +122,6 @@ login and there is no silent reconnect after the SA is lost.
 
 `build-connect --with-psk` writes the pre-shared key into the output file. That
 file (and `*.bin` generally) is git-ignored; never commit it. The SAML `tokenid`
-is single-use and is never written to disk. The plaintext PSK is read from
+is single-use and is never written to disk. By default oftc **decrypts the PSK from the profile's own `AuthInfo`** (FortiClient's `Enc` format uses a key hardcoded in its binaries — see `../docs/fct-enc-crypto.md`), so a configured machine needs no PSK setup at all. As an override, the plaintext PSK is read from
 `$FORTIGATE_PSK`, a git-ignored `.env` (`FORTIGATE_PSK=…`), or `~/.config/oftc/psk`
 (0600, where `oftc install` stores it for the agent) — never from the repo.

@@ -238,7 +238,17 @@ impl Profile {
         // key → gateway AUTH/EAP fails (the -309 we chased). The operator
         // supplies the plaintext out-of-band via `$OFTC_PSK` or
         // `~/.config/oftc/psk`, so the secret never lives in the repo.
-        p.psk = plaintext_psk_override().unwrap_or_default();
+        // Prefer an operator-supplied plaintext PSK; otherwise decrypt the
+        // profile's own `AuthInfo` (the `Enc …` blob) — FortiClient's encryption
+        // uses a key hardcoded in its binaries, so this works locally with no
+        // root or prompt (see fctcrypt.rs / docs/fct-enc-crypto.md). That means
+        // a correctly-configured machine needs zero PSK setup.
+        p.psk = plaintext_psk_override()
+            .or_else(|| {
+                plutil_extract(VPN_PLIST, &format!("{base}.AuthInfo"))
+                    .and_then(|enc| crate::fctcrypt::decrypt_enc(&enc))
+            })
+            .unwrap_or_default();
         p.psk_is_plaintext = !p.psk.is_empty();
         // EAP identity: the FortiClient UID (hardware UUID, dashes stripped).
         p.uid = fct_uid().unwrap_or_default();
