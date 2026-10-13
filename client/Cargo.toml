@@ -2,22 +2,16 @@
 name = "oftc"
 version = "0.1.0"
 edition = "2021"
-description = "Minimal open client that keeps a FortiGate IPsec IKEv2 + SAML VPN up across screen lock"
+description = "CLI for the OFTC macOS IKEv2 and SAML VPN client"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/…/open-forticlient"
 publish = false
 
 [[bin]]
 name = "oftc"
 path = "src/main.rs"
 
-# Intentionally ZERO dependencies for now (std only). See README.md "Dependencies"
-# for the nom / bytes / clap / plist decision and when to add each.
 [dependencies]
 
-# Small, self-contained release binary. (True static linking is not possible on
-# macOS — libSystem is always dynamic — but this yields one binary with no extra
-# dynamic deps beyond the system libraries; see README.md.)
 [profile.release]
 opt-level = "z"
 lto = true

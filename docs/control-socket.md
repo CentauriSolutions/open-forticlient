@@ -1,5 +1,8 @@
 # The `vpn_control` control-socket protocol
 
+Historical Fortinet-backed controller research. The current OFTC client does
+not use this socket; its source is in Git commit `b9ade25`.
+
 How FortiTray (and its embedded `libipsec`) drives the privileged daemon
 `fctctld`, which in turn runs `iked`/`racoon`. Reverse-engineered from
 `FortiTray`'s `libipsec.c`/`vpn_control_cli.c` code and `fctctld`'s

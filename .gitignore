@@ -12,6 +12,8 @@ test_uid
 
 # Rust client build output and any assembled CONNECT bodies (may hold the PSK)
 client/target/
+app/build/
+app/core/modp14/target/
 *.bin
 connect-body.bin
 

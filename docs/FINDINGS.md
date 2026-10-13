@@ -1,5 +1,9 @@
 # Findings: why the tunnel drops on lock, and how the client is built
 
+Historical Fortinet-backed analysis; the current client is described in
+[architecture.md](architecture.md). The referenced controller source is in Git
+commit `b9ade25`.
+
 Captured from FortiClient `7.4.3.4323` on macOS 26 (Apple Silicon), March 2026 build.
 
 ## 1. Root cause: the client disconnects itself on screen lock
@@ -184,7 +188,7 @@ or survived — you cannot rely on it. Screen *lock* (no suspend) always survive
 that is the §C win and is unaffected.
 
 So the client must reconnect itself on wake. `oftc connect --supervise`
-(`client/src/main.rs`) does it **in-process**: on the `STATUS 3` it re-runs the
+(`b9ade25:client/src/main.rs`) does it **in-process**: on the `STATUS 3` it re-runs the
 whole SSO→CONNECT flow with exponential backoff (2s→20s, reset after a healthy
 session), re-establishing phase2 with a fresh single-use token. One process spans
 the entire drop→reconnect, so there is no window where nothing holds the socket.
@@ -199,6 +203,26 @@ semaphore`, with the job sitting `not running` indefinitely. The LaunchAgent now
 runs `connect --supervise` with `KeepAlive=false`; launchd only loads the job
 (`oftc up` starts it, `oftc down` boots it out), and reconnection is entirely the
 process's own job.
+
+### 7b. Awake drops: a path stall plus an iked DPD bug ([Issue 11](../Issues/011-survive-path-stalls-iked-dpd-bug.md))
+
+The tunnel also drops while the Mac is awake, every few minutes to few hours,
+always with `racoon error report: -306`. This predates the reconnect watchdog. The
+trigger is a stall in the ESP/IKE-in-TCP-4443 stream: round trips go from ~15 ms
+to 14–21 s. iked's client DPD (`dpd_check_interval 20`, hard-coded by `fctctld`
+whenever CONNECT `dpd_enabled` is set) gives a probe ~20 s before freeing the SA.
+
+That 14 s latency is fatal only because of a bug in iked. INFORMATIONAL
+responses are accepted without matching the outstanding request, gated only by a
+"pending" flag, and processing one clears the flag unconditionally. Over TCP,
+every retransmit produces a duplicate response. A late duplicate of the
+*previous* probe's reply consumed the flag, and the current probe's real replies
+were then silently dropped, although they arrived inside the deadline.
+
+The interval can't be lengthened: it is 20 or 0. The client-side fix is to
+disable client DPD (CONNECT `dpd_enabled = 0` gives `set dpd_check_interval 0`)
+and do our own, more tolerant liveness check. Addresses and the full trace are
+in Issue 11.
 
 ## 8. IKE identity confirmed from this build's `iked`
 

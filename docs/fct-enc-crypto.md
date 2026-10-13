@@ -1,12 +1,16 @@
 # FortiClient `Enc ` string crypto (reverse engineering)
 
+Historical Fortinet-backed analysis; the current client is described in
+[architecture.md](architecture.md). The referenced controller source is in Git
+commit `b9ade25`.
+
 Goal: decrypt vpn.plist `AuthInfo` (and the `psk "Enc …"` in iked.conf) locally,
 so `oftc` can obtain the plaintext pre-shared key without an operator pasting it.
 
 **Status: DONE.** Fully reverse-engineered, validated against a known plaintext
 (the decrypted `AuthInfo` matches the real PSK, and the derived magic + HMAC both
-check out), and implemented in `client/src/fctcrypt.rs` (`decrypt_enc`). `oftc`
-now recovers the plaintext PSK straight from the profile with no operator setup.
+check out), and implemented in `app/migration/fctcrypt.rs` (`decrypt_enc`). Current
+OFTC uses it only for an explicit one-time profile import into Keychain.
 
 ## The big result: it is device-independent
 
@@ -87,7 +91,7 @@ Addresses (thinned x86_64 iked, all resolvable by name in `otool -tV`):
 
 ## Implementation
 
-`client/src/fctcrypt.rs` implements SHA-1 / HMAC-SHA1 / PBKDF2-HMAC-SHA1 in pure
+`b9ade25:client/src/fctcrypt.rs` implements SHA-1 / HMAC-SHA1 / PBKDF2-HMAC-SHA1 in pure
 Rust (RFC test vectors in-module) and shells `openssl enc -aes-192-ecb` for the
 CTR keystream (consistent with `tls.rs`). `profile.rs` calls `decrypt_enc` on the
 profile's `AuthInfo` whenever no `$FORTIGATE_PSK`/`.env`/`~/.config/oftc/psk`

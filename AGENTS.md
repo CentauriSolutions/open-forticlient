@@ -4,10 +4,12 @@ Guidance for anyone (human or agent) working in this repo.
 
 ## What this project is
 
-Research toward a minimal open macOS client for a **FortiGate IPsec IKEv2 + SAML**
-VPN, because the official free FortiClient 7.4.3 tears the tunnel down on every
-screen lock. Start with [README.md](README.md) and [docs/](docs/); the current
-plan of record is [docs/ROADMAP.md](docs/ROADMAP.md).
+OFTC is a standalone macOS **FortiGate IPsec IKEv2 + SAML** client. The active
+app, provider, engine, and CLI are in [app/](app/) and [client/](client/).
+The former Fortinet-backed controller and experiment source are preserved in
+Git commit `b9ade25`, not in the active source tree. Start with
+[README.md](README.md), [docs/architecture.md](docs/architecture.md), and
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Issue tracking: the `Issues/` directory
 
@@ -81,12 +83,17 @@ ls Issues/ | sed -E 's/^0*([0-9]+).*/\1/' | sort -n | tail -1
 
 ## Working style for this repo
 
-- **Prefer the cheapest fix.** The roadmap is ordered so a zero-code or
-  server-side fix (Issues 1, 2) is validated before building a client.
+- **Build from active sources.** `app/build.sh` must use `app/` inputs only.
+  Use a fresh build directory; do not point a build at an installed or
+  notarized app.
+- **Keep evidence levels distinct.** Offline build, Developer ID signing,
+  notarization, installation, extension activation, and live traffic are
+  separate claims. The initial rollout gaps are in
+  [docs/initial-rollout-gaps.md](docs/initial-rollout-gaps.md).
 - **No secrets in the repo.** SAML `tokenid`s are single-use credentials; they and
   raw captures are covered by `.gitignore` and must never be committed. Large
-  reverse-engineering dumps (`*.asm`, `strings`) are regenerable and also ignored —
-  see [tools/README.md](tools/README.md).
+  reverse-engineering dumps (`*.asm`, `strings`) are regenerable and also ignored.
+  The former research tools are in Git commit `b9ade25`.
 - **This is interoperability for the machine's own operator** (the legitimate VPN
   user and FortiGate admin). The replacement performs the same authentication the
   official client does; it changes reconnection behavior, not access control.

@@ -5,6 +5,10 @@ replacement must reproduce for the FortiGate to accept it as a FortiClient. All
 numeric tables below were dumped from the daemon's own name-map arrays
 (`_ikev2_n_map`, `_ikev2_cfg_map`, `_ikev2_exchange_map`, etc.).
 
+This is historical protocol analysis. The standalone OFTC provider passed
+authenticated traffic without Fortinet's private license notify; see
+[Issue 3](../Issues/003-does-free-tier-require-forticlient-connect.md).
+
 ## Vendor IDs (IKE_SA_INIT)
 
 `ikev2_init_ike_sa_peer` sends **three 16-byte vendor IDs** (each built with
@@ -52,20 +56,16 @@ writes `0x00f1` → wire **0xF100**; `client_resume` passes `0xf118` straight to
 
 `ikev2_add_forticlient_connect` calls `LicGenRawLicenseInfo2(g_fct_user,
 g_fct_reg_status, g_fct_emssn, g_fct_ems_tenant_id, …)` and ships the result as
-the notify data, prefixed with a 2-byte `0x00F1`-family tag. **Open question:**
-does the gateway *require* a valid `FORTICLIENT_CONNECT` for the free
-(unregistered) tier, or does it accept EAP auth without it? If it's required,
-a non-FortiClient IKE stack (strongSwan) may be rejected and we must either
-reproduce the (free-tier) license blob or reuse Fortinet's `iked` (ROADMAP §C).
-The string `Forticlient Connect License` / `FORTICLIENT_CONNECT` sits right next
-to the free-client checks, so this needs a live test.
+the notify data, prefixed with a 2-byte `0x00F1`-family tag. The live
+standalone provider later established authenticated traffic without it on the
+tested gateway; the private notify was not required for that path.
 
 Confirmed in this build: `ikev2_add_forticlient_connect` is called from **both**
 `ikev2_init_ike_sa_peer` (IKE_SA_INIT) and `ikev2_init_ike_auth` (IKE_AUTH), and
 its payload is `LicGenRawLicenseInfo2(g_fct_user, g_fct_reg_status, g_fct_emssn,
 g_fct_ems_tenant_id, …)` tagged with the 2-byte `0x00f1` family word. So a stock
-strongSwan IKE_AUTH (§B) would omit it; whether this gateway rejects that is the
-open blocker in Issue 3 and the §B-vs-§C decision point.
+strongSwan IKE_AUTH would also omit it. Gateway acceptance is recorded in
+[Issue 3](../Issues/003-does-free-tier-require-forticlient-connect.md).
 
 ### `CLIENT_RESUME` (0xF118) + `IKE_SESSION_RESUME`
 
@@ -91,12 +91,20 @@ Matches the known strongSwan↔FortiGate recipe:
   sends its `AUTH` with `SHARED_KEY_MIC` (auth method 2).
 - **Local (client) auth = EAP** — when `fct_use_eap()` is true (the SAML token is
   set as the EAP password), the client sends **no `AUTH` payload** in its first
-  `IKE_AUTH` and authenticates via EAP. Identity = SAML `username`,
-  password/OTP = SAML `tokenid`.
+  `IKE_AUTH` and authenticates via EAP. On the working connection, EAP identity
+  equals the device `UID` sent to `/saml_login`, not the callback `username`;
+  password/OTP = SAML `tokenid` (Issue 6, Phase 2 live validation).
 - EAP methods compiled in (`_eap_type_map`): the full wpa_supplicant set incl.
   `GTC(6)`, `MSCHAP_V2(26)`, `PEAP(25)`, `TTLS(21)`, `TLS(13)`, `OTP(5)`. The
-  SAML-token flow uses the token as an OTP-style password; the exact method is
-  gateway-chosen (capture from a live EAP exchange to confirm — likely GTC).
+  SAML-token flow feeds the token as the EAP password. A no-SSO standalone
+  exchange using the FortiClient UID received **EAP-MSCHAPv2 (IETF vendor 0,
+  type 26)** after EAP Identity on both UDP 4500 and TCP 4443. No expanded vendor field was
+  present. [Microsoft's wire specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-chap/6cdfa42c-173a-4780-80e1-8872abdeaa30)
+  uses type `0x1A` for this method; the [IANA registry](https://www.iana.org/assignments/eap-numbers)
+  currently labels type 26 differently. An additional authorized UDP probe
+  confirmed inner opcode 1 (Challenge) and a 16-byte challenge, without
+  logging challenge bytes. The token-bearing exchange remains untested
+  (Issue 14).
 
 ## Config (mode-config) attributes requested
 

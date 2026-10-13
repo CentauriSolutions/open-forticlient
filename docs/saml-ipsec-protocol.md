@@ -5,9 +5,9 @@ How FortiClient turns a browser SAML/SSO login into IKEv2 credentials. Reverse
 `SamlVpnConnect`) and `iked`, and confirmed against the live gateway for the
 first step.
 
-This is the Fortinet-private scheme that no open-source client implements today
-(openfortivpn is SSL-only; strongSwan/libreswan do FortiGate IPsec but not this
-SAML binding). Reproducing it is the core of the project.
+This was the Fortinet-private binding that the standalone OFTC client now
+implements. This document records how it was discovered; see
+[architecture](architecture.md) for the active implementation.
 
 ## Players
 
@@ -16,7 +16,7 @@ SAML binding). Reproducing it is the core of the project.
   the gateway to redirect back to that port.
 - **Gateway** — FortiGate, SAML port `9443` (profile `IKESamlPort`).
 - **Browser** — the user's default browser; does the actual IdP SSO.
-- **iked** — consumes the resulting username + token as EAP credentials.
+- **iked** — consumes the bootstrap UID and resulting token as EAP credentials.
 
 ## Step by step
 
@@ -42,9 +42,9 @@ FortiTray                         Gateway (:9443)                 Browser / IdP
     |<================= (browser hits our loopback server) =============|
     |                                   |                               |
     | 6. FortiTray extracts tokenid + username                          |
-    |    -> hands them to iked as EAP identity + EAP password (OTP)     |
+    |    -> gives iked bootstrap UID as EAP identity, token as password |
     |                                   |                               |
-    | 7. iked runs IKEv2 + EAP against <gw>:4500 (see ike-dialect.md)   |
+    | 7. iked runs IKEv2 + EAP over UDP 4500, with TCP 4443 fallback   |
 ```
 
 ### Step 1 — bootstrap request (reproducible)
@@ -65,8 +65,9 @@ The gateway responds with an HTML page whose only content is a JS redirect to
 > `REDIRECT_PORT` returns exactly this `window.location="…/saml?<id>"` page. The
 > raw `/saml?<id>` endpoint then drives the SAML flow in a browser.
 
-See `tools/saml_catch.py` for a listener that stands in for FortiTray's loopback
-server, and `tools/README.md` for the (consent-gated) end-to-end probe recipe.
+The historical loopback listener and probe recipe are available with
+`git show b9ade25:tools/saml_catch.py` and
+`git show b9ade25:tools/README.md`.
 
 ### Step 5/6 — the callback
 
@@ -88,7 +89,9 @@ in this repo stores it.
 
 ### Step 7 — into IKE
 
-- `username` → EAP identity.
+- The `UID` in the `/saml_login` bootstrap → EAP identity. Live FortiGate
+  diagnostics showed its SAML auth cache is keyed by that UID; using the callback
+  `username` as EAP identity failed. See Issue 6's Phase 2 live validation.
 - `tokenid` → EAP password / OTP. In `iked` this is `g_fct_eap_password`; the
   helper `fct_use_eap()` simply returns "is the eap password set?", and when true
   the client authenticates with **EAP only** (it omits its own `AUTH` payload and
