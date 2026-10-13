@@ -303,3 +303,21 @@ mod tests {
         assert_eq!(p.psk, "deadbeef");
     }
 }
+
+/// The address fctctld will actually dial for `server`, if it will be IPv6.
+///
+/// fctctld's `_resolv_addr` calls getaddrinfo(name, NULL, AF_UNSPEC,
+/// SOCK_STREAM) and takes the first IPv4-or-IPv6 answer; std's resolver makes
+/// the same call, so the first result here is what it will use. On an
+/// IPv6-only network with NAT64/DNS64 (e.g. T-Mobile tethering, where the Mac's
+/// IPv4 is a 464XLAT shim) that is a synthesized v6 address, even for an IPv4
+/// literal, and FortiClient 7.4.3 can't use it: `fct_tunnel_ctl` dies with "Bad
+/// file descriptor" right after IKE_SA_INIT and iked reports -307. Every such
+/// attempt would burn a single-use SSO token, so callers check this first.
+pub fn ipv6_gateway(server: &str) -> Option<std::net::Ipv6Addr> {
+    use std::net::{IpAddr, ToSocketAddrs};
+    match (server, 0).to_socket_addrs().ok()?.next()?.ip() {
+        IpAddr::V6(a) => Some(a),
+        IpAddr::V4(_) => None,
+    }
+}

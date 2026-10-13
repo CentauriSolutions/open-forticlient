@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>Gate0Provider</string>
+    <key>CFBundleIdentifier</key><string>com.chris.openforticlient.gate0.provider</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>OFTC Gate 0 Provider</string>
+    <key>CFBundlePackageType</key><string>SYSX</string>
+    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>Runs a local, single-route packet-tunnel test without connecting to a VPN.</string>
+    <key>NetworkExtension</key><dict>
+        <key>NEProviderClasses</key><dict>
+            <key>com.apple.networkextension.packet-tunnel</key>
+            <string>Gate0Provider.PacketTunnelProvider</string>
+        </dict>
+    </dict>
+</dict></plist>

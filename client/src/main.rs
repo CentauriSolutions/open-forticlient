@@ -11,15 +11,22 @@ mod connect;
 mod control;
 mod doctor;
 mod fctcrypt;
+mod log;
+mod presence;
 mod profile;
 mod proto;
 mod saml;
+mod standalone;
+mod state;
 mod tls;
 
 use std::error::Error;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::log::log;
+use crate::state::{Phase, State};
 
 fn usage() -> ! {
     eprintln!(
@@ -89,16 +96,19 @@ USAGE:
     oftc dump-profile [--profile NAME]
         Print the profile's fields with Enc values redacted + classified
         (PSK-like / saved-username / email-like). Safe to share for diagnosis.
+
+    oftc standalone [--app PATH] COMMAND [OPTIONS]
+        Use the signed OFTC app and packet-tunnel provider instead of Fortinet's
+        fctctld/iked. Run `oftc standalone help` for setup and commands.
 ",
         main = proto::MAIN_SOCKET
     );
     std::process::exit(2);
 }
 
-/// Mask a secret for display (length + short prefix), like saml_catch.py.
+/// Show only a secret's length; even a prefix does not belong in persistent logs.
 fn mask(s: &str) -> String {
-    let prefix: String = s.chars().take(4).collect();
-    format!("<{} chars, starts {:?}>", s.len(), prefix)
+    format!("<{} chars>", s.len())
 }
 
 fn saml_config(p: &profile::Profile, args: &[String]) -> saml::SamlConfig {
@@ -143,6 +153,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("show-psk") => doctor::show_psk(&args),
         Some("status") => doctor::status(&args),
         Some("dump-profile") => doctor::dump_profile(&args),
+        Some("standalone") => standalone::run(&args[1..]),
         _ => usage(),
     }
 }
@@ -334,15 +345,27 @@ fn cmd_connect(args: &[String]) -> Result<(), Box<dyn Error>> {
     if has_flag(args, "--supervise") {
         return supervise(&p, args);
     }
-    connect_once(&p, args)
+    connect_once(&p, args, &mut |_| {})?.result
 }
 
 /// One full bring-up attempt: SAML -> CONNECT -> hold the socket until the
-/// session ends (clean DISCONNECT, daemon close, or STATUS 3 error).
-fn connect_once(p: &profile::Profile, args: &[String]) -> Result<(), Box<dyn Error>> {
+/// session ends (clean DISCONNECT, daemon close, or STATUS 3 error). `Err` means
+/// SAML failed and nothing was sent to the daemon. `phase` reports progress.
+fn connect_once(
+    p: &profile::Profile,
+    args: &[String],
+    phase: &mut dyn FnMut(Phase),
+) -> Result<control::SessionEnd, Box<dyn Error>> {
+    // 0. Don't spend an SSO on a network FortiClient can't connect over.
+    if let Some(addr) = profile::ipv6_gateway(&p.server) {
+        return Err(Box::new(Ipv6OnlyNetwork(addr)));
+    }
+
     // 1. SAML -> (username, tokenid). Fresh every call: the tokenid is single-use.
+    phase(Phase::SigningIn);
     let creds = saml::obtain(&saml_config(p, args))?;
-    eprintln!("SAML OK: username={} tokenid={}", creds.username, mask(&creds.tokenid));
+    log!("SAML OK: username={} tokenid={}", creds.username, mask(&creds.tokenid));
+    phase(Phase::Connecting);
 
     // 2-3. CONNECT -> (delay) push OTP over the socket (iked needs the token in
     // g_fct_eap_password before the EAP step) -> hold socket open; never
@@ -354,39 +377,179 @@ fn connect_once(p: &profile::Profile, args: &[String]) -> Result<(), Box<dyn Err
             arg_val(args, "--otp-delay").and_then(|s| s.parse().ok()).unwrap_or(2),
         ),
     };
-    control::run(p, &creds, &opts)
+    Ok(control::run(p, &creds, &opts, &mut || phase(Phase::Up)))
 }
+
+/// fctctld would dial the gateway over IPv6 (NAT64 network), which FortiClient
+/// can't do; see `profile::ipv6_gateway`.
+#[derive(Debug)]
+struct Ipv6OnlyNetwork(std::net::Ipv6Addr);
+
+impl std::fmt::Display for Ipv6OnlyNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this network reaches the gateway only over IPv6 ({}), likely NAT64 (e.g. phone \
+             tethering), and FortiClient's IPv6 transport fails here; not starting SSO. Use a \
+             network with native IPv4 (Wi-Fi, or set the hotspot's APN protocol to IPv4/IPv6)",
+            self.0
+        )
+    }
+}
+
+impl Error for Ipv6OnlyNetwork {}
 
 /// Supervise a persistent session: reconnect forever, backing off so a hard
 /// failure (gateway down, no network on wake) doesn't spin or spam SSO windows.
 /// Runs until the process is killed (e.g. `oftc down` boots the agent out, which
 /// SIGTERMs us). Never returns Ok — only an unrecoverable setup error escapes.
+///
+/// An SSO is only started when someone is at the keyboard (unlocked + recent
+/// input); otherwise we wait for them. Retrying SSO on a timer while they're
+/// away just stacks up dead tabs (one every ~5 min overnight). Then, by how the
+/// attempt ended:
+///   - tunnel was up for >= HEALTHY, then dropped: a fresh incident, so retry
+///     after MIN_BACKOFF.
+///   - SSO tab opened but nobody completed it: retry right away (subject to
+///     the presence gate).
+///   - SSO worked but the tunnel never came up: each retry costs an SSO, so
+///     back off up to 5 minutes (`bringup_backoff`) and notify once.
+///   - anything else (offline, gateway unreachable, quick flap): exponential
+///     backoff up to MAX_BACKOFF.
+///
+/// Progress goes to the state file (`oftc status`) and, for the transitions a
+/// user cares about (dropped / back up / needs sign-in), a macOS notification.
 fn supervise(p: &profile::Profile, args: &[String]) -> Result<(), Box<dyn Error>> {
     const MIN_BACKOFF: Duration = Duration::from_secs(2);
     // Cap kept short so recovery after a *sustained* outage is snappy: once the
-    // network is back, the next retry is at most this far off. The common case
-    // (wake from suspend, network already up) succeeds on the first MIN_BACKOFF
-    // retry and never climbs. Offline retries are cheap and open no browser
-    // (the bootstrap POST fails before the SSO tab), so a short cap costs little.
+    // network is back, the next retry is at most this far off. Offline retries
+    // are cheap and open no browser (the bootstrap POST fails before the SSO
+    // tab), so a short cap costs little.
     const MAX_BACKOFF: Duration = Duration::from_secs(20);
-    // A session that stayed up at least this long counts as "healthy": the next
-    // drop is treated as a fresh incident, so we recover fast instead of carrying
-    // a grown backoff from an earlier flap.
+    // Tunnel uptime that counts as "healthy": the next drop is a fresh incident,
+    // so we recover fast instead of carrying a grown backoff from a flap. Only
+    // time with the tunnel actually up counts, not time spent waiting on SSO.
     const HEALTHY: Duration = Duration::from_secs(30);
 
+    let mut st = State::new();
+    // When the tunnel last went down, for the "reconnected" notification.
+    let mut down_since: Option<i64> = None;
     let mut backoff = MIN_BACKOFF;
-    eprintln!("supervising: will re-SSO and reconnect after any drop (Ctrl-C / `oftc down` to stop).");
+    // Consecutive attempts where SSO succeeded but the tunnel never came up.
+    let mut failed_bringups: u32 = 0;
+    log!("supervising: will re-SSO and reconnect after any drop (Ctrl-C / `oftc down` to stop).");
     loop {
-        let started = Instant::now();
-        match connect_once(p, args) {
-            Ok(()) => eprintln!("session ended (daemon closed the socket); reconnecting…"),
-            Err(e) => eprintln!("session ended: {e}; reconnecting…"),
-        }
-        if started.elapsed() >= HEALTHY {
+        // Only start an SSO when someone can answer it. With the screen locked
+        // or nobody touching the machine (incl. lid-closed DarkWakes) a tab just
+        // times out unseen, and retrying on a timer stacks up dead tabs. Wait,
+        // then reconnect the moment they're back.
+        if !presence::user_present() {
+            log!("nobody at the keyboard (screen locked or idle); will reconnect when you're back…");
+            st.set(Phase::WaitingForUser);
+            presence::wait_for_user();
+            log!("you're back — reconnecting");
+            if down_since.is_some() {
+                state::notify("VPN dropped while you were away", "Reconnecting — sign in if your browser asks.");
+            }
             backoff = MIN_BACKOFF;
         }
-        eprintln!("   waiting {}s, then re-running SSO…", backoff.as_secs());
+        let attempt = connect_once(p, args, &mut |ph| {
+            st.set(ph);
+            if ph == Phase::Up {
+                match down_since.take() {
+                    Some(t) => state::notify(
+                        "VPN reconnected",
+                        &format!("Back up after {} down.", state::human_duration(log::now_secs() - t)),
+                    ),
+                    None => state::notify("VPN connected", &p.server),
+                }
+            }
+        });
+        match attempt {
+            Err(e) if matches!(e.downcast_ref(), Some(saml::SamlError::Timeout)) => {
+                // Nobody finished the sign-in. If they've since walked away the
+                // presence gate above parks us; if they're still here, open a
+                // fresh tab (the old one's token request may have expired) and
+                // say why.
+                log!("SSO was not completed in time");
+                if presence::user_present() {
+                    state::notify("VPN is down", "Sign in in your browser to reconnect.");
+                }
+                backoff = MIN_BACKOFF;
+                continue;
+            }
+            Err(e) if e.downcast_ref::<Ipv6OnlyNetwork>().is_some() => {
+                log!("{e}");
+                st.set(Phase::UnusableNetwork);
+                state::notify(
+                    "VPN can't connect on this network",
+                    "It's IPv6-only (e.g. phone tethering). Will reconnect on Wi-Fi.",
+                );
+                while profile::ipv6_gateway(&p.server).is_some() {
+                    std::thread::sleep(Duration::from_secs(15));
+                }
+                log!("network changed — gateway reachable over IPv4 again");
+                backoff = MIN_BACKOFF;
+                continue;
+            }
+            Err(e) => log!("could not start a session: {e}"),
+            Ok(end) => {
+                let up = end.up_at.map(|t| t.elapsed());
+                if up.is_some_and(|d| d >= HEALTHY) {
+                    backoff = MIN_BACKOFF;
+                }
+                let how = match &end.result {
+                    Ok(()) => "daemon closed the socket".to_string(),
+                    Err(e) => e.to_string(),
+                };
+                match up {
+                    Some(d) => {
+                        log!("tunnel dropped after {} up ({how})", state::human_duration(d.as_secs() as i64));
+                        st.dropped(&how);
+                        down_since = Some(log::now_secs());
+                        if presence::user_present() {
+                            state::notify("VPN dropped", "Reconnecting…");
+                        }
+                    }
+                    None => {
+                        // Each of these burned a fresh SSO, so back off much
+                        // further than for a cheap offline retry, and tell the
+                        // user once rather than flashing tabs every 20s.
+                        failed_bringups += 1;
+                        log!("tunnel never came up ({how}) — {failed_bringups} in a row");
+                        if failed_bringups == 3 {
+                            state::notify("VPN can't connect", "Retrying less often. See `oftc status` / the log.");
+                        }
+                        backoff = backoff.max(bringup_backoff(failed_bringups));
+                    }
+                }
+                if up.is_some() {
+                    failed_bringups = 0;
+                }
+            }
+        }
+        st.set(Phase::Retrying);
+        log!("waiting {}s, then re-running SSO…", backoff.as_secs());
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+/// Wait before retrying after `n` consecutive bring-ups that got through SSO but
+/// never brought the tunnel up: 2s, 20s, 1m, 2m, then 5m. The first retry stays
+/// quick (a one-off hiccup); a persistent failure shouldn't cost an SSO every 20s.
+fn bringup_backoff(n: u32) -> Duration {
+    const STEPS: [u64; 5] = [2, 20, 60, 120, 300];
+    Duration::from_secs(STEPS[(n.max(1) as usize - 1).min(STEPS.len() - 1)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bringup_backoff_grows_and_caps() {
+        let secs: Vec<u64> = (1..=7).map(|n| bringup_backoff(n).as_secs()).collect();
+        assert_eq!(secs, [2, 20, 60, 120, 300, 300, 300]);
     }
 }

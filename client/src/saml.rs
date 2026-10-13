@@ -22,7 +22,8 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+use crate::log::log;
+
 pub struct Credentials {
     pub username: String,
     /// Single-use EAP OTP. Do not log or store.
@@ -31,6 +32,15 @@ pub struct Credentials {
     /// SAML auth cache by this value, and iked's EAP identity MUST equal it or
     /// FNBAM's cache lookup misses (the -301). Set by `obtain()`.
     pub uid: String,
+}
+
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        for byte in unsafe { self.tokenid.as_bytes_mut() } {
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +65,28 @@ impl Default for SamlConfig {
     }
 }
 
+/// Why `obtain` failed, so the supervisor can choose a retry policy: an
+/// unreachable gateway is cheap to retry (no browser opened), while an
+/// unanswered SSO tab means nobody is there and retrying just stacks up tabs.
+#[derive(Debug)]
+pub enum SamlError {
+    /// Failed before the browser opened (offline, DNS, TLS, gateway down).
+    Unreachable(String),
+    /// The browser opened but nobody completed SSO before the timeout.
+    Timeout,
+}
+
+impl std::fmt::Display for SamlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SamlError::Unreachable(e) => write!(f, "{e}"),
+            SamlError::Timeout => f.write_str("SAML: timed out waiting for the browser callback"),
+        }
+    }
+}
+
+impl Error for SamlError {}
+
 /// Run the full SAML flow and return the EAP identity + OTP.
 pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
     if cfg.server.is_empty() {
@@ -70,14 +102,16 @@ pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
     //    UID (hardware UUID, dashes stripped) exactly like the official client,
     //    and thread it back so the CONNECT side uses the identical value.
     let uid = crate::profile::fct_uid().unwrap_or(gen_uid()?);
-    let html = bootstrap_post(cfg, port, &uid)?;
+    let html =
+        bootstrap_post(cfg, port, &uid).map_err(|e| SamlError::Unreachable(e.to_string()))?;
     let saml_url = extract_saml_url(&html)
         .ok_or("SAML: could not find the window.location redirect in the gateway response")?;
 
     // 3. open the SAML URL in the system browser
-    eprintln!("Opening browser for SSO:\n  {saml_url}");
+    // The URL can carry a short-lived login handle; do not persist it in logs.
+    log!("Opening browser for SSO");
     open_browser(&saml_url)?;
-    eprintln!("Waiting for the SAML callback on http://127.0.0.1:{port}/ (up to {}s)…",
+    log!("Waiting for the SAML callback on http://127.0.0.1:{port}/ (up to {}s)…",
         cfg.timeout.as_secs());
 
     // 4/5. catch the redirect
@@ -163,7 +197,7 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
                 stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                 let mut buf = [0u8; 16384];
                 let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let mut req = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let creds = parse_callback(&req);
                 // The callback lands on "/"; anything else (favicon, probes) gets
                 // a bare 404 rather than a misleading status page.
@@ -183,6 +217,10 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.write_all(page.as_bytes());
                 let _ = stream.flush();
+                for byte in unsafe { req.as_bytes_mut() } {
+                    unsafe { std::ptr::write_volatile(byte, 0) };
+                }
+                buf.fill(0);
                 if let Some(c) = creds {
                     return Ok(c);
                 }
@@ -190,7 +228,7 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err("SAML: timed out waiting for the browser callback".into());
+                    return Err(SamlError::Timeout.into());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -248,10 +286,7 @@ fn parse_callback(req: &str) -> Option<Credentials> {
                         }
                     }
                 }
-                if let (Some(t), Some(u)) = (tokenid.clone(), username.clone()) {
-                    return Some(Credentials { username: u, tokenid: t, uid: String::new() });
-                }
-                // tokenid may arrive without username in some flows
+                // tokenid may arrive without username in some flows.
                 if let Some(t) = tokenid {
                     return Some(Credentials { username: username.unwrap_or_default(), tokenid: t, uid: String::new() });
                 }
@@ -302,7 +337,15 @@ fn percent_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    match String::from_utf8(out) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            let value = String::from_utf8_lossy(&bytes).into_owned();
+            bytes.fill(0);
+            value
+        }
+    }
 }
 
 #[cfg(test)]

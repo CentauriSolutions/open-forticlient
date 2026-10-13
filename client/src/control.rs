@@ -6,9 +6,10 @@
 use std::error::Error;
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::connect::ConnConfig;
+use crate::log::log;
 use crate::profile::Profile;
 use crate::proto::{Command, Message, MAIN_SOCKET};
 use crate::saml::Credentials;
@@ -32,7 +33,35 @@ impl Default for SessionOpts {
 const OTP_BODY_LEN: usize = 0x464;
 const OTP_TOKEN_MAX: usize = 0x400;
 
-pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts) -> Result<(), Box<dyn Error>> {
+/// STATUS code fctctld sends once the tunnel is up (observed: 1 connecting ->
+/// 8 -> 2, then held until a drop sends 3).
+const STATUS_UP: u32 = 2;
+const STATUS_ERROR: u32 = 3;
+
+/// How a session ended. `up_at` lets the supervisor tell "the tunnel came up
+/// and later dropped" from "it never came up", which need different retry
+/// policies.
+pub struct SessionEnd {
+    /// When the daemon first reported the tunnel up, if it ever did.
+    pub up_at: Option<Instant>,
+    pub result: Result<(), Box<dyn Error>>,
+}
+
+/// Bring the tunnel up and hold it. `on_up` fires once, when the daemon first
+/// reports the tunnel up.
+pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts, on_up: &mut dyn FnMut()) -> SessionEnd {
+    let mut up_at = None;
+    let result = hold(p, creds, opts, &mut up_at, on_up);
+    SessionEnd { up_at, result }
+}
+
+fn hold(
+    p: &Profile,
+    creds: &Credentials,
+    opts: &SessionOpts,
+    up_at: &mut Option<Instant>,
+    on_up: &mut dyn FnMut(),
+) -> Result<(), Box<dyn Error>> {
     let mut stream = UnixStream::connect(MAIN_SOCKET)?;
 
     // The token travels INSIDE the CONNECT (EAP password at +0xc1); fctctld
@@ -46,11 +75,11 @@ pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts) -> Result<(), B
         prof.uid = creds.uid.clone();
     }
     let body = ConnConfig::from_profile(&prof, true, Some(&creds.tokenid)).into_bytes();
-    eprintln!("-> CONNECT ({} byte body, token embedded) on {MAIN_SOCKET}", body.len());
+    log!("-> CONNECT ({} byte body, token embedded) on {MAIN_SOCKET}", body.len());
     Message::new(Command::Connect, body).write_to(&mut stream)?;
 
     if opts.auto_otp {
-        eprintln!("   waiting {}s, then also pushing OTP over the socket (fallback)…", opts.otp_delay.as_secs());
+        log!("   waiting {}s, then also pushing OTP over the socket (fallback)…", opts.otp_delay.as_secs());
         std::thread::sleep(opts.otp_delay);
         send_otp(&mut stream, &creds.tokenid)?;
     }
@@ -59,19 +88,24 @@ pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts) -> Result<(), B
     // close it on our own, and we register nothing for screen lock — so a lock
     // does not tear the tunnel down. Read timeouts just let us log periodically.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    eprintln!("   holding control socket open — tunnel stays up while this runs (Ctrl-C to disconnect).");
-    eprintln!("   watch: tail -f \"/Library/Application Support/Fortinet/FortiClient/Logs/fctctl.log\"");
+    log!("   holding control socket open — tunnel stays up while this runs (Ctrl-C to disconnect).");
+    log!("   watch: tail -f \"/Library/Application Support/Fortinet/FortiClient/Logs/fctctl.log\"");
     loop {
         match Message::read_from(&mut stream) {
             Ok(msg) => {
                 log_incoming(&msg);
                 if msg.command == Command::Status {
                     if let Some(code) = msg.status_code() {
-                        eprintln!("   STATUS code = {code}");
-                        // code 1 = connecting, higher = connected/up (keep
-                        // holding — that is the whole point, survive lock);
-                        // code 3 = error: stop so we don't hold a dead socket.
-                        if code == 3 {
+                        log!("   STATUS code = {code}");
+                        // Keep holding through every non-error code — that is
+                        // the whole point, survive lock. Code 3 = error: stop
+                        // so we don't hold a dead socket.
+                        if code == STATUS_UP && up_at.is_none() {
+                            *up_at = Some(Instant::now());
+                            log!("tunnel up");
+                            on_up();
+                        }
+                        if code == STATUS_ERROR {
                             return Err(
                                 "ipsec connection failed (daemon STATUS code 3)".into(),
                             );
@@ -79,7 +113,7 @@ pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts) -> Result<(), B
                     }
                 }
                 if msg.command == Command::Disconnect {
-                    eprintln!("   daemon signalled DISCONNECT — ending");
+                    log!("   daemon signalled DISCONNECT — ending");
                     break;
                 }
             }
@@ -87,7 +121,7 @@ pub fn run(p: &Profile, creds: &Credentials, opts: &SessionOpts) -> Result<(), B
                 // idle; keep holding the socket (and thus the tunnel) open
             }
             Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
-                eprintln!("control socket closed by the daemon");
+                log!("control socket closed by the daemon");
                 break;
             }
             Err(e) => return Err(e.into()),
@@ -106,7 +140,7 @@ pub fn otp_message(token: &str) -> Message {
 }
 
 fn send_otp(stream: &mut UnixStream, token: &str) -> Result<(), Box<dyn Error>> {
-    eprintln!("<- SEND_OTP (token {} chars, masked)", token.len());
+    log!("<- SEND_OTP (token {} chars, masked)", token.len());
     otp_message(token).write_to(stream)?;
     Ok(())
 }
@@ -118,7 +152,7 @@ fn log_incoming(msg: &Message) {
         .take(48)
         .map(|b| format!("{b:02x}"))
         .collect();
-    eprintln!(
+    log!(
         "<- {:?} field4={} field16={} body={}B {}{}",
         msg.command,
         msg.field4,

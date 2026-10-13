@@ -459,7 +459,10 @@ pub fn up(args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("Agent started — it holds the tunnel across screen lock and self-reconnects if the");
     println!("SA drops (e.g. after a long suspend): the session re-runs SSO + CONNECT in-process,");
     println!("backing off between attempts. A browser tab opens for SSO on each (re)connect; a");
-    println!("cached IdP login completes it silently.");
+    println!("cached IdP login completes it silently. If nobody finishes a sign-in (you're away),");
+    println!("it waits until you're back at the keyboard before opening another tab. You get a");
+    println!("notification when the VPN drops or comes back (OFTC_NOTIFY=0 in the agent's env silences).");
+    println!("  state: oftc status");
     println!("  logs:  tail -f {}", log_path());
     println!("  down:  oftc down");
     Ok(())
@@ -598,6 +601,7 @@ pub fn status(args: &[String]) -> Result<(), Box<dyn Error>> {
     if let Some(ev) = last_event {
         println!("  last    : {ev}");
     }
+    print_supervisor();
 
     println!();
     if proc_running("FortiTray") {
@@ -607,6 +611,40 @@ pub fn status(args: &[String]) -> Result<(), Box<dyn Error>> {
         println!("  [ ok ] FortiTray not running — the lock teardown is neutralized.");
     }
     Ok(())
+}
+
+/// What the agent's supervisor reports it is doing (from its state file).
+fn print_supervisor() {
+    use crate::state::{self, human_duration};
+    let Some(s) = state::load().filter(|s| state::alive(s.pid)) else {
+        return;
+    };
+    let ago = |t: i64| human_duration(crate::log::now_secs() - t);
+    let what = match s.phase.as_str() {
+        "up" => format!("tunnel up for {}", ago(s.since)),
+        "signing-in" => format!("waiting for browser SSO ({} so far)", ago(s.since)),
+        "connecting" => "SSO done, bringing the tunnel up".to_string(),
+        "retrying" => format!("reconnecting (backing off, {} so far)", ago(s.since)),
+        "waiting-for-user" => format!(
+            "nobody at the keyboard; will reconnect when you're back ({} so far)",
+            ago(s.since)
+        ),
+        "unusable-network" => format!(
+            "this network is IPv6-only (NAT64, e.g. phone tethering), which FortiClient can't \
+             use; will reconnect when that changes ({} so far)",
+            ago(s.since)
+        ),
+        other => other.to_string(),
+    };
+    println!("  agent   : {what}");
+    if let Some((t, why)) = &s.last_drop {
+        println!(
+            "  drops   : {} since the agent started; last {} ago at {} ({why})",
+            s.drops,
+            ago(*t),
+            crate::log::local_time(*t)
+        );
+    }
 }
 
 /// Scan fctctld's log for the most recent ipsec event + assigned internal IP.

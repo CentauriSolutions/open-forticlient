@@ -1,14 +1,86 @@
-# oftc — open-forticlient keep-alive controller (prototype)
+# oftc — open-forticlient CLI
 
-A small Rust CLI that (eventually) brings up the FortiGate IPsec IKEv2 + SAML
-tunnel by driving Fortinet's own `fctctld`/`iked` over the `vpn_control` socket,
-and **never disconnects on screen lock** — the whole point of this project
-(ROADMAP §C / Issue 6). See [`../docs/control-socket.md`](../docs/control-socket.md)
-for the protocol this speaks.
+A small Rust CLI with two explicit paths. `oftc standalone` invokes the OFTC
+macOS app and packet-tunnel provider. The existing `oftc connect`, `up`, and
+`down` commands still drive Fortinet's `fctctld`/`iked` as the rollback path;
+see [`../docs/control-socket.md`](../docs/control-socket.md) for that protocol.
+
+## Standalone backend (opt-in)
+
+The standalone CLI calls the installed OFTC app's `IntegrationHost` directly.
+The app owns SAML, the PSK in its Keychain item, its nonsecret profile, the
+NetworkExtension VPN configuration, IKE/ESP, and reconnect supervision. A
+normal standalone connection does not read FortiClient files or contact its
+daemons. Importing an old profile is a one-time, explicit migration action.
+
+```bash
+oftc standalone activate                   # one-time extension activation
+oftc standalone import-profile "Office VPN"     # one-time profile and PSK migration
+oftc standalone install-config             # one-time macOS VPN configuration
+oftc standalone show-profile
+oftc standalone connect                    # foreground supervisor; UDP default
+oftc standalone status                     # from another terminal
+oftc standalone rekey-counts               # successful CHILD_SA rekeys, local/peer
+oftc standalone disconnect                 # stop VPN and disable agent autostart
+
+# Persistent per-user operation, after the profile and VPN configuration work:
+# Disconnect any official FortiClient session first; leave it installed for rollback.
+oftc down                                  # only if the legacy agent is running
+oftc standalone install-agent              # stage; does not start a VPN
+oftc standalone start-agent                # start now and at future GUI logins
+oftc standalone status                     # check VPN state
+oftc standalone stop-agent                 # stop VPN and disable login starts
+oftc standalone uninstall-agent            # remove the agent
+```
+
+Without a FortiClient profile, use `save-profile GATEWAY SAML_PORT` and
+`provision-psk GATEWAY` instead of `import-profile`; PSK input is read from the
+terminal by the app. `save-profile ... --tcp` selects TCP 4443 explicitly.
+The default UDP mode has bounded TCP fallback before a SAML token is spent.
+`connect-once` starts a single connection without host supervision. `--app
+/absolute/path/OFTC.app` before the command selects a development app;
+otherwise the CLI uses `/Applications/OFTC development probe.app`.
+
+`install-agent` records the app host's absolute path in
+`~/Library/LaunchAgents/com.open-forticlient.oftc.standalone.plist` and stages
+the job disabled. It does not activate the extension, create a VPN configuration,
+or connect. With a development app, use
+`oftc standalone --app /absolute/path/OFTC.app install-agent`; the chosen path is
+then used by `start-agent` and `stop-agent`. To change apps, stop and uninstall
+the agent, then install it again with the new path. Keep that app at the chosen
+path while the agent is installed.
+
+`start-agent` enables and kickstarts the per-user job in the current GUI session.
+The job runs `IntegrationHost supervise-profile` directly, with verified SAML
+TLS; `--insecure-saml` cannot be persisted in the agent. `RunAtLoad` starts it
+again at future GUI logins. `KeepAlive` is off because the host supervises
+reconnection itself; if the host process exits, use `start-agent` to restart it.
+The agent stops at logout, and the tunnel is not expected to survive logout.
+Logs go to `~/Library/Logs/open-forticlient/standalone.log`.
+
+`stop-agent` first disables future login starts, asks the host to stop the
+supervisor and VPN, then unloads the job. `uninstall-agent` does the same,
+waits for launchd to finish unloading, and removes the plist. It leaves the
+OFTC app, VPN configuration, profile, Keychain
+PSK, and log in place. Neither command touches FortiTray, the Fortinet daemons,
+or the legacy `com.open-forticlient.oftc` agent. For rollback, stop the
+standalone agent, then use the legacy `oftc up` path if its agent was installed.
+`standalone disconnect` disables the standalone LaunchAgent when installed and
+stops the VPN. Use `start-agent` to resume automatic starts. If the recorded app was removed,
+`uninstall-agent` still removes the LaunchAgent after unloading it, but reports
+that VPN shutdown could not be confirmed.
+
+This path still uses the signed development bundle. A 23-minute live IPv4 UDP
+run passed screen lock, automatic local CHILD_SA rekey, and post-rekey
+protected traffic; see the signed-provider-join spike notes. The launchd
+timing fixes above passed local tests but still need a fresh live install and
+uninstall cycle. Packaging a final named app and validating recovery on
+genuine path loss, sleep/wake, roaming, TCP stalls, and IPv6-only/NAT64 paths
+remain release gates. Run `oftc standalone help` for the exact commands.
 
 ## Status
 
-Scaffold. Working today:
+The legacy Fortinet-backed path includes:
 
 - `oftc probe` — connect to `fctctld`'s control socket and confirm it accepts an
   unprivileged, non-FortiTray peer (Phase 0 check; sends nothing).
@@ -58,6 +130,10 @@ cargo build --release   # target/release/oftc
 | `src/saml.rs` | SAML → `(username, tokenid)` (loopback catcher + `curl` POST). |
 | `src/control.rs` | Drive `fctctld`: send `CONNECT`, answer OTP, watch `STATUS`. |
 | `src/tls.rs` | Gateway cert review/pin (`oftc trust`) + curl TLS flags. |
+| `src/presence.rs` | Is the user at the keyboard (HID idle time, screen lock)? Gates re-opening SSO. |
+| `src/state.rs` | Supervisor state file (read by `oftc status`) + macOS notifications. |
+| `src/standalone.rs` | Explicit command bridge and separate per-user OFTC LaunchAgent lifecycle. |
+| `src/log.rs` | Local-time timestamped `log!` for the `connect` path. |
 | `src/main.rs` | CLI: `probe`, `build-connect`, `saml`, `trust`, `connect`. |
 
 ## Dependencies
@@ -121,7 +197,25 @@ backoff (2s→20s), so the tunnel comes back on wake without `oftc up`. Each
 reconnect re-runs SSO because the token is single-use: a live Okta session
 completes it silently, a lapsed one shows the login page once. (Short suspends,
 <~1 min, often survive outright via the ESP-in-TCP keepalive — survival is
-timing-dependent, which is exactly why the reconnect path exists.)
+timing-dependent, which is exactly why the reconnect path exists.) Drops also
+happen while awake: when the TCP 4443 stream stalls for 15–20s, an iked DPD bug
+drops valid late replies and tears the SA down (`racoon error report: -306`).
+See [Issue 11](../Issues/011-survive-path-stalls-iked-dpd-bug.md).
+
+Retry policy: the agent only starts an SSO when someone is at the keyboard
+(screen unlocked, keyboard/mouse input in the last 5 minutes). A drop while
+you're away (locked, asleep, lid closed) waits, and reconnects as soon as you're
+back, instead of opening SSO tabs on a timer that nobody sees. When present, a
+tunnel that was up ≥30s and then dropped retries after 2s; a failure before the
+tunnel came up backs off 2s→20s; an SSO tab left unanswered for 5 minutes is
+replaced with a fresh one and a notification.
+
+`oftc status` shows what the agent is doing (up for how long, signing in,
+reconnecting, waiting for you) and how many drops it has seen. The agent posts
+a macOS notification when the VPN drops, comes back, or needs you to sign in
+(set `OFTC_NOTIFY=0` in the agent's environment to silence). Log lines in
+`~/Library/Logs/open-forticlient/oftc.log` are timestamped in local time, so they
+line up with `fctctl.log` and `log show --predicate 'process=="iked"'`.
 
 launchd `KeepAlive` is intentionally **off**: the supervising process, not
 launchd, drives reconnection. A conditional `KeepAlive` ({`SuccessfulExit:false`})
