@@ -12,17 +12,17 @@ The signed and notarized v15 development app passed an IPv4 UDP connection,
 explicit IKE renewal, two automatic CHILD rekeys during an uninterrupted
 55-minute run, and recovery from a 75-second Ethernet outage through Wi-Fi.
 A macOS VPN-style stop stayed down. See the [live evidence](docs/evidence/v15-live-gate.md)
-and [initial rollout gaps](docs/initial-rollout-gaps.md). The OFTC 1.0.1
-build 18 candidate passed local package installation, guided CLI verification,
-extension activation, and a short live IPv4 UDP connection to the approved
-target. Its longer lifecycle and recovery gates remain open. See the
-[build 18 package record](docs/evidence/v18-guided-setup-candidate.md) and
-[live canary](docs/evidence/v18-packaged-live-canary.md).
+and [initial rollout gaps](docs/initial-rollout-gaps.md). The OFTC 1.0.2
+build 19 package was built from pinned commit `6bebfa6`, signed, notarized,
+installed, and activated on the development Mac. A short live IPv4 UDP
+connection to the approved target and explicit stop passed. Its longer
+lifecycle and recovery gates remain open on this packaged build. See the
+[build 19 package record](docs/evidence/v19-packaged-pilot.md).
 
 The current checkout contains the standalone implementation. The former
 Fortinet-backed controller and experiment source are preserved in Git commit
 `b9ade25`; for example, `git show b9ade25:client/README.md` describes the
-rollback controller. The installed build 18 app is independent of source-tree
+rollback controller. The installed build 19 app is independent of source-tree
 changes.
 
 ## Source and build
@@ -51,7 +51,7 @@ cargo build --offline --release --manifest-path client/Cargo.toml
 directory. It does not sign, install, activate, authenticate, or connect.
 The source builds the OFTC 1.0.2 candidate with final bundle IDs and a small
 public CLI: `setup`, `connect`, `disconnect`, `status`, and `uninstall`. See
-[the man page](client/man/oftc.1) for the complete command syntax. Build 18 is
+[the man page](client/man/oftc.1) for the complete command syntax. Build 19 is
 installed on this Mac. Clean-install validation on another Mac is a separate
 release step.
 

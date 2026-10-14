@@ -1,10 +1,10 @@
 # Operating OFTC
 
 The release package installs `/Applications/OFTC.app`, `/usr/local/bin/oftc`,
-and `man oftc`. Build 18 is still a candidate. Local package installation,
-profile/PSK migration, extension activation, and a short live IPv4 UDP
-connection passed. Recovery and longer sessions remain open; see the
-[live canary](evidence/v18-packaged-live-canary.md).
+and `man oftc`. Build 19 is the current pilot package. Local upgrade,
+profile/PSK preservation, extension activation, and a short live IPv4 UDP
+connection passed. Recovery and longer sessions on this package remain open;
+see the [build 19 record](evidence/v19-packaged-pilot.md).
 
 For colleagues testing the package, use the shorter [pilot guide](pilot-validation.md)
 and its [local report script](../scripts/collect-pilot-report.zsh).
