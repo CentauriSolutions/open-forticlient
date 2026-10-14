@@ -407,7 +407,7 @@ final class ReconnectSupervisor {
     private func pauseAutomaticStart() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        task.arguments = ["disable", "gui/\(getuid())/com.open-forticlient.oftc.standalone"]
+        task.arguments = ["disable", "gui/\(getuid())/com.chris.openforticlient.oftc.agent"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         do {

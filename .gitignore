@@ -13,11 +13,13 @@ test_uid
 # Rust client build output and any assembled CONNECT bodies (may hold the PSK)
 client/target/
 app/build/
+dist/
 app/core/modp14/target/
 *.bin
 connect-body.bin
 
 # Local secrets (plaintext PSK, etc.) — never commit
+.DS_Store
 .env
 .env.*
 

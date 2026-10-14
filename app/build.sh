@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="${0:A:h}"
-bundle_id="${BUNDLE_ID:-com.chris.openforticlient.gate0}"
+bundle_id="com.chris.openforticlient.oftc"
 [[ "$bundle_id" =~ '^[A-Za-z0-9][A-Za-z0-9.-]*$' ]] || {
     print -u2 'BUNDLE_ID must be a reverse-DNS bundle identifier'; exit 2
 }
@@ -22,7 +22,7 @@ provider_frameworks="$extension/Contents/Frameworks"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
-mkdir -p "$app/Contents/MacOS" "$app_frameworks" \
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app_frameworks" \
     "$extension/Contents/MacOS" "$provider_frameworks" "$build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$build/module-cache"
 export SWIFT_MODULECACHE_PATH="$build/module-cache"
@@ -31,6 +31,8 @@ cp "$root/Provider/Info.plist" "$extension/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${bundle_id}.provider" "$extension/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist"
+
+cp "$root/assets/OFTC.icns" "$app/Contents/Resources/OFTC.icns"
 
 xcrun swiftc -swift-version 5 -target "$target" -O -emit-library \
     -Xlinker -install_name -Xlinker '@rpath/libcrypto_swift.dylib' \
@@ -82,7 +84,7 @@ rustc --edition=2021 --crate-type staticlib -C opt-level=z \
     -o "$build/liboftc_migration.a"
 rustc --edition=2021 --test "$root/Host/migration.rs" -o "$build/migration-tests"
 "$build/migration-tests"
-xcrun swiftc -swift-version 5 -target "$target" -O -module-name IntegrationHost \
+xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework Foundation -framework NetworkExtension -framework Security -framework SystemExtensions \
     -L "$app_frameworks" -l oftc_host_bootstrap \
     "$build/liboftc_migration.a" \
@@ -93,8 +95,8 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name IntegrationHost 
     "$root/Host/OFTCProfile.swift" \
     "$root/Host/ReconnectSupervisor.swift" \
     "$root/Provider/BootstrapInput.swift" "$root/Host/main.swift" \
-    -o "$app/Contents/MacOS/IntegrationHost"
-xcrun swiftc -swift-version 5 -target "$target" -O -module-name IntegrationProvider \
+    -o "$app/Contents/MacOS/OFTCAgent"
+xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCTunnel \
     -framework Foundation -framework NetworkExtension \
     -import-objc-header "$root/core/provider-ffi/oftc_ffi.h" \
     -L "$provider_frameworks" -l oftc_provider_ffi -l oftc_preflight \
@@ -104,7 +106,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name IntegrationProvi
     "$root/Provider/BootstrapInput.swift" "$root/Provider/FFISettings.swift" \
     "$root/Provider/main.swift" \
     "$root/Provider/PacketTunnelProvider.swift" \
-    -o "$extension/Contents/MacOS/IntegrationProvider"
+    -o "$extension/Contents/MacOS/OFTCTunnel"
 
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
@@ -130,8 +132,13 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
     -o "$build/profile-check"
 "$build/profile-check"
-otool -L "$app/Contents/MacOS/IntegrationHost" \
-    "$extension/Contents/MacOS/IntegrationProvider" | \
+CARGO_TARGET_DIR="$build/client-target" cargo test --offline --locked \
+    --manifest-path "$root/../client/Cargo.toml"
+CARGO_TARGET_DIR="$build/client-target" cargo build --offline --locked --release \
+    --manifest-path "$root/../client/Cargo.toml"
+cp "$build/client-target/release/oftc" "$build/oftc"
+otool -L "$app/Contents/MacOS/OFTCAgent" \
+    "$extension/Contents/MacOS/OFTCTunnel" | \
     grep -E 'liboftc_host_bootstrap|liboftc_provider_ffi|liboftc_preflight'
 print "Offline unsigned bundle built: $app"
 print 'No SAML flow, VPN start, extension activation, Developer ID signing, or notarization occurred.'

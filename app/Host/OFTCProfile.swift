@@ -76,4 +76,16 @@ struct OFTCProfileStore {
         try profile.validate()
         return profile
     }
+
+    func remove() throws {
+        let directoryValues = try directory.resourceValues(forKeys: [.isDirectoryKey,
+                                                                    .isSymbolicLinkKey])
+        let fileValues = try url.resourceValues(forKeys: [.isRegularFileKey,
+                                                         .isSymbolicLinkKey])
+        guard directoryValues.isDirectory == true,
+              directoryValues.isSymbolicLink != true,
+              fileValues.isRegularFile == true,
+              fileValues.isSymbolicLink != true else { throw Failure.unavailable }
+        try FileManager.default.removeItem(at: url)
+    }
 }

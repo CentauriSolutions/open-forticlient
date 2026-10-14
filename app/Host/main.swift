@@ -297,7 +297,7 @@ private func profileStore() -> OFTCProfileStore {
 
 private func storedProfile() -> OFTCProfile {
     guard let profile = try? profileStore().load() else {
-        finish("OFTC profile unavailable; run save-profile or import-profile", code: 1)
+        finish("OFTC profile unavailable; run oftc setup", code: 1)
     }
     return profile
 }
@@ -341,7 +341,7 @@ private func runLive(gateway: String, port: UInt32,
     dispatchMain()
 }
 
-private let usage = "Usage: IntegrationHost activate|deactivate|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|show-profile|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk <gateway>|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+private let usage = "Usage: OFTCAgent activate|deactivate|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|import-development-profile|show-profile|erase-profile|has-psk|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 let args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first, !appID.isEmpty else { finish(usage, code: 2) }
 
@@ -363,7 +363,7 @@ case "install-config" where args.count == 1:
         configuration.providerBundleIdentifier = providerID
         configuration.serverAddress = "OFTC" // Display label only, never a secret.
         manager.protocolConfiguration = configuration
-        manager.localizedDescription = "OFTC Gate 4 Provider"
+        manager.localizedDescription = "OFTC VPN"
         manager.isEnabled = true
         manager.saveToPreferences { error in
             if error != nil { finish("Could not save OFTC configuration", code: 1) }
@@ -372,8 +372,16 @@ case "install-config" where args.count == 1:
     }
     dispatchMain()
 
-case "provision-psk" where args.count == 2:
-    let gateway = args[1]
+case "has-psk" where args.count == 1:
+    let gateway = storedProfile().gateway
+    guard var psk = try? lookupPSK(for: gateway) else {
+        finish("OFTC PSK unavailable", code: 1)
+    }
+    psk.resetBytes(in: 0..<psk.count)
+    finish("OFTC PSK available")
+
+case "provision-psk" where args.count == 1 || args.count == 2:
+    let gateway = args.count == 2 ? args[1] : storedProfile().gateway
     guard !gateway.isEmpty, gateway.utf8.count <= 253,
           !gateway.contains("/"), !gateway.contains(":") else {
         finish("Invalid gateway name", code: 2)
@@ -417,9 +425,52 @@ case "import-profile" where args.count == 2:
     catch { finish("PSK saved but OFTC profile could not be saved", code: 1) }
     finish("FortiClient profile imported into OFTC configuration and Keychain")
 
+case "import-development-profile" where args.count == 1:
+    // The old profile is nonsecret. Its Keychain PSK needs separate explicit
+    // provisioning under the new signed identity.
+    let destination = profileStore()
+    guard (try? destination.load()) == nil else {
+        finish("OFTC profile already exists; migration did not overwrite it", code: 1)
+    }
+    let profile: OFTCProfile
+    do {
+        profile = try OFTCProfileStore(bundleID: "com.chris.openforticlient.gate0").load()
+        try destination.save(profile)
+    } catch { finish("Could not import development profile", code: 1) }
+    finish("Development profile copied; provision its PSK before connecting")
+
 case "show-profile" where args.count == 1:
     let profile = storedProfile()
     finish("OFTC profile: gateway=\(profile.gateway) saml-port=\(profile.samlPort) transport=\(profile.transport.rawValue)")
+
+case "erase-profile" where args.count == 1:
+    loadManager { manager in
+        if let manager, manager.connection.status != .disconnected,
+           manager.connection.status != .invalid {
+            finish("Disconnect OFTC before erasing its profile", code: 1)
+        }
+        let store = profileStore()
+        guard let profile = try? store.load() else {
+            if !FileManager.default.fileExists(atPath: store.url.path),
+               (try? FileManager.default.destinationOfSymbolicLink(atPath: store.url.path)) == nil {
+                finish("OFTC profile absent; nothing erased")
+            }
+            finish("OFTC profile invalid; nothing erased", code: 1)
+        }
+        let selector: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: keychainService,
+            kSecAttrAccount: profile.gateway,
+        ]
+        let status = SecItemDelete(selector as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            finish("Could not erase OFTC Keychain PSK; profile left in place", code: 1)
+        }
+        do { try store.remove() }
+        catch { finish("Keychain PSK erased, but profile file could not be removed", code: 1) }
+        finish("OFTC profile and Keychain PSK erased")
+    }
+    dispatchMain()
 
 case "preflight" where args.count == 3:
     let gateway = args[1]
@@ -473,7 +524,17 @@ case "start-profile", "supervise-profile":
 case "status" where args.count == 1:
     loadManager { manager in
         guard let manager else { finish("OFTC configuration absent") }
-        finish("OFTC VPN status: \(manager.connection.status.rawValue)")
+        let state: String
+        switch manager.connection.status {
+        case .invalid: state = "invalid"
+        case .disconnected: state = "disconnected"
+        case .connecting: state = "connecting"
+        case .connected: state = "connected"
+        case .reasserting: state = "reasserting"
+        case .disconnecting: state = "disconnecting"
+        @unknown default: state = "unknown"
+        }
+        finish("OFTC VPN status: \(state)")
     }
     dispatchMain()
 

@@ -1,0 +1,53 @@
+#!/bin/sh
+# Remove the exact OFTC package payload after per-user VPN cleanup.
+set -eu
+
+app=/Applications/OFTC.app
+cli=/usr/local/bin/oftc
+self=/usr/local/libexec/oftc/remove-package
+manpage=/usr/local/share/man/man1/oftc.1
+agent_label=com.chris.openforticlient.oftc.agent
+provider_id=com.chris.openforticlient.oftc.provider
+
+if [ "$(/usr/bin/id -u)" != 0 ]; then
+    echo 'Run this tool with sudo after per-user OFTC cleanup.' >&2
+    exit 1
+fi
+if [ -L "$app" ] || [ ! -d "$app" ] ||
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)" != com.chris.openforticlient.oftc ]; then
+    echo 'Expected OFTC.app with the exact release bundle ID is missing; nothing removed.' >&2
+    exit 1
+fi
+if /usr/bin/pgrep -f '^/Applications/OFTC.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
+    echo 'OFTC agent is running; stop it before uninstalling.' >&2
+    exit 1
+fi
+vpn_status=$(/usr/sbin/scutil --nc status 'OFTC VPN' 2>/dev/null || true)
+case "$vpn_status" in
+    Connected*|Connecting*|Disconnecting*)
+        echo 'OFTC VPN is active; disconnect it before uninstalling.' >&2
+        exit 1
+        ;;
+esac
+for agent in /Users/*/Library/LaunchAgents/$agent_label.plist; do
+    if [ -e "$agent" ] || [ -L "$agent" ]; then
+        echo "OFTC LaunchAgent remains at $agent; remove it as that user first." >&2
+        exit 1
+    fi
+done
+extension_list=$(/usr/bin/systemextensionsctl list 2>/dev/null) || {
+    echo 'Could not verify system extension state; nothing removed.' >&2
+    exit 1
+}
+if printf '%s\n' "$extension_list" | /usr/bin/awk -v id="$provider_id" \
+    'index($0, id) && index($0, "[activated enabled]") { found=1 } END { exit !found }'; then
+    echo 'OFTC system extension remains active; complete macOS deactivation, then rerun oftc uninstall.' >&2
+    exit 1
+fi
+
+/bin/rm -rf "$app"
+/bin/rm -f "$cli" "$self" "$manpage"
+/bin/rmdir /usr/local/libexec/oftc 2>/dev/null || true
+/usr/sbin/pkgutil --forget com.chris.openforticlient.oftc.pkg >/dev/null
+echo 'Removed OFTC app, CLI, uninstall tool, and package receipt.'
+echo 'Per-user profile, Keychain item, and logs are retained unless separately erased.'

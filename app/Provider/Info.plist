@@ -5,19 +5,19 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>IntegrationProvider</string>
+	<string>OFTCTunnel</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.chris.openforticlient.gate0.provider</string>
+	<string>com.chris.openforticlient.oftc.provider</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>OFTC Packet Tunnel</string>
+	<string>OFTC VPN</string>
 	<key>CFBundlePackageType</key>
 	<string>SYSX</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.16.0</string>
+	<string>1.0.2</string>
 	<key>CFBundleVersion</key>
-	<string>16</string>
+	<string>19</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSSystemExtensionUsageDescription</key>
@@ -27,7 +27,7 @@
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.packet-tunnel</key>
-			<string>IntegrationProvider.PacketTunnelProvider</string>
+			<string>OFTCTunnel.PacketTunnelProvider</string>
 		</dict>
 	</dict>
 </dict>

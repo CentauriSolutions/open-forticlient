@@ -1,58 +1,70 @@
 # Operating OFTC
 
-These commands target the signed OFTC app. The current default path is
-`/Applications/OFTC development probe.app`; use `--app /absolute/path/App.app`
-for a development build. The bundle and path are temporary v15 identities,
-pending distributable packaging.
+The release package installs `/Applications/OFTC.app`, `/usr/local/bin/oftc`,
+and `man oftc`. Build 18 is still a candidate. Local package installation,
+profile/PSK migration, extension activation, and a short live IPv4 UDP
+connection passed. Recovery and longer sessions remain open; see the
+[live canary](evidence/v18-packaged-live-canary.md).
 
-## One-time setup
+For colleagues testing the package, use the shorter [pilot guide](pilot-validation.md)
+and its [local report script](../scripts/collect-pilot-report.zsh).
 
-Install a signed and notarized app before activation. Then:
+## Install and set up
+
+After installing the package, run:
 
 ```sh
-oftc activate
-oftc import-profile "Office VPN"   # or save-profile GATEWAY SAML_PORT + provision-psk GATEWAY
-oftc install-config
-oftc show-profile
-oftc install-agent             # stages a disabled per-user job
+oftc setup
 ```
 
-Import is the only normal setup step that needs a FortiClient profile. It
-copies the PSK to an OFTC Keychain item and saves a nonsecret OFTC profile.
-`install-agent` does not connect. The app must remain at the path recorded by
-the agent.
+It offers any local OFTC development or FortiClient profile as a starting
+point and asks for missing settings or a PSK. Approve the OFTC Network
+Extension if macOS requests it. Setup prepares the VPN without connecting;
+rerun `oftc setup` if approval interrupted it. See `man oftc` for explicit
+setup options.
 
-## Connect, inspect, stop
+For the current development installation only, first run
+`app/migrate-development.sh --plan` and then `--apply` after installing the
+release package. The script stops the old agent and VPN while retaining its
+app, profile, and Keychain item for rollback. Then run `oftc setup` and choose
+the development profile.
+
+## Connect and inspect
 
 ```sh
-oftc start-agent
+oftc connect
 oftc status
-oftc rekey-counts
-oftc stop-agent
+oftc disconnect
 ```
 
-`start-agent` starts the supervised connection and enables starts at future
-GUI logins. Browser SSO may appear when the existing provider session cannot
-complete authentication silently. `stop-agent` disables future login starts
-and stops the VPN. `oftc connect` runs the same supervisor in the foreground;
-`oftc disconnect` stops a managed connection and disables its agent.
+`connect` starts a supervised connection and enables starts at future GUI
+logins. Browser SSO may appear. The supervisor retries recoverable drops.
+`disconnect` stops the VPN and disables those future starts, so a deliberate
+stop stays down until `oftc connect`. `status` shows VPN and agent state,
+nonsecret profile settings, and CHILD SA rekey counts when connected. Agent
+logs are in `~/Library/Logs/OFTC/agent.log`. Do not share raw SAML callbacks,
+PSKs, or packet captures.
 
-Logs are under `~/Library/Logs/open-forticlient/standalone.log`. They include
-nonsecret state transitions and recovery reasons. If a connection fails, check
-`oftc status`, the macOS VPN configuration and extension state, route and DNS,
-then the relevant log window. Avoid sharing raw SAML callbacks or packet
-captures. For local build checks, use the commands in the [README](../README.md);
-an offline build does not validate live VPN behavior.
+## Update or uninstall
 
-## Remove or change the app
+Disconnect before installing an update; the package refuses to replace a
+running app. Run `oftc connect` after the update if you want the VPN and login
+starts enabled again.
 
 ```sh
-oftc uninstall-agent
-oftc remove-config
+oftc disconnect
+# install the verified replacement package
+oftc connect
 ```
 
-`uninstall-agent` stops the connection and removes the per-user job. It leaves
-the app, OFTC profile, Keychain PSK, and log in place. To change the app path,
-stop and uninstall the agent, install the new signed app, then install and
-start the agent for that path. Follow the [rollout gates](initial-rollout-gaps.md)
-before replacing an existing client for general use.
+`oftc uninstall` stops the agent and VPN, removes OFTC's VPN configuration,
+requests system extension deactivation, then invokes the package removal
+helper with administrator access. It retains the OFTC profile, Keychain PSK,
+and logs. Use `oftc uninstall --erase-profile` to erase that profile and its
+PSK as well. If macOS defers extension removal, complete its approval or
+reboot and rerun uninstall; the helper refuses to remove an active extension.
+
+The older Fortinet-backed controller remains available from Git history, not
+from the active source tree. See [initial rollout gaps](initial-rollout-gaps.md)
+for deployment limits and [Issue 17](../Issues/017-package-distributable-macos-client.md)
+for release validation status.

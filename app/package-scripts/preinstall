@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# Replacing an active app binary can interrupt an extension or supervisor.
+# The operator must stop OFTC before an update. Fresh installs pass directly.
+if /usr/bin/pgrep -f '^/Applications/OFTC.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
+    echo 'OFTC is running. Run oftc disconnect before updating.' >&2
+    exit 1
+fi
+vpn_status=$(/usr/sbin/scutil --nc status 'OFTC VPN' 2>/dev/null || true)
+case "$vpn_status" in
+    Connected*|Connecting*|Disconnecting*)
+        echo 'OFTC VPN is active. Disconnect it before updating.' >&2
+        exit 1
+        ;;
+esac
+exit 0

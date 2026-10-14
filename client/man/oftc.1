@@ -1,0 +1,103 @@
+.TH OFTC 1 "October 14, 2026" "OFTC 1.0.2" "User Commands"
+.SH NAME
+oftc \- standalone macOS FortiGate IPsec VPN client
+.SH SYNOPSIS
+.B oftc setup
+.br
+.B oftc setup
+\fB\-\-import\fR \fINAME\fR
+.br
+.B oftc setup
+\fB\-\-gateway\fR \fIHOST\fR \fB\-\-saml\-port\fR \fIPORT\fR [\fB\-\-tcp\fR]
+.br
+.B oftc setup
+\fB\-\-from\-development\fR
+.br
+.B oftc connect
+.br
+.B oftc disconnect
+.br
+.B oftc status
+.br
+.B oftc uninstall
+[\fB\-\-erase\-profile\fR]
+.br
+.B oftc help
+.SH DESCRIPTION
+OFTC uses the signed macOS app to own the VPN configuration, Keychain PSK,
+system extension, SAML sign-in, and supervised reconnection.
+The package installs the app and this command at their standard paths.
+.SH COMMANDS
+.TP
+.B setup
+Prepare a profile, activate OFTC's system extension, and add its macOS VPN
+configuration. It does not connect. With no options and no existing profile,
+ask which local settings to use. The OFTC development profile and FortiClient
+profiles, when present, provide editable gateway and SAML port defaults. A
+matching FortiClient credential is tried before asking for a PSK in the
+terminal. With an existing OFTC profile, resume setup.
+.TP
+.BI "setup \-\-import " NAME
+Import a local FortiClient profile and its PSK. Existing OFTC profiles are not
+overwritten. If the saved PSK is unavailable, use interactive
+.B setup
+to keep its connection settings and enter the PSK at the terminal prompt.
+.TP
+.BI "setup \-\-gateway " "HOST \-\-saml\-port PORT"
+Save a new OFTC profile and prompt for its PSK in the terminal. UDP is the
+default outer transport. Add
+.B \-\-tcp
+to select TCP.
+.TP
+.B setup \-\-from\-development
+Copy the nonsecret OFTC development profile and prompt for its PSK under the
+release app's Keychain identity if no matching saved FortiClient PSK is
+available. This is only for migration from the OFTC
+development build. Stop the old VPN and its login agent first.
+.TP
+.B connect
+Start a supervised VPN connection. The per-user login agent is installed if
+needed and enabled for future GUI logins. A browser sign-in may be required.
+Recoverable connection failures are retried by the supervisor.
+.TP
+.B disconnect
+Stop the VPN and disable automatic login starts. A deliberate disconnect stays
+down until the next
+.BR "oftc connect" .
+.TP
+.B status
+Show VPN state, nonsecret profile settings, login agent state, and CHILD SA
+rekey counts while connected.
+.TP
+.B uninstall
+Disconnect OFTC, remove its per-user login agent and VPN configuration,
+deactivate its system extension, and invoke the package removal helper with
+administrator access. Profile, Keychain PSK, and logs are retained by default.
+The helper refuses to remove the app while the extension remains active.
+.TP
+.B uninstall \-\-erase\-profile
+Also erase the OFTC profile and its exact Keychain PSK after disconnecting.
+.TP
+.B help
+Show a short command summary.
+.SH DEVELOPMENT OPTION
+.TP
+.BI "\-\-app " /absolute/path/OFTC.app
+Prefix
+.BR setup ,
+.BR connect ,
+or
+.B status
+to target a development build. The login agent records that app path.
+.SH FILES
+.TP
+.I /Applications/OFTC.app
+Installed app and system extension.
+.TP
+.I /usr/local/bin/oftc
+Command-line tool.
+.TP
+.I ~/Library/Logs/OFTC/agent.log
+Per-user supervised connection log.
+.SH SEE ALSO
+.B systemextensionsctl(8)

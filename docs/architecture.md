@@ -12,8 +12,8 @@ oftc CLI → host app → NetworkExtension provider → Rust IKE/ESP engine
                 ↘ browser SAML       ↘ packetFlow / system tunnel
 ```
 
-The one-time `import-profile` and `migrate-psk` commands read a local
-FortiClient profile. Normal `connect` and supervised recovery use the OFTC
+The one-time `oftc setup --import` path reads a local FortiClient profile.
+Normal `connect` and supervised recovery use the OFTC
 profile and Keychain item. SAML tokens are passed to the provider for a single
 start and are not saved in VPN preferences, files, command arguments, or logs.
 

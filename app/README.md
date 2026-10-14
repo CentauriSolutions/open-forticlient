@@ -11,11 +11,12 @@ OFTC_BUILD_DIR=/private/tmp/oftc-build-local zsh app/build.sh
 ```
 
 [`sign-developer-id.sh`](sign-developer-id.sh) is a separate, explicit signing
-step for the development bundle ID. It requires matching Developer
-ID profiles and identity. The result still needs notarization and stapling
-before installation or extension activation. A final distribution identity,
-package, updater, and clean-machine validation remain on the
-[roadmap](../docs/ROADMAP.md).
+step for the final OFTC bundle IDs. It requires matching Developer ID profiles
+and identity. [`notarize-app.sh`](notarize-app.sh) and
+[`package.sh`](package.sh) prepare a stapled app and signed package containing
+the CLI and man page; [`notarize-package.sh`](notarize-package.sh) notarizes
+the package. Installation, extension activation, and live traffic require
+separate validation. See the [roadmap](../docs/ROADMAP.md).
 
 [`docs/architecture.md`](../docs/architecture.md) maps each source directory.
 The previous `spikes/` builds and the Fortinet-backed CLI are in Git commit

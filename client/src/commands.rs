@@ -6,68 +6,270 @@
 
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_APP: &str = "/Applications/OFTC development probe.app";
-const HOST_BINARY: &str = "Contents/MacOS/IntegrationHost";
-const AGENT_LABEL: &str = "com.open-forticlient.oftc.standalone";
+const DEFAULT_APP: &str = "/Applications/OFTC.app";
+const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
+const HOST_BUNDLE_ID: &str = "com.chris.openforticlient.oftc";
+const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
+const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
 
 const HELP: &str = "oftc — OFTC macOS VPN client
 
 USAGE:
-    oftc [--app /absolute/path/OFTC.app] COMMAND [OPTIONS]
+    oftc setup --import NAME
+    oftc setup --gateway HOST --saml-port PORT [--tcp]
+    oftc setup --from-development
+    oftc setup                         Choose a profile and answer setup prompts.
+    oftc connect                       Connect and enable starts at GUI login.
+    oftc disconnect                    Stop and disable automatic starts.
+    oftc status                        Show VPN, profile, agent, and rekey state.
+    oftc uninstall [--erase-profile]  Remove OFTC; keep credentials by default.
+    oftc help
 
-SETUP (explicit, one-time):
-    activate                         Activate the signed network extension.
-    install-config                   Add OFTC's macOS VPN configuration.
-    import-profile NAME              Import one FortiClient profile and PSK into
-                                     OFTC's profile store and Keychain.
-    save-profile GATEWAY PORT [--tcp] Save an OFTC-owned profile; UDP is default.
-    provision-psk GATEWAY            Read a PSK from the terminal into Keychain.
-    migrate-psk NAME GATEWAY         Import a PSK from one FortiClient profile.
-    show-profile                     Show the OFTC-owned nonsecret profile.
-
-DAILY USE:
-    connect [--insecure-saml]        Connect and supervise with fresh SAML on
-                                     recoverable drops; holds this terminal.
-    connect-once [--insecure-saml]   Start one connection without supervision.
-    status                           Show OFTC's macOS VPN status.
-    rekey-counts                     Show successful local and peer CHILD rekeys.
-    disconnect                       Stop the tunnel; disable agent autostart
-                                     when a standalone agent is installed.
-    remove-config                    Remove OFTC's macOS VPN configuration.
-
-PER-USER LAUNCH AGENT (verified TLS only):
-    install-agent                    Stage a disabled LaunchAgent for this app.
-    start-agent                      Start it now and at future GUI logins.
-    stop-agent                       Stop VPN and disable future login starts.
-    uninstall-agent                  Stop it and remove only the LaunchAgent.
-
-The LaunchAgent runs the app host's `supervise-profile` directly. Install does
-not connect; start requires the OFTC profile, PSK, and VPN configuration to be
-ready. The app path selected at install is saved in the agent. `--app` is only
-accepted with install-agent and direct host commands. The default app path is
-the installed signed development app; `--app` selects another app explicitly.";
-
-#[derive(Debug, PartialEq, Eq)]
-struct Invocation {
-    app: PathBuf,
-    args: Vec<String>,
-}
+Setup uses local OFTC development or FortiClient settings as defaults when
+available, then activates the extension and installs its macOS VPN entry. It
+does not connect. A missing PSK is read securely from the terminal.
+Connect runs a supervised session that can recover from unexpected drops.
+Uninstall may prompt for administrator access. For a development build, prefix
+setup, connect, or status with --app /absolute/path/OFTC.app.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Host(Invocation),
+    Setup(PathBuf, SetupSource),
+    Connect(PathBuf),
     Disconnect,
-    InstallAgent(PathBuf),
-    StartAgent,
-    StopAgent,
-    UninstallAgent,
+    Status(PathBuf),
+    Uninstall { erase_profile: bool },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SetupSource {
+    Existing,
+    Import(String),
+    ImportWithDefaults {
+        name: String,
+        gateway: String,
+        port: u16,
+    },
+    Development,
+    Manual {
+        gateway: String,
+        port: u16,
+        tcp: bool,
+    },
+}
+
+struct SetupCandidate {
+    label: String,
+    gateway: String,
+    port: u16,
+    tcp: bool,
+    source: SetupSource,
+}
+
+const FORTICLIENT_PLIST: &str = "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist";
+const DEVELOPMENT_BUNDLE_ID: &str = "com.chris.openforticlient.gate0";
+
+fn plist_raw(plist: &Path, key: &str) -> Option<String> {
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-extract", key, "raw", "-o", "-"])
+        .arg(plist)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 8192 {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    Some(value.trim_end_matches('\n').to_string())
+}
+
+fn regular_file(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+fn valid_gateway(value: &str) -> bool {
+    (1..=253).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && !value.contains("..")
+}
+
+fn development_candidate() -> Option<SetupCandidate> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let profile = home
+        .join("Library/Application Support")
+        .join(DEVELOPMENT_BUNDLE_ID)
+        .join("profile.json");
+    development_candidate_from(&profile)
+}
+
+fn development_candidate_from(profile: &Path) -> Option<SetupCandidate> {
+    if !regular_file(&profile) || plist_raw(&profile, "version")?.trim() != "1" {
+        return None;
+    }
+    let gateway = plist_raw(&profile, "gateway")?;
+    let port = plist_raw(&profile, "samlPort")?
+        .trim()
+        .parse::<u16>()
+        .ok()?;
+    let tcp = match plist_raw(&profile, "transport")?.trim() {
+        "udp" => false,
+        "tcp" => true,
+        _ => return None,
+    };
+    if !valid_gateway(&gateway) || port == 0 {
+        return None;
+    }
+    Some(SetupCandidate {
+        label: "OFTC development profile".into(),
+        gateway,
+        port,
+        tcp,
+        source: SetupSource::Development,
+    })
+}
+
+fn forticlient_candidates() -> Vec<SetupCandidate> {
+    forticlient_candidates_from(Path::new(FORTICLIENT_PLIST))
+}
+
+fn forticlient_candidates_from(plist: &Path) -> Vec<SetupCandidate> {
+    if !regular_file(plist) {
+        return Vec::new();
+    }
+    let Some(names) = plist_raw(plist, "Profiles") else {
+        return Vec::new();
+    };
+    names
+        .lines()
+        .filter_map(|name| {
+            let name = name.trim();
+            if name.is_empty()
+                || name.len() > 128
+                || name.contains('.')
+                || name.chars().any(char::is_control)
+            {
+                return None;
+            }
+            let prefix = format!("Profiles.{name}");
+            let gateway = plist_raw(plist, &format!("{prefix}.Server"))?;
+            if !valid_gateway(&gateway) {
+                return None;
+            }
+            let port = plist_raw(plist, &format!("{prefix}.IKESamlPort"))
+                .and_then(|value| value.trim().parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .unwrap_or(9443);
+            Some(SetupCandidate {
+                label: format!("FortiClient profile: {name}"),
+                gateway: gateway.clone(),
+                port,
+                tcp: false,
+                source: SetupSource::ImportWithDefaults {
+                    name: name.into(),
+                    gateway,
+                    port,
+                },
+            })
+        })
+        .collect()
+}
+
+fn prompt(label: &str, default: &str) -> Result<String, Box<dyn Error>> {
+    print!("{label} [{default}]: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer)? == 0 {
+        return Err("setup cancelled before saving a profile".into());
+    }
+    let answer = answer.trim();
+    Ok(if answer.is_empty() {
+        default.into()
+    } else {
+        answer.into()
+    })
+}
+
+fn interactive_source() -> Result<SetupSource, Box<dyn Error>> {
+    let mut candidates = Vec::new();
+    if let Some(candidate) = development_candidate() {
+        candidates.push(candidate);
+    }
+    candidates.extend(forticlient_candidates());
+    println!("OFTC setup sources:");
+    for (index, candidate) in candidates.iter().enumerate() {
+        println!(
+            "  {}) {} — {}:{} ({})",
+            index + 1,
+            candidate.label,
+            candidate.gateway,
+            candidate.port,
+            if candidate.tcp { "TCP" } else { "UDP" }
+        );
+    }
+    println!("  {}) Enter connection details", candidates.len() + 1);
+    let default_choice = if candidates.is_empty() {
+        candidates.len() + 1
+    } else {
+        1
+    };
+    let choice = prompt("Source", &default_choice.to_string())?
+        .parse::<usize>()
+        .map_err(|_| "choose a numbered setup source")?;
+    if !(1..=candidates.len() + 1).contains(&choice) {
+        return Err("choose a numbered setup source".into());
+    }
+    let candidate = if choice <= candidates.len() {
+        Some(candidates.swap_remove(choice - 1))
+    } else {
+        None
+    };
+    let gateway = prompt(
+        "Gateway",
+        candidate.as_ref().map_or("", |source| &source.gateway),
+    )?;
+    if !valid_gateway(&gateway) {
+        return Err("gateway must be a valid host name".into());
+    }
+    let default_port = candidate.as_ref().map_or(9443, |source| source.port);
+    let port = prompt("SAML port", &default_port.to_string())?
+        .parse::<u16>()
+        .map_err(|_| "SAML port must be in 1..65535")?;
+    if port == 0 {
+        return Err("SAML port must be in 1..65535".into());
+    }
+    let default_transport = if candidate.as_ref().is_some_and(|source| source.tcp) {
+        "tcp"
+    } else {
+        "udp"
+    };
+    let tcp = match prompt("Transport (udp/tcp)", default_transport)?
+        .to_lowercase()
+        .as_str()
+    {
+        "udp" => false,
+        "tcp" => true,
+        _ => return Err("transport must be udp or tcp".into()),
+    };
+    let source = match candidate {
+        Some(candidate)
+            if candidate.gateway == gateway && candidate.port == port && candidate.tcp == tcp =>
+        {
+            candidate.source
+        }
+        _ => SetupSource::Manual { gateway, port, tcp },
+    };
+    Ok(source)
 }
 
 fn parse(args: &[String]) -> Result<Option<Action>, String> {
@@ -87,71 +289,52 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
     };
     let tail = &args[index..];
     let command = tail.first().map(String::as_str).unwrap_or("help");
-    if command == "help" && tail.len() == 1 || tail.is_empty() {
+    if (command == "help" && tail.len() == 1 || tail.is_empty()) && !explicit_app {
         return Ok(None);
     }
     let extra = &tail[1..];
-    if extra.is_empty() {
-        match command {
-            "install-agent" => return Ok(Some(Action::InstallAgent(app))),
-            "start-agent" | "stop-agent" | "uninstall-agent" if explicit_app => {
-                return Err(
-                    "--app is only used when installing the agent; its app path is saved".into(),
-                );
-            }
-            "start-agent" => return Ok(Some(Action::StartAgent)),
-            "stop-agent" => return Ok(Some(Action::StopAgent)),
-            "uninstall-agent" => return Ok(Some(Action::UninstallAgent)),
-            "disconnect" if explicit_app => {
-                return Err("--app cannot override agent-managed disconnect".into())
-            }
-            "disconnect" => return Ok(Some(Action::Disconnect)),
-            _ => {}
-        }
-    }
-    let mut host_args = Vec::new();
     match command {
-        "activate" | "install-config" | "show-profile" | "status" | "rekey-counts" | "remove-config"
-            if extra.is_empty() =>
-        {
-            host_args.push(command.to_string())
-        }
-        "import-profile" | "provision-psk" if extra.len() == 1 && !extra[0].is_empty() => {
-            host_args.extend_from_slice(tail);
-        }
-        "migrate-psk" if extra.len() == 2 && extra.iter().all(|s| !s.is_empty()) => {
-            host_args.extend_from_slice(tail);
-        }
-        "save-profile" if extra.len() == 2 || extra.len() == 3 && extra[2] == "--tcp" => {
-            let valid_port = extra[1].parse::<u16>().is_ok_and(|p| p > 0);
-            if extra[0].is_empty() || !valid_port {
-                return Err("save-profile requires a gateway and port in 1..65535".into());
-            }
-            host_args.extend_from_slice(tail);
-        }
-        "connect" | "connect-once"
-            if extra.is_empty() || extra.len() == 1 && extra[0] == "--insecure-saml" =>
-        {
-            host_args.push(
-                if command == "connect" {
-                    "supervise-profile"
-                } else {
-                    "start-profile"
+        "setup" => {
+            let source = match extra {
+                [] => SetupSource::Existing,
+                [flag, name] if flag == "--import" && !name.is_empty() => {
+                    SetupSource::Import(name.clone())
                 }
-                .into(),
-            );
-            host_args.extend_from_slice(extra);
+                [flag] if flag == "--from-development" => SetupSource::Development,
+                [gateway_flag, gateway, port_flag, port, rest @ ..]
+                    if gateway_flag == "--gateway"
+                        && port_flag == "--saml-port"
+                        && !gateway.is_empty()
+                        && (rest.is_empty() || rest == ["--tcp"]) =>
+                {
+                    let port = port
+                        .parse::<u16>()
+                        .map_err(|_| "--saml-port must be in 1..65535")?;
+                    if port == 0 {
+                        return Err("--saml-port must be in 1..65535".into());
+                    }
+                    SetupSource::Manual {
+                        gateway: gateway.clone(),
+                        port,
+                        tcp: !rest.is_empty(),
+                    }
+                }
+                _ => return Err("invalid setup options; run `oftc help`".into()),
+            };
+            Ok(Some(Action::Setup(app, source)))
         }
-        _ => {
-            return Err(format!(
-                "unknown command or options: {command}; run `oftc help`"
-            ))
+        "connect" if extra.is_empty() => Ok(Some(Action::Connect(app))),
+        "disconnect" if extra.is_empty() && !explicit_app => Ok(Some(Action::Disconnect)),
+        "status" if extra.is_empty() => Ok(Some(Action::Status(app))),
+        "uninstall" if !explicit_app && (extra.is_empty() || extra == ["--erase-profile"]) => {
+            Ok(Some(Action::Uninstall {
+                erase_profile: !extra.is_empty(),
+            }))
         }
+        _ => Err(format!(
+            "unknown command or options: {command}; run `oftc help`"
+        )),
     }
-    Ok(Some(Action::Host(Invocation {
-        app,
-        args: host_args,
-    })))
 }
 
 fn host_executable(app: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -166,10 +349,248 @@ fn host_executable(app: &Path) -> Result<PathBuf, Box<dyn Error>> {
     Ok(executable)
 }
 
-fn run_host(executable: &Path, args: &[String]) -> Result<(), Box<dyn Error>> {
+fn run_host(executable: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     let status = Command::new(executable).args(args).status()?;
     if !status.success() {
         return Err(format!("OFTC host exited with {status}").into());
+    }
+    Ok(())
+}
+
+fn host_output(executable: &Path, command: &str) -> Result<std::process::Output, Box<dyn Error>> {
+    Ok(Command::new(executable).arg(command).output()?)
+}
+
+fn has_psk(executable: &Path) -> Result<bool, Box<dyn Error>> {
+    Ok(host_output(executable, "has-psk")?.status.success())
+}
+
+fn try_development_psk(executable: &Path) {
+    let Some(development) = development_candidate() else {
+        return;
+    };
+    for candidate in forticlient_candidates() {
+        if candidate.gateway != development.gateway {
+            continue;
+        }
+        let SetupSource::ImportWithDefaults { name, .. } = candidate.source else {
+            continue;
+        };
+        let migrated = Command::new(executable)
+            .args(["migrate-psk", &name, &development.gateway])
+            .output();
+        if migrated.is_ok_and(|result| result.status.success()) {
+            println!("Saved FortiClient PSK copied into the OFTC Keychain item.");
+            return;
+        }
+    }
+}
+
+fn run_setup(app: &Path, source: SetupSource) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    match source {
+        SetupSource::Existing => {
+            if host_output(&host, "show-profile")?.status.success() {
+                run_host(&host, &["show-profile"])?;
+            } else if io::stdin().is_terminal() {
+                return run_setup(app, interactive_source()?);
+            } else {
+                return Err("no OFTC profile is configured; run `oftc setup` in a terminal or pass setup options".into());
+            }
+        }
+        SetupSource::Import(name) => {
+            if host_output(&host, "show-profile")?.status.success() {
+                return Err("OFTC already has a profile; setup will not overwrite it".into());
+            }
+            run_host(&host, &["import-profile", &name])?;
+        }
+        SetupSource::ImportWithDefaults {
+            name,
+            gateway,
+            port,
+        } => {
+            if host_output(&host, "show-profile")?.status.success() {
+                return Err("OFTC already has a profile; setup will not overwrite it".into());
+            }
+            if run_host(&host, &["import-profile", &name]).is_err() {
+                if host_output(&host, "show-profile")?.status.success() {
+                    return Err("FortiClient import partly completed; inspect `oftc status` before retrying".into());
+                }
+                println!("FortiClient credentials were unavailable. Using its connection settings; enter the PSK when prompted.");
+                run_host(&host, &["save-profile", &gateway, &port.to_string()])?;
+            }
+        }
+        SetupSource::Development => {
+            run_host(&host, &["import-development-profile"])?;
+            if !has_psk(&host)? {
+                try_development_psk(&host);
+            }
+        }
+        SetupSource::Manual { gateway, port, tcp } => {
+            if host_output(&host, "show-profile")?.status.success() {
+                return Err("OFTC already has a profile; setup will not overwrite it".into());
+            }
+            let port = port.to_string();
+            if tcp {
+                run_host(&host, &["save-profile", &gateway, &port, "--tcp"])?;
+            } else {
+                run_host(&host, &["save-profile", &gateway, &port])?;
+            }
+        }
+    }
+    if !has_psk(&host)? {
+        println!("Enter the VPN PSK; it will be saved in your OFTC Keychain item.");
+        run_host(&host, &["provision-psk"])?;
+    }
+    run_host(&host, &["activate"])?;
+    run_host(&host, &["install-config"])?;
+    println!("OFTC setup complete. Run `oftc connect` when ready.");
+    Ok(())
+}
+
+fn run_connect(app: &Path) -> Result<(), Box<dyn Error>> {
+    host_executable(app)?;
+    let requested = app.canonicalize()?;
+    let host = host_executable(&requested)?;
+    run_host(&host, &["show-profile"])?;
+    if !has_psk(&host)? {
+        return Err("OFTC PSK is unavailable; run `oftc setup`".into());
+    }
+    let vpn = host_output(&host, "status")?;
+    if !vpn.status.success() || String::from_utf8_lossy(&vpn.stdout).contains("absent") {
+        return Err("OFTC VPN configuration is unavailable; run `oftc setup`".into());
+    }
+    let (home, _, target) = user_home_and_target()?;
+    let plist = agent_plist(&home);
+    if plist.symlink_metadata().is_ok() {
+        let installed = installed_host(&plist)?;
+        if installed != host {
+            return Err(
+                "OFTC login agent points to a different app; remove it before changing apps".into(),
+            );
+        }
+        if !loaded(&target)
+            && plist_field(&plist, "AssociatedBundleIdentifiers.0")
+                .ok()
+                .as_deref()
+                != Some(HOST_BUNDLE_ID)
+        {
+            let contents = agent_contents(&host, &agent_log(&home))?;
+            write_agent_plist(&plist, &contents)?;
+            println!("Updated OFTC background item attribution.");
+        }
+    } else {
+        install_agent(&requested)?;
+    }
+    start_agent()
+}
+
+fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    let vpn = host_output(&host, "status")?;
+    if !vpn.status.success() {
+        return Err("could not read OFTC VPN status".into());
+    }
+    let vpn_text = String::from_utf8_lossy(&vpn.stdout);
+    print!("{vpn_text}");
+    let profile = host_output(&host, "show-profile")?;
+    if profile.status.success() {
+        print!("{}", String::from_utf8_lossy(&profile.stdout));
+    } else {
+        println!("OFTC profile: not configured");
+    }
+    let (home, _, target) = user_home_and_target()?;
+    let plist = agent_plist(&home);
+    println!(
+        "Login agent: {}",
+        if loaded(&target) {
+            "loaded"
+        } else if plist.is_file() {
+            "installed but stopped"
+        } else {
+            "not installed"
+        }
+    );
+    if vpn_text.contains("status: connected") {
+        let rekeys = host_output(&host, "rekey-counts")?;
+        if rekeys.status.success() {
+            print!("{}", String::from_utf8_lossy(&rekeys.stdout));
+        } else {
+            println!("CHILD_SA rekey counts unavailable");
+        }
+    }
+    Ok(())
+}
+
+fn wait_disconnected(host: &Path) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let status = host_output(host, "status")?;
+        let text = String::from_utf8_lossy(&status.stdout);
+        if status.status.success()
+            && (text.contains("status: disconnected")
+                || text.contains("status: invalid")
+                || text.contains("absent"))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "OFTC VPN did not disconnect; uninstall stopped before removing its configuration"
+                    .into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn extension_active() -> Result<bool, Box<dyn Error>> {
+    let output = Command::new("/usr/bin/systemextensionsctl")
+        .arg("list")
+        .output()?;
+    if !output.status.success() {
+        return Err("could not read macOS system extension state".into());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .any(|line| line.contains(PROVIDER_ID) && line.contains("[activated enabled]")))
+}
+
+fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
+    let helper = Path::new("/usr/local/libexec/oftc/remove-package");
+    if !helper.is_file() {
+        return Err(
+            "OFTC package removal helper is missing; uninstall requires the installed package"
+                .into(),
+        );
+    }
+    let host = host_executable(Path::new(DEFAULT_APP))?;
+    let (home, _, target) = user_home_and_target()?;
+    if agent_plist(&home).is_file() || loaded(&target) {
+        uninstall_agent()?;
+    } else {
+        let status = host_output(&host, "status")?;
+        let text = String::from_utf8_lossy(&status.stdout);
+        if status.status.success()
+            && !text.contains("status: disconnected")
+            && !text.contains("status: invalid")
+            && !text.contains("absent")
+        {
+            run_host(&host, &["stop"])?;
+        }
+    }
+    wait_disconnected(&host)?;
+    if erase_profile {
+        run_host(&host, &["erase-profile"])?;
+    }
+    run_host(&host, &["remove-config"])?;
+    if extension_active()? {
+        run_host(&host, &["deactivate"])?;
+    }
+    let status = Command::new("/usr/bin/sudo").arg(helper).status()?;
+    if !status.success() {
+        return Err("package removal stopped; complete any macOS system extension approval and rerun `oftc uninstall`".into());
     }
     Ok(())
 }
@@ -180,7 +601,7 @@ fn agent_plist(home: &Path) -> PathBuf {
 }
 
 fn agent_log(home: &Path) -> PathBuf {
-    home.join("Library/Logs/open-forticlient/standalone.log")
+    home.join("Library/Logs/OFTC/agent.log")
 }
 
 fn xml_escape(value: &str) -> String {
@@ -202,6 +623,8 @@ fn agent_contents(executable: &Path, log: &Path) -> Result<String, Box<dyn Error
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{AGENT_LABEL}</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array><string>{HOST_BUNDLE_ID}</string></array>
   <key>ProgramArguments</key>
   <array>
     <string>{}</string>
@@ -219,6 +642,25 @@ fn agent_contents(executable: &Path, log: &Path) -> Result<String, Box<dyn Error
         xml_escape(log),
         xml_escape(log)
     ))
+}
+
+fn write_agent_plist(plist: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
+    let temp = plist.with_extension(format!("plist.{}.tmp", std::process::id()));
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, plist)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 fn user_home_and_target() -> Result<(PathBuf, String, String), Box<dyn Error>> {
@@ -272,7 +714,7 @@ fn plist_field(plist: &Path, key: &str) -> Result<String, Box<dyn Error>> {
         .arg(plist)
         .output()?;
     if !output.status.success() {
-        return Err(format!("could not read {key} from installed standalone agent plist").into());
+        return Err(format!("could not read {key} from installed OFTC agent plist").into());
     }
     Ok(String::from_utf8(output.stdout)?
         .trim_end_matches('\n')
@@ -281,22 +723,16 @@ fn plist_field(plist: &Path, key: &str) -> Result<String, Box<dyn Error>> {
 
 fn installed_host(plist: &Path) -> Result<PathBuf, Box<dyn Error>> {
     if !plist.is_file() {
-        return Err(
-            "agent is not installed; run `oftc install-agent`".into(),
-        );
+        return Err("login agent is not installed; run `oftc connect`".into());
     }
     if plist_field(plist, "Label")? != AGENT_LABEL
         || plist_field(plist, "ProgramArguments.1")? != "supervise-profile"
     {
-        return Err("installed standalone agent plist has an unexpected label or command".into());
+        return Err("installed OFTC agent plist has an unexpected label or command".into());
     }
     let path = PathBuf::from(plist_field(plist, "ProgramArguments.0")?);
-    if !path.is_absolute()
-        || path
-            .file_name()
-            .is_none_or(|name| name != "IntegrationHost")
-    {
-        return Err("installed standalone agent has an unexpected host path".into());
+    if !path.is_absolute() || path.file_name().is_none_or(|name| name != "OFTCAgent") {
+        return Err("installed OFTC agent has an unexpected host path".into());
     }
     Ok(path)
 }
@@ -305,7 +741,10 @@ fn install_agent(app: &Path) -> Result<(), Box<dyn Error>> {
     let (home, _domain, target) = user_home_and_target()?;
     let plist = agent_plist(&home);
     if plist.symlink_metadata().is_ok() || loaded(&target) {
-        return Err("standalone agent already installed or loaded; stop and uninstall it before changing apps".into());
+        return Err(
+            "OFTC agent already installed or loaded; stop and uninstall it before changing apps"
+                .into(),
+        );
     }
     let app = app.canonicalize()?;
     let executable = host_executable(&app)?;
@@ -314,29 +753,16 @@ fn install_agent(app: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(plist.parent().ok_or("invalid LaunchAgent path")?)?;
     fs::create_dir_all(log.parent().ok_or("invalid log path")?)?;
 
-    // Disable before the plist appears, so install cannot start a VPN at this
-    // or the next login. start-agent is the explicit opt-in to autostart.
+    // Disable before the plist appears, so a partial connect cannot start a
+    // VPN at this or the next login. connect opts in to autostart afterward.
     launchctl(&["disable", &target])?;
-    let temp = plist.with_extension(format!("plist.{}.tmp", std::process::id()));
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, &plist)?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temp);
+    if let Err(error) = write_agent_plist(&plist, &contents) {
         let _ = launchctl(&["enable", &target]);
         return Err(error);
     }
-    println!("Staged disabled standalone agent: {}", plist.display());
+    println!("Staged disabled OFTC agent: {}", plist.display());
     println!("App host: {}", executable.display());
-    println!("Start now and at future GUI logins: oftc start-agent");
+    println!("Start now and at future GUI logins: oftc connect");
     Ok(())
 }
 
@@ -346,7 +772,7 @@ fn start_agent() -> Result<(), Box<dyn Error>> {
     let host = installed_host(&plist)?;
     if !host.is_file() {
         return Err(format!(
-            "installed app host is missing at {}; reinstall the standalone agent for a new app",
+            "installed app host is missing at {}; reinstall the OFTC agent for a new app",
             host.display()
         )
         .into());
@@ -370,7 +796,7 @@ fn start_agent() -> Result<(), Box<dyn Error>> {
         }
         return Err(error);
     }
-    println!("Standalone supervisor launch requested; it will also start at future GUI logins.");
+    println!("OFTC agent launch requested; it will also start at future GUI logins.");
     println!("VPN: oftc status");
     println!("Logs: {}", agent_log(&home).display());
     Ok(())
@@ -383,7 +809,7 @@ fn stop_agent() -> Result<(), Box<dyn Error>> {
     // The host's stop command first signals its supervisor lease, preventing a
     // fresh SAML attempt, then asks NetworkExtension to stop the VPN.
     let stop_result = if host.is_file() {
-        run_host(&host, &["stop".into()])
+        run_host(&host, &["stop"])
     } else {
         Err(format!("installed app host is missing at {}", host.display()).into())
     };
@@ -394,7 +820,7 @@ fn stop_agent() -> Result<(), Box<dyn Error>> {
     };
     bootout_result?;
     stop_result?;
-    println!("Standalone supervisor stopped and disabled for future GUI logins.");
+    println!("OFTC agent stopped and disabled for future GUI logins.");
     Ok(())
 }
 
@@ -402,17 +828,19 @@ fn uninstall_agent() -> Result<(), Box<dyn Error>> {
     let (home, _domain, target) = user_home_and_target()?;
     let plist = agent_plist(&home);
     if !plist.is_file() {
-        return Err("standalone agent is not installed".into());
+        return Err("OFTC agent is not installed".into());
     }
     // Even if the app has moved and its `stop` command cannot run, disabling
     // and booting out the job still lets the operator remove the agent.
     let stop_result = stop_agent();
     if !wait_unloaded(&target) {
-        return Err("standalone agent is still loaded; it was not removed".into());
+        return Err("OFTC agent is still loaded; it was not removed".into());
     }
     fs::remove_file(&plist)?;
     launchctl(&["enable", &target])?; // Clear the disabled override for a future install.
-    println!("Removed standalone LaunchAgent. OFTC app, VPN configuration, profile, Keychain PSK, and logs remain.");
+    println!(
+        "Removed OFTC LaunchAgent. App, VPN configuration, profile, Keychain PSK, and logs remain."
+    );
     if let Err(error) = stop_result {
         return Err(format!("agent removed, but VPN stop could not be confirmed: {error}").into());
     }
@@ -425,19 +853,18 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
     match action {
-        Action::Host(invocation) => run_host(&host_executable(&invocation.app)?, &invocation.args),
+        Action::Setup(app, source) => run_setup(&app, source),
+        Action::Connect(app) => run_connect(&app),
         Action::Disconnect => {
             let (home, _, target) = user_home_and_target()?;
             if agent_plist(&home).is_file() || loaded(&target) {
                 stop_agent()
             } else {
-                run_host(&host_executable(Path::new(DEFAULT_APP))?, &["stop".into()])
+                run_host(&host_executable(Path::new(DEFAULT_APP))?, &["stop"])
             }
         }
-        Action::InstallAgent(app) => install_agent(&app),
-        Action::StartAgent => start_agent(),
-        Action::StopAgent => stop_agent(),
-        Action::UninstallAgent => uninstall_agent(),
+        Action::Status(app) => run_status(&app),
+        Action::Uninstall { erase_profile } => run_uninstall(erase_profile),
     }
 }
 
@@ -450,73 +877,102 @@ mod tests {
     }
 
     #[test]
-    fn selected_backend_and_supervision_are_explicit() {
-        let Action::Host(parsed) = parse(&words("connect")).unwrap().unwrap() else {
-            panic!()
-        };
-        assert_eq!(parsed.app, PathBuf::from(DEFAULT_APP));
-        assert_eq!(parsed.args, ["supervise-profile"]);
-        let Action::Host(parsed) = parse(&words("connect-once")).unwrap().unwrap() else {
-            panic!()
-        };
-        assert_eq!(parsed.args, ["start-profile"]);
-        assert_eq!(parse(&words("disconnect")).unwrap(), Some(Action::Disconnect));
+    fn public_lifecycle_is_small_and_exact() {
+        assert_eq!(
+            parse(&words("connect")).unwrap(),
+            Some(Action::Connect(DEFAULT_APP.into()))
+        );
+        assert_eq!(
+            parse(&words("disconnect")).unwrap(),
+            Some(Action::Disconnect)
+        );
+        assert_eq!(
+            parse(&words("status")).unwrap(),
+            Some(Action::Status(DEFAULT_APP.into()))
+        );
+        assert_eq!(
+            parse(&words("uninstall")).unwrap(),
+            Some(Action::Uninstall {
+                erase_profile: false
+            })
+        );
+        assert_eq!(
+            parse(&words("uninstall --erase-profile")).unwrap(),
+            Some(Action::Uninstall {
+                erase_profile: true
+            })
+        );
+        assert_eq!(
+            parse(&words("setup")).unwrap(),
+            Some(Action::Setup(DEFAULT_APP.into(), SetupSource::Existing))
+        );
+        assert!(parse(&words("connect-once")).is_err());
+        assert!(parse(&words("start-agent")).is_err());
+        assert!(parse(&words("activate")).is_err());
+        assert!(parse(&words("rekey-counts")).is_err());
+        assert!(parse(&words("connect --insecure-saml")).is_err());
         assert!(parse(&words("--app /tmp/OFTC.app disconnect")).is_err());
+        assert!(parse(&words("--app /tmp/OFTC.app uninstall")).is_err());
     }
 
     #[test]
-    fn setup_and_transport_are_exact() {
-        let Action::Host(parsed) = parse(&words(
-            "--app /tmp/OFTC.app save-profile vpn.example.test 9443 --tcp",
-        ))
-        .unwrap()
-        .unwrap() else {
-            panic!()
-        };
-        assert_eq!(parsed.app, PathBuf::from("/tmp/OFTC.app"));
+    fn setup_sources_and_transport_are_exact() {
         assert_eq!(
-            parsed.args,
-            ["save-profile", "vpn.example.test", "9443", "--tcp"]
+            parse(&words("setup --import Office")).unwrap(),
+            Some(Action::Setup(
+                DEFAULT_APP.into(),
+                SetupSource::Import("Office".into())
+            ))
         );
-        assert!(parse(&words("save-profile vpn.example.test 0")).is_err());
-        assert!(parse(&words("connect --tcp")).is_err());
-        assert!(parse(&words("status --profile Office")).is_err());
+        assert_eq!(
+            parse(&words("setup --from-development")).unwrap(),
+            Some(Action::Setup(DEFAULT_APP.into(), SetupSource::Development))
+        );
+        assert_eq!(
+            parse(&words(
+                "--app /tmp/OFTC.app setup --gateway vpn.example.test --saml-port 9443 --tcp"
+            ))
+            .unwrap(),
+            Some(Action::Setup(
+                PathBuf::from("/tmp/OFTC.app"),
+                SetupSource::Manual {
+                    gateway: "vpn.example.test".into(),
+                    port: 9443,
+                    tcp: true
+                }
+            ))
+        );
+        assert!(parse(&words("setup --gateway vpn.example.test --saml-port 0")).is_err());
+        assert!(parse(&words("setup --gateway vpn.example.test --saml-port 65536")).is_err());
+        assert!(parse(&words(
+            "setup --gateway vpn.example.test --saml-port 9443 --tcp --tcp"
+        ))
+        .is_err());
+        assert!(parse(&words(
+            "setup --gateway vpn.example.test --saml-port 9443 --insecure-saml"
+        ))
+        .is_err());
         assert!(parse(&words("--app ../OFTC.app status")).is_err());
     }
 
     #[test]
-    fn agent_is_opt_in_and_does_not_persist_insecure_saml() {
+    fn help_and_development_app_path_are_explicit() {
+        assert_eq!(parse(&words("help")).unwrap(), None);
+        assert_eq!(parse(&[]).unwrap(), None);
         assert_eq!(
-            parse(&words("install-agent")).unwrap(),
-            Some(Action::InstallAgent(DEFAULT_APP.into()))
+            parse(&words("--app /tmp/OFTC.app connect")).unwrap(),
+            Some(Action::Connect("/tmp/OFTC.app".into()))
         );
-        assert_eq!(
-            parse(&words("--app /tmp/OFTC.app install-agent")).unwrap(),
-            Some(Action::InstallAgent("/tmp/OFTC.app".into()))
-        );
-        assert_eq!(
-            parse(&words("start-agent")).unwrap(),
-            Some(Action::StartAgent)
-        );
-        assert_eq!(
-            parse(&words("stop-agent")).unwrap(),
-            Some(Action::StopAgent)
-        );
-        assert_eq!(
-            parse(&words("uninstall-agent")).unwrap(),
-            Some(Action::UninstallAgent)
-        );
-        assert!(parse(&words("--app /tmp/OFTC.app stop-agent")).is_err());
-        assert!(parse(&words("install-agent --insecure-saml")).is_err());
-        assert!(parse(&words("start-agent --insecure-saml")).is_err());
+        assert!(parse(&words("--app /tmp/OFTC.app help")).is_err());
     }
 
     #[test]
     fn agent_plist_runs_only_supervisor() {
-        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/IntegrationHost");
-        let log = Path::new("/Users/example/Library/Logs/open-forticlient/standalone.log");
+        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/OFTCAgent");
+        let log = Path::new("/Users/example/Library/Logs/OFTC/agent.log");
         let plist = agent_contents(host, log).unwrap();
-        assert!(plist.contains("com.open-forticlient.oftc.standalone"));
+        assert!(plist.contains("com.chris.openforticlient.oftc.agent"));
+        assert!(plist.contains("<array><string>com.chris.openforticlient.oftc</string></array>"));
         assert!(plist.contains("OFTC &amp; Test.app"));
         assert!(plist.contains("<string>supervise-profile</string>"));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
@@ -528,8 +984,8 @@ mod tests {
 
     #[test]
     fn macos_can_parse_installed_agent_fields() {
-        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/IntegrationHost");
-        let log = Path::new("/Users/example/Library/Logs/open-forticlient/standalone.log");
+        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/OFTCAgent");
+        let log = Path::new("/Users/example/Library/Logs/OFTC/agent.log");
         let temp =
             std::env::temp_dir().join(format!("oftc-agent-test-{}.plist", std::process::id()));
         fs::write(&temp, agent_contents(host, log).unwrap()).unwrap();
@@ -542,5 +998,40 @@ mod tests {
         fs::remove_file(&temp).unwrap();
         assert!(lint.success());
         assert_eq!(extracted.unwrap(), host);
+    }
+
+    #[test]
+    fn setup_discovers_nonsecret_local_defaults() {
+        assert!(valid_gateway("vpn.example.test"));
+        assert!(!valid_gateway("vpn.example.test\u{1b}[2J"));
+        let temp = std::env::temp_dir().join(format!("oftc-setup-test-{}", std::process::id()));
+        fs::create_dir(&temp).unwrap();
+        let development = temp.join("development.json");
+        let forticlient = temp.join("forticlient.json");
+        fs::write(
+            &development,
+            r#"{"version":1,"gateway":"vpn.example.test","samlPort":9443,"transport":"udp"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &forticlient,
+            r#"{"Profiles":{"Work VPN":{"Server":"vpn.example.test","IKESamlPort":9443}}}"#,
+        )
+        .unwrap();
+        let dev = development_candidate_from(&development).unwrap();
+        assert_eq!(dev.gateway, "vpn.example.test");
+        assert_eq!(dev.source, SetupSource::Development);
+        let imported = forticlient_candidates_from(&forticlient);
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].port, 9443);
+        assert_eq!(
+            imported[0].source,
+            SetupSource::ImportWithDefaults {
+                name: "Work VPN".into(),
+                gateway: "vpn.example.test".into(),
+                port: 9443,
+            }
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 }

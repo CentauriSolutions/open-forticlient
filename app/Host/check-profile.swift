@@ -13,6 +13,9 @@ struct ProfileCheck {
         precondition(loaded == profile)
         let attributes = try FileManager.default.attributesOfItem(atPath: store.url.path)
         precondition(attributes[.posixPermissions] as? NSNumber == 0o600)
+        try store.remove()
+        precondition(!FileManager.default.fileExists(atPath: store.url.path))
+        try store.save(profile)
         let tcp = try OFTCProfile(gateway: "vpn.example.com", samlPort: 9443,
                                   transport: .tcp)
         precondition(tcp.transport == .tcp)
@@ -26,6 +29,7 @@ struct ProfileCheck {
         try FileManager.default.createSymbolicLink(at: store.url,
             withDestinationURL: URL(fileURLWithPath: "/etc/hosts"))
         precondition((try? store.load()) == nil)
+        precondition((try? store.remove()) == nil)
         print("OFTC profile store checks passed")
     }
 }

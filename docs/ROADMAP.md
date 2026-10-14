@@ -2,18 +2,18 @@
 
 The active implementation is the standalone macOS app in [`app/`](../app/).
 The Fortinet-backed controller and the research gates are available in Git
-commit `b9ade25`; they are no longer build inputs. The source builds an
-offline v16 candidate using the v15 development bundle ID; v15 is the
-live-tested installation.
+commit `b9ade25`; they are no longer build inputs. OFTC 1.0.1 build 18 is a
+signed, notarized candidate installed on the development Mac. Its setup,
+extension activation, and short live IPv4 UDP canary passed. Build v15 has
+the longer recovery and renewal evidence.
 
 ## Next: distributable client
 
-1. Choose the final app name, bundle IDs, and version scheme. Provision matching
-   host and provider Developer ID profiles and entitlements.
-2. Package the app and `oftc` CLI with a supported install, update, and uninstall
-   flow. Verify signing, notarization, stapling, extension activation, agent
-   lifecycle, and migration on a clean Mac. Keep build output separate from the
-   installed app.
+1. Pin the source revision and rebuild the signed, notarized package from it.
+2. Validate fresh interactive SSO, recovery, and a longer connection on build
+   18. Its short protected IPv4 traffic and explicit stop passed. On a
+   separate canary Mac, exercise fresh guided setup, update, uninstall, and
+   route/DNS cleanup. See the [pilot guide](pilot-validation.md).
 3. Make recovery after a host crash explicit. The current LaunchAgent uses
    `KeepAlive=false` because the host supervises connection recovery itself;
    launchd restart after a crash has not been validated.
