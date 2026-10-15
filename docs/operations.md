@@ -1,10 +1,9 @@
 # Operating OFTC
 
 The release package installs `/Applications/OFTC.app`, `/usr/local/bin/oftc`,
-and `man oftc`. Build 19 is the current pilot package. Local upgrade,
-profile/PSK preservation, extension activation, and a short live IPv4 UDP
-connection passed. Recovery and longer sessions on this package remain open;
-see the [build 19 record](evidence/v19-packaged-pilot.md).
+and `man oftc`. The [1.0.3 build 20 colleague packet](evidence/v20-packaged-pilot.md)
+is the current pilot. The development Mac has [1.0.4 build 22](evidence/v22-bundled-agent-candidate.md)
+for the bundled-agent label check; its provider has not been activated there.
 
 For colleagues testing the package, use the shorter [pilot guide](pilot-validation.md)
 and its [local report script](../scripts/collect-pilot-report.zsh).
@@ -23,11 +22,9 @@ Extension if macOS requests it. Setup prepares the VPN without connecting;
 rerun `oftc setup` if approval interrupted it. See `man oftc` for explicit
 setup options.
 
-For the current development installation only, first run
-`app/migrate-development.sh --plan` and then `--apply` after installing the
-release package. The script stops the old agent and VPN while retaining its
-app, profile, and Keychain item for rollback. Then run `oftc setup` and choose
-the development profile.
+An update keeps the existing OFTC profile and Keychain PSK. If `oftc status`
+shows the profile, the setup or import window opened after installation is
+optional; close it and use `oftc connect` when ready.
 
 ## Connect and inspect
 
@@ -38,8 +35,10 @@ oftc disconnect
 ```
 
 `connect` starts a supervised connection and enables starts at future GUI
-logins. Browser SSO may appear. The supervisor retries recoverable drops.
-`disconnect` stops the VPN and disables those future starts, so a deliberate
+logins by registering the agent bundled in `OFTC.app`. On the first connection
+after an upgrade, it removes the old per-user LaunchAgent plist. Browser SSO
+may appear. The supervisor retries recoverable drops.
+`disconnect` stops the VPN and unregisters the bundled agent, so a deliberate
 stop stays down until `oftc connect`. `status` shows VPN and agent state,
 nonsecret profile settings, and CHILD SA rekey counts when connected. Agent
 logs are in `~/Library/Logs/OFTC/agent.log`. Do not share raw SAML callbacks,

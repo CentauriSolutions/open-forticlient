@@ -16,14 +16,19 @@ and [initial rollout gaps](docs/initial-rollout-gaps.md). The OFTC 1.0.2
 build 19 package was built from pinned commit `6bebfa6`, signed, notarized,
 installed, and activated on the development Mac. A short live IPv4 UDP
 connection to the approved target and explicit stop passed. Its longer
-lifecycle and recovery gates remain open on this packaged build. See the
+lifecycle and recovery gates remain open on that packaged build. See the
 [build 19 package record](docs/evidence/v19-packaged-pilot.md).
+
+The OFTC 1.0.3 build 20 colleague packet is signed, notarized, and ready for
+another pilot. Its app-led setup and uninstall passed an offline Mac mini test.
+Fresh extension approval and live VPN traffic have not yet been tested on
+1.0.3. See the [pilot guide](docs/pilot-validation.md) and
+[build 20 record](docs/evidence/v20-packaged-pilot.md).
 
 The current checkout contains the standalone implementation. The former
 Fortinet-backed controller and experiment source are preserved in Git commit
 `b9ade25`; for example, `git show b9ade25:client/README.md` describes the
-rollback controller. The installed build 19 app is independent of source-tree
-changes.
+rollback controller. An installed app is independent of source-tree changes.
 
 ## Source and build
 
@@ -33,6 +38,7 @@ changes.
 | [client/](client/) | `oftc` command-line interface for the standalone app. |
 | [docs/operations.md](docs/operations.md) | Setup, connection, stop, and diagnostics. |
 | [docs/pilot-validation.md](docs/pilot-validation.md) | Short install and test guide for colleagues. |
+| [docs/managed-deployment.md](docs/managed-deployment.md) | Narrow MDM approval policy for managed Macs. |
 | [scripts/collect-pilot-report.zsh](scripts/collect-pilot-report.zsh) | Local state and connectivity report for the pilot target. |
 | [docs/architecture.md](docs/architecture.md) | Component boundaries and secret handling. |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Release work and validation gates. |
@@ -49,11 +55,11 @@ cargo build --offline --release --manifest-path client/Cargo.toml
 
 `app/build.sh` runs offline checks and writes only to the selected build
 directory. It does not sign, install, activate, authenticate, or connect.
-The source builds the OFTC 1.0.2 candidate with final bundle IDs and a small
+The source builds the OFTC 1.0.4 candidate with final bundle IDs and a small
 public CLI: `setup`, `connect`, `disconnect`, `status`, and `uninstall`. See
-[the man page](client/man/oftc.1) for the complete command syntax. Build 19 is
-installed on this Mac. Clean-install validation on another Mac is a separate
-release step.
+[the man page](client/man/oftc.1) for the complete command syntax. Fresh
+extension approval and live validation on the 1.0.4 package remain separate
+release steps.
 
 ## Scope
 
