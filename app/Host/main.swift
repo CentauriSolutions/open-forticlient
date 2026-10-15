@@ -1,4 +1,5 @@
 import Darwin
+import AppKit
 import Foundation
 import NetworkExtension
 import Security
@@ -239,7 +240,9 @@ private final class ExtensionDelegate: NSObject, OSSystemExtensionRequestDelegat
     func request(_ request: OSSystemExtensionRequest,
                  actionForReplacingExtension existing: OSSystemExtensionProperties,
                  withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        .replace
+        print("System extension replacement: \(existing.bundleShortVersion)/\(existing.bundleVersion) -> \(replacement.bundleShortVersion)/\(replacement.bundleVersion)")
+        fflush(stdout)
+        return .replace
     }
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
@@ -249,7 +252,8 @@ private final class ExtensionDelegate: NSObject, OSSystemExtensionRequestDelegat
         finish("System extension request completed")
     }
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        finish("System extension request failed", code: 1)
+        let nsError = error as NSError
+        finish("System extension request failed: domain=\(nsError.domain) code=\(nsError.code)", code: 1)
     }
 }
 
@@ -341,11 +345,32 @@ private func runLive(gateway: String, port: UInt32,
     dispatchMain()
 }
 
-private let usage = "Usage: OFTCAgent activate|deactivate|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|import-development-profile|show-profile|erase-profile|has-psk|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+private let usage = "Usage: OFTCAgent activate|deactivate|agent-status|register-agent|unregister-agent|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|import-development-profile|show-profile|erase-profile|has-psk|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 let args = Array(CommandLine.arguments.dropFirst())
+if args.isEmpty {
+    guard let onboarding = OFTCOnboarding(appID: appID) else {
+        finish("Invalid OFTC app identity", code: 1)
+    }
+    onboarding.show()
+    withExtendedLifetime(onboarding) { NSApplication.shared.run() }
+    exit(0)
+}
 guard let command = args.first, !appID.isEmpty else { finish(usage, code: 2) }
 
 switch command {
+case "agent-status" where args.count == 1:
+    finish(OFTCAgentService.status)
+
+case "register-agent" where args.count == 1:
+    do { try OFTCAgentService.register() }
+    catch { finish("Could not register OFTC login agent: \(error.localizedDescription)", code: 1) }
+    finish("OFTC login agent registered")
+
+case "unregister-agent" where args.count == 1:
+    do { try OFTCAgentService.unregister() }
+    catch { finish("Could not unregister OFTC login agent: \(error.localizedDescription)", code: 1) }
+    finish("OFTC login agent unregistered")
+
 case "activate" where args.count == 1, "deactivate" where args.count == 1:
     let delegate = ExtensionDelegate()
     let request = command == "activate"
@@ -512,6 +537,10 @@ case "supervise-live" where args.count >= 3:
             insecure: insecure, supervised: true)
 
 case "start-profile", "supervise-profile":
+    if command == "supervise-profile" {
+        do { try OFTCAgentService.redirectSupervisorOutput() }
+        catch { finish(error.localizedDescription, code: 1) }
+    }
     let profile = storedProfile()
     var flags = Array(args.dropFirst())
     if profile.transport == .tcp && !flags.contains("--tcp") {

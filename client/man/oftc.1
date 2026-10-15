@@ -56,8 +56,9 @@ available. This is only for migration from the OFTC
 development build. Stop the old VPN and its login agent first.
 .TP
 .B connect
-Start a supervised VPN connection. The per-user login agent is installed if
-needed and enabled for future GUI logins. A browser sign-in may be required.
+Start a supervised VPN connection. The app-bundled login agent is registered
+if needed and enabled for future GUI logins. A legacy per-user agent from an
+earlier OFTC version is removed during the first connection. A browser sign-in may be required.
 Recoverable connection failures are retried by the supervisor.
 .TP
 .B disconnect
@@ -70,7 +71,7 @@ Show VPN state, nonsecret profile settings, login agent state, and CHILD SA
 rekey counts while connected.
 .TP
 .B uninstall
-Disconnect OFTC, remove its per-user login agent and VPN configuration,
+Disconnect OFTC, unregister its bundled login agent, remove any legacy agent and VPN configuration,
 deactivate its system extension, and invoke the package removal helper with
 administrator access. Profile, Keychain PSK, and logs are retained by default.
 The helper refuses to remove the app while the extension remains active.
@@ -88,7 +89,8 @@ Prefix
 .BR connect ,
 or
 .B status
-to target a development build. The login agent records that app path.
+to target a signed development build. Its bundled login agent is registered
+from that app. Do not register two OFTC apps with the same bundle identifier.
 .SH FILES
 .TP
 .I /Applications/OFTC.app

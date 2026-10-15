@@ -18,19 +18,22 @@ fi
 app="$build/OFTC.app"
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
 app_frameworks="$app/Contents/Frameworks"
+agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.agent.plist"
 provider_frameworks="$extension/Contents/Frameworks"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app_frameworks" \
+    "${agent_plist:h}" \
     "$extension/Contents/MacOS" "$provider_frameworks" "$build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$build/module-cache"
 export SWIFT_MODULECACHE_PATH="$build/module-cache"
 cp "$root/Host/Info.plist" "$app/Contents/Info.plist"
 cp "$root/Provider/Info.plist" "$extension/Contents/Info.plist"
+cp "$root/Host/LaunchAgent.plist" "$agent_plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${bundle_id}.provider" "$extension/Contents/Info.plist"
-plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist"
+plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent_plist"
 
 cp "$root/assets/OFTC.icns" "$app/Contents/Resources/OFTC.icns"
 
@@ -85,7 +88,8 @@ rustc --edition=2021 --crate-type staticlib -C opt-level=z \
 rustc --edition=2021 --test "$root/Host/migration.rs" -o "$build/migration-tests"
 "$build/migration-tests"
 xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
-    -framework Foundation -framework NetworkExtension -framework Security -framework SystemExtensions \
+    -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
+    -framework ServiceManagement -framework SystemExtensions \
     -L "$app_frameworks" -l oftc_host_bootstrap \
     "$build/liboftc_migration.a" \
     -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
@@ -93,6 +97,8 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/CandidateHostBridge.swift" \
     "$root/Host/MigrationBridge.swift" \
     "$root/Host/OFTCProfile.swift" \
+    "$root/Host/Onboarding.swift" \
+    "$root/Host/AgentService.swift" \
     "$root/Host/ReconnectSupervisor.swift" \
     "$root/Provider/BootstrapInput.swift" "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"

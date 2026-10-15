@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+# The signed app owns onboarding. A package install can only hand off to the
+# logged-in user; managed and headless installs finish without a GUI session.
+if ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
+    exit 0
+fi
+console_user=$(/usr/bin/stat -f %Su /dev/console)
+case "$console_user" in
+    root|loginwindow|_mbsetupuser|'') exit 0 ;;
+esac
+console_uid=$(/usr/bin/id -u "$console_user" 2>/dev/null) || exit 0
+case "$console_uid" in
+    ''|*[!0-9]*|0) exit 0 ;;
+esac
+if [ -d /Applications/OFTC.app ]; then
+    /usr/bin/sudo -u "$console_user" /bin/launchctl asuser "$console_uid" \
+        /usr/bin/open /Applications/OFTC.app >/dev/null 2>&1 || true
+fi
+exit 0

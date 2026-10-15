@@ -5,9 +5,8 @@
 //! commands to its host executable.
 
 use std::error::Error;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -15,7 +14,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_APP: &str = "/Applications/OFTC.app";
 const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
-const HOST_BUNDLE_ID: &str = "com.chris.openforticlient.oftc";
 const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
 const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
 
@@ -461,28 +459,27 @@ fn run_connect(app: &Path) -> Result<(), Box<dyn Error>> {
         return Err("OFTC VPN configuration is unavailable; run `oftc setup`".into());
     }
     let (home, _, target) = user_home_and_target()?;
-    let plist = agent_plist(&home);
-    if plist.symlink_metadata().is_ok() {
-        let installed = installed_host(&plist)?;
+    let legacy = agent_plist(&home);
+    if legacy.symlink_metadata().is_ok() {
+        let installed = installed_host(&legacy)?;
         if installed != host {
             return Err(
                 "OFTC login agent points to a different app; remove it before changing apps".into(),
             );
         }
-        if !loaded(&target)
-            && plist_field(&plist, "AssociatedBundleIdentifiers.0")
-                .ok()
-                .as_deref()
-                != Some(HOST_BUNDLE_ID)
+        if !vpn.stdout.is_empty()
+            && !String::from_utf8_lossy(&vpn.stdout).contains("status: disconnected")
         {
-            let contents = agent_contents(&host, &agent_log(&home))?;
-            write_agent_plist(&plist, &contents)?;
-            println!("Updated OFTC background item attribution.");
+            return Err("disconnect OFTC before migrating its legacy login agent".into());
         }
-    } else {
-        install_agent(&requested)?;
+        uninstall_legacy_agent()?;
+    } else if bundled_agent_status(&host)? == "not-registered" && loaded(&target) {
+        return Err(
+            "an OFTC agent is loaded without a known registration; stop it before connecting"
+                .into(),
+        );
     }
-    start_agent()
+    start_bundled_agent(&host, &home, &target)
 }
 
 fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
@@ -500,17 +497,23 @@ fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
         println!("OFTC profile: not configured");
     }
     let (home, _, target) = user_home_and_target()?;
-    let plist = agent_plist(&home);
-    println!(
-        "Login agent: {}",
+    let legacy = agent_plist(&home);
+    let agent = if legacy.is_file() {
         if loaded(&target) {
-            "loaded"
-        } else if plist.is_file() {
-            "installed but stopped"
+            "legacy agent loaded"
         } else {
-            "not installed"
+            "legacy agent stopped"
         }
-    );
+        .to_string()
+    } else {
+        let status = bundled_agent_status(&host)?;
+        if status == "enabled" && loaded(&target) {
+            "bundled agent loaded".to_string()
+        } else {
+            format!("bundled agent {status}")
+        }
+    };
+    println!("Login agent: {agent}");
     if vpn_text.contains("status: connected") {
         let rekeys = host_output(&host, "rekey-counts")?;
         if rekeys.status.success() {
@@ -554,7 +557,7 @@ fn extension_active() -> Result<bool, Box<dyn Error>> {
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text
         .lines()
-        .any(|line| line.contains(PROVIDER_ID) && line.contains("[activated enabled]")))
+        .any(|line| line.contains(PROVIDER_ID) && line.contains("[activated")))
 }
 
 fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
@@ -567,8 +570,8 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
     }
     let host = host_executable(Path::new(DEFAULT_APP))?;
     let (home, _, target) = user_home_and_target()?;
-    if agent_plist(&home).is_file() || loaded(&target) {
-        uninstall_agent()?;
+    if agent_plist(&home).is_file() {
+        uninstall_legacy_agent()?;
     } else {
         let status = host_output(&host, "status")?;
         let text = String::from_utf8_lossy(&status.stdout);
@@ -580,14 +583,18 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
             run_host(&host, &["stop"])?;
         }
     }
+    run_host(&host, &["unregister-agent"])?;
+    if !wait_unloaded(&target) {
+        return Err("OFTC login agent is still loaded; package removal stopped".into());
+    }
     wait_disconnected(&host)?;
     if erase_profile {
         run_host(&host, &["erase-profile"])?;
     }
-    run_host(&host, &["remove-config"])?;
     if extension_active()? {
         run_host(&host, &["deactivate"])?;
     }
+    run_host(&host, &["remove-config"])?;
     let status = Command::new("/usr/bin/sudo").arg(helper).status()?;
     if !status.success() {
         return Err("package removal stopped; complete any macOS system extension approval and rerun `oftc uninstall`".into());
@@ -604,63 +611,12 @@ fn agent_log(home: &Path) -> PathBuf {
     home.join("Library/Logs/OFTC/agent.log")
 }
 
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn agent_contents(executable: &Path, log: &Path) -> Result<String, Box<dyn Error>> {
-    let executable = executable.to_str().ok_or("OFTC app path must be UTF-8")?;
-    let log = log.to_str().ok_or("home path must be UTF-8")?;
-    if executable.chars().any(char::is_control) || log.chars().any(char::is_control) {
-        return Err("OFTC app and home paths must not contain control characters".into());
+fn bundled_agent_status(host: &Path) -> Result<String, Box<dyn Error>> {
+    let output = host_output(host, "agent-status")?;
+    if !output.status.success() {
+        return Err("could not read bundled OFTC agent status".into());
     }
-    Ok(format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>{AGENT_LABEL}</string>
-  <key>AssociatedBundleIdentifiers</key>
-  <array><string>{HOST_BUNDLE_ID}</string></array>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{}</string>
-    <string>supervise-profile</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>{}</string>
-  <key>StandardErrorPath</key><string>{}</string>
-</dict>
-</plist>
-"#,
-        xml_escape(executable),
-        xml_escape(log),
-        xml_escape(log)
-    ))
-}
-
-fn write_agent_plist(plist: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
-    let temp = plist.with_extension(format!("plist.{}.tmp", std::process::id()));
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, plist)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 fn user_home_and_target() -> Result<(PathBuf, String, String), Box<dyn Error>> {
@@ -737,72 +693,41 @@ fn installed_host(plist: &Path) -> Result<PathBuf, Box<dyn Error>> {
     Ok(path)
 }
 
-fn install_agent(app: &Path) -> Result<(), Box<dyn Error>> {
-    let (home, _domain, target) = user_home_and_target()?;
-    let plist = agent_plist(&home);
-    if plist.symlink_metadata().is_ok() || loaded(&target) {
-        return Err(
-            "OFTC agent already installed or loaded; stop and uninstall it before changing apps"
-                .into(),
-        );
+fn start_bundled_agent(host: &Path, home: &Path, target: &str) -> Result<(), Box<dyn Error>> {
+    let registration = bundled_agent_status(host)?;
+    if registration == "unknown" {
+        return Err("OFTC bundled login agent is unavailable; reinstall the app".into());
     }
-    let app = app.canonicalize()?;
-    let executable = host_executable(&app)?;
-    let log = agent_log(&home);
-    let contents = agent_contents(&executable, &log)?;
-    fs::create_dir_all(plist.parent().ok_or("invalid LaunchAgent path")?)?;
-    fs::create_dir_all(log.parent().ok_or("invalid log path")?)?;
-
-    // Disable before the plist appears, so a partial connect cannot start a
-    // VPN at this or the next login. connect opts in to autostart afterward.
-    launchctl(&["disable", &target])?;
-    if let Err(error) = write_agent_plist(&plist, &contents) {
-        let _ = launchctl(&["enable", &target]);
-        return Err(error);
+    if registration == "requires-approval" {
+        return Err("allow OFTC in System Settings → General → Login Items & Extensions, then rerun `oftc connect`".into());
     }
-    println!("Staged disabled OFTC agent: {}", plist.display());
-    println!("App host: {}", executable.display());
-    println!("Start now and at future GUI logins: oftc connect");
-    Ok(())
-}
-
-fn start_agent() -> Result<(), Box<dyn Error>> {
-    let (home, domain, target) = user_home_and_target()?;
-    let plist = agent_plist(&home);
-    let host = installed_host(&plist)?;
-    if !host.is_file() {
-        return Err(format!(
-            "installed app host is missing at {}; reinstall the OFTC agent for a new app",
-            host.display()
-        )
-        .into());
+    // The old external plist uses the same launchd label. ServiceManagement
+    // may report it as enabled even after its file and job are removed. Clear
+    // that stale registration before installing the app-bundled service.
+    if registration == "enabled" && !loaded(target) {
+        run_host(host, &["unregister-agent"])?;
     }
-    launchctl(&["enable", &target])?;
-    let was_loaded = loaded(&target);
-    if !was_loaded {
-        let plist_arg = plist.to_str().ok_or("LaunchAgent path must be UTF-8")?;
-        if let Err(error) = launchctl(&["bootstrap", &domain, plist_arg]) {
-            let _ = launchctl(&["disable", &target]);
-            return Err(error);
+    run_host(host, &["register-agent"])?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !loaded(target) {
+        if Instant::now() >= deadline {
+            return Err(
+                "OFTC login agent registered but did not load; check System Settings and retry"
+                    .into(),
+            );
         }
+        thread::sleep(Duration::from_millis(100));
     }
-    // A fresh bootstrap can leave a RunAtLoad job in launchd's speculative
-    // spawn state. Kickstart ensures this explicit start request runs it now.
-    // Without -k, this does not terminate an already running supervisor.
-    if let Err(error) = launchctl(&["kickstart", &target]) {
-        let _ = launchctl(&["disable", &target]);
-        if !was_loaded {
-            let _ = launchctl(&["bootout", &target]);
-        }
-        return Err(error);
-    }
+    // register() bootstraps RunAtLoad. Kickstart also covers a previously
+    // registered job that exited after a deliberate macOS VPN stop.
+    launchctl(&["kickstart", target])?;
     println!("OFTC agent launch requested; it will also start at future GUI logins.");
     println!("VPN: oftc status");
-    println!("Logs: {}", agent_log(&home).display());
+    println!("Logs: {}", agent_log(home).display());
     Ok(())
 }
 
-fn stop_agent() -> Result<(), Box<dyn Error>> {
+fn stop_legacy_agent() -> Result<(), Box<dyn Error>> {
     let (home, _domain, target) = user_home_and_target()?;
     let host = installed_host(&agent_plist(&home))?;
     launchctl(&["disable", &target])?;
@@ -824,7 +749,7 @@ fn stop_agent() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn uninstall_agent() -> Result<(), Box<dyn Error>> {
+fn uninstall_legacy_agent() -> Result<(), Box<dyn Error>> {
     let (home, _domain, target) = user_home_and_target()?;
     let plist = agent_plist(&home);
     if !plist.is_file() {
@@ -832,14 +757,14 @@ fn uninstall_agent() -> Result<(), Box<dyn Error>> {
     }
     // Even if the app has moved and its `stop` command cannot run, disabling
     // and booting out the job still lets the operator remove the agent.
-    let stop_result = stop_agent();
+    let stop_result = stop_legacy_agent();
     if !wait_unloaded(&target) {
         return Err("OFTC agent is still loaded; it was not removed".into());
     }
     fs::remove_file(&plist)?;
     launchctl(&["enable", &target])?; // Clear the disabled override for a future install.
     println!(
-        "Removed OFTC LaunchAgent. App, VPN configuration, profile, Keychain PSK, and logs remain."
+        "Removed legacy OFTC LaunchAgent. App, VPN configuration, profile, Keychain PSK, and logs remain."
     );
     if let Err(error) = stop_result {
         return Err(format!("agent removed, but VPN stop could not be confirmed: {error}").into());
@@ -857,11 +782,20 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         Action::Connect(app) => run_connect(&app),
         Action::Disconnect => {
             let (home, _, target) = user_home_and_target()?;
-            if agent_plist(&home).is_file() || loaded(&target) {
-                stop_agent()
+            let host = host_executable(Path::new(DEFAULT_APP))?;
+            let stop_result = if agent_plist(&home).is_file() {
+                stop_legacy_agent()
             } else {
-                run_host(&host_executable(Path::new(DEFAULT_APP))?, &["stop"])
+                run_host(&host, &["stop"])
+            };
+            let unregister_result = run_host(&host, &["unregister-agent"]);
+            stop_result?;
+            unregister_result?;
+            if !wait_unloaded(&target) {
+                return Err("OFTC login agent is still loaded after disconnect".into());
             }
+            println!("OFTC agent disabled for future GUI logins.");
+            Ok(())
         }
         Action::Status(app) => run_status(&app),
         Action::Uninstall { erase_profile } => run_uninstall(erase_profile),
@@ -967,37 +901,30 @@ mod tests {
     }
 
     #[test]
-    fn agent_plist_runs_only_supervisor() {
-        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/OFTCAgent");
-        let log = Path::new("/Users/example/Library/Logs/OFTC/agent.log");
-        let plist = agent_contents(host, log).unwrap();
-        assert!(plist.contains("com.chris.openforticlient.oftc.agent"));
-        assert!(plist.contains("<array><string>com.chris.openforticlient.oftc</string></array>"));
-        assert!(plist.contains("OFTC &amp; Test.app"));
-        assert!(plist.contains("<string>supervise-profile</string>"));
-        assert!(plist.contains("<key>RunAtLoad</key><true/>"));
-        assert!(plist.contains("<key>KeepAlive</key><false/>"));
-        assert!(!plist.contains("--insecure-saml"));
-        assert!(!plist.contains("fctctld"));
-        assert!(!plist.contains("FortiTray"));
-    }
-
-    #[test]
-    fn macos_can_parse_installed_agent_fields() {
-        let host = Path::new("/Applications/OFTC & Test.app/Contents/MacOS/OFTCAgent");
-        let log = Path::new("/Users/example/Library/Logs/OFTC/agent.log");
-        let temp =
-            std::env::temp_dir().join(format!("oftc-agent-test-{}.plist", std::process::id()));
-        fs::write(&temp, agent_contents(host, log).unwrap()).unwrap();
-        let lint = Command::new("/usr/bin/plutil")
-            .arg("-lint")
-            .arg(&temp)
-            .status()
-            .unwrap();
-        let extracted = installed_host(&temp);
-        fs::remove_file(&temp).unwrap();
-        assert!(lint.success());
-        assert_eq!(extracted.unwrap(), host);
+    fn legacy_migration_accepts_only_the_known_agent() {
+        let path = std::env::temp_dir().join(format!(
+            "oftc-legacy-agent-validation-{}.plist",
+            std::process::id()
+        ));
+        let valid = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Label</key><string>com.chris.openforticlient.oftc.agent</string>
+<key>ProgramArguments</key><array>
+<string>/Applications/OFTC.app/Contents/MacOS/OFTCAgent</string>
+<string>supervise-profile</string>
+</array></dict></plist>"#;
+        fs::write(&path, valid).unwrap();
+        assert_eq!(
+            installed_host(&path).unwrap(),
+            Path::new("/Applications/OFTC.app/Contents/MacOS/OFTCAgent")
+        );
+        fs::write(
+            &path,
+            valid.replace("supervise-profile", "unrelated-command"),
+        )
+        .unwrap();
+        assert!(installed_host(&path).is_err());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

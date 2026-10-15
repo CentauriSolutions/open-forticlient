@@ -12,13 +12,13 @@ app="$build/OFTC.app"
 cli="$build/oftc"
 stage="$build/package-root"
 unsigned="$build/OFTC-unsigned.pkg"
-package="$build/OFTC-1.0.2.pkg"
+package="$build/OFTC-1.0.4.pkg"
 : "${DEVELOPER_ID_INSTALLER_IDENTITY:?Set DEVELOPER_ID_INSTALLER_IDENTITY to a Developer ID Installer identity}"
 [[ -d "$app" && -f "$cli" && ! -e "$stage" && ! -e "$unsigned" && ! -e "$package" ]] || {
     print -u2 'Need a signed app and CLI in a fresh packaging output path'; exit 2
 }
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist") == com.chris.openforticlient.oftc \
-   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 19 ]] || {
+   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 22 ]] || {
     print -u2 'Unexpected app identity or build number'; exit 2
 }
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -32,7 +32,7 @@ cp "$cli" "$stage/usr/local/bin/oftc"
 cp "$root/package-files/remove-package" "$stage/usr/local/libexec/oftc/remove-package"
 cp "$root/../client/man/oftc.1" "$stage/usr/local/share/man/man1/oftc.1"
 pkgbuild --root "$stage" --install-location / --ownership recommended \
-    --identifier com.chris.openforticlient.oftc.pkg --version 1.0.2 \
+    --identifier com.chris.openforticlient.oftc.pkg --version 1.0.4 \
     --scripts "$root/package-scripts" "$unsigned"
 productsign --sign "$DEVELOPER_ID_INSTALLER_IDENTITY" "$unsigned" "$package"
 pkgutil --check-signature "$package"
