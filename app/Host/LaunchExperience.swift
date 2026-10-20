@@ -40,7 +40,7 @@ enum VPNComponentState: Equatable {
         case .ready: return "The VPN component is ready."
         case .missing: return "Finish setup and approve OFTC before connecting."
         case .updateRequired: return "Update the VPN component to finish installing OFTC. Your saved VPN settings are kept."
-        case .approval: return "Approve OFTC in Network Extensions, then return to finish setup."
+        case .approval: return "In System Settings → Login Items & Extensions, click ⓘ next to OFTC and turn on Network Extension, then return to finish setup."
         case .newer: return "A newer VPN component is installed. Use the latest OFTC installer to continue."
         case .unavailable: return "Could not check the VPN component. Try checking again."
         }

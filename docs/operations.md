@@ -16,7 +16,13 @@ from Applications. The window explains where the tunnel icon lives and
 offers setup, a VPN component update, or **Open VPN controls**, according to
 the current setup. New users can select an existing FortiClient profile or
 enter their VPN settings and PSK. Approve the OFTC Network Extension and VPN
-configuration if macOS requests them. Setup prepares the VPN without connecting.
+configuration if macOS requests them. Approval is the **Network Extension**
+switch behind the ⓘ button on OFTC's row under Login Items & Extensions →
+Extensions; the row is listed before the switch is on. While approval is
+pending, setup's **Open System Settings** button opens the Network Extensions
+sheet that contains this switch. It uses an undocumented System Settings URL
+and falls back to the supported Login Items opener. Setup prepares the VPN
+without connecting.
 
 An update keeps the existing OFTC profile and Keychain PSK. The app checks the
 enabled provider against the bundled version with a read-only properties

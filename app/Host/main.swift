@@ -236,6 +236,7 @@ private func rekeyCounts() {
 private final class ExtensionDelegate: NSObject, OSSystemExtensionRequestDelegate {
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         print("macOS approval required for \(request.identifier)")
+        print("In System Settings → General → Login Items & Extensions, click ⓘ next to OFTC under Extensions and turn on Network Extension.")
         fflush(stdout)
     }
     func request(_ request: OSSystemExtensionRequest,

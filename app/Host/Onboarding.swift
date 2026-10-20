@@ -117,8 +117,8 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         row("VPN PSK", pskField, 99)
 
         statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 2
-        statusLabel.frame = NSRect(x: 28, y: 46, width: 524, height: 43)
+        statusLabel.maximumNumberOfLines = 3
+        statusLabel.frame = NSRect(x: 28, y: 42, width: 524, height: 52)
         content.addSubview(statusLabel)
         settingsButton.target = self
         settingsButton.action = #selector(openSettings)
@@ -236,7 +236,7 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         OSSystemExtensionManager.shared.submitRequest(request)
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self, weak request] in
             guard let self, let request, self.request === request else { return }
-            self.message("Still waiting for macOS approval. Check OFTC under Network Extensions. If it is already on, quit and reopen OFTC to retry.", waiting: true)
+            self.message("Still waiting for macOS approval. Click Open System Settings and check that the switch next to OFTC is on. If it is already on, quit and reopen OFTC to retry.", waiting: true)
         }
     }
 
@@ -265,11 +265,19 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     }
 
     @objc private func openSettings() {
+        // Undocumented route that macOS's own frameworks use for other
+        // extension points. It presents the Network Extensions sheet with
+        // OFTC's switch (observed on macOS 27.0.1). open() also succeeds when
+        // Settings ignores the query, so the status text keeps the ⓘ path.
+        if let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.system_extension.network_extension.extension-point"),
+           NSWorkspace.shared.open(url) { return }
         SMAppService.openSystemSettingsLoginItems()
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        message("In System Settings → General → Login Items & Extensions → Network Extensions, enable OFTC. This window will continue after approval.", waiting: true)
+        // OFTC is listed under Extensions before it is enabled; if the sheet
+        // does not open, the switch is behind the row's ⓘ button.
+        message("Click Open System Settings and turn on the switch next to OFTC in Network Extensions. If you only see a list, click ⓘ next to OFTC first. Setup continues once it is on.", waiting: true)
     }
 
     func request(_ request: OSSystemExtensionRequest,
