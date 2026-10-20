@@ -27,6 +27,9 @@ import NetworkExtension
             .appendingPathComponent("oftc-supervisor-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let lease = try SupervisorLease(bundleID: "test.oftc", directory: directory)
+        let statusStore = SupervisorStatusStore(bundleID: "test.oftc", directory: directory)
+        statusStore.publish(.acquiring, leaseID: lease.identifier)
+        precondition(statusStore.read()?.phase == .acquiring)
         precondition(!lease.stopRequested)
         do {
             _ = try SupervisorLease(bundleID: "test.oftc", directory: directory)
@@ -35,7 +38,12 @@ import NetworkExtension
         precondition(SupervisorLease.requestStop(bundleID: "test.oftc", directory: directory))
         precondition(lease.stopRequested)
         lease.close()
+        precondition(statusStore.read() == nil) // No stale active state after exit.
         let replacement = try SupervisorLease(bundleID: "test.oftc", directory: directory)
+        precondition(statusStore.read() == nil) // Old lease cannot describe a new process.
+        statusStore.publish(.failed, leaseID: replacement.identifier)
+        precondition(statusStore.read()?.phase == .failed)
+        precondition(statusStore.read(now: Date().addingTimeInterval(301)) == nil)
         precondition(!replacement.stopRequested)
         replacement.close()
         let invalidState = directory.appendingPathComponent("supervisor.lock")

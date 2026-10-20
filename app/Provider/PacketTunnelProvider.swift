@@ -24,6 +24,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var livenessTickQueued = false
     private var livenessTickCount = 0
     private var rekeyProbePending = false
+    private var traffic = TrafficCounters()
 
     private func failure(_ code: Int) -> NSError {
         NSError(domain: "OFTCProvider", code: code,
@@ -116,6 +117,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                                 }
                                 if error != nil { self.shutdown(self.failure(5)); return }
                                 self.running = true
+                                self.traffic = TrafficCounters()
                                 self.pendingStart?(nil)
                                 self.pendingStart = nil
                                 self.readNextBatch()
@@ -149,6 +151,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let end = min(start + 64, count)
         workQueue.async {
             var failed: Int32?
+            var sentBytes = 0
             for index in start..<end where protocols[index].int32Value == AF_INET {
                 let status = packets[index].withUnsafeBytes { bytes in
                     oftc_send_ip(handle, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count)
@@ -157,9 +160,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     failed = status
                     break
                 }
+                if status == OFTC_OK { sentBytes += packets[index].count }
             }
             DispatchQueue.main.async {
                 guard !self.stopping else { return }
+                self.traffic.sent(sentBytes)
                 if let failed { self.shutdown(self.failure(200 + Int(failed))) }
                 else { self.sendBatch(packets, protocols, from: end, handle: handle) }
             }
@@ -169,6 +174,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func handleAppMessage(_ messageData: Data,
                                    completionHandler: ((Data?) -> Void)?) {
         DispatchQueue.main.async {
+            if messageData == Data("oftc.traffic.v1".utf8) {
+                guard self.running, !self.stopping else {
+                    completionHandler?(nil)
+                    return
+                }
+                completionHandler?(try? JSONEncoder().encode(self.traffic.snapshot()))
+                return
+            }
             if messageData == Data("oftc.rekey-counts.v1".utf8) {
                 guard self.running, !self.stopping, let handle = self.handle else {
                     completionHandler?(nil)
@@ -241,6 +254,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let accepted = self.packetFlow.writePackets(
                         [Data(bytes.prefix(length))], withProtocols: [NSNumber(value: AF_INET)])
                     if !accepted { self.shutdown(self.failure(7)); return }
+                    self.traffic.received(length)
                 } else if status == OFTC_OK &&
                     (event == OFTC_EVENT_PEER_DELETED_IKE ||
                      event == OFTC_EVENT_PEER_DELETED_CHILD) {

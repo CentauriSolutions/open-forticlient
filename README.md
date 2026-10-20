@@ -19,11 +19,14 @@ connection to the approved target and explicit stop passed. Its longer
 lifecycle and recovery gates remain open on that packaged build. See the
 [build 19 package record](docs/evidence/v19-packaged-pilot.md).
 
-The OFTC 1.0.3 build 20 colleague packet is signed, notarized, and ready for
-another pilot. Its app-led setup and uninstall passed an offline Mac mini test.
-Fresh extension approval and live VPN traffic have not yet been tested on
-1.0.3. See the [pilot guide](docs/pilot-validation.md) and
-[build 20 record](docs/evidence/v20-packaged-pilot.md).
+The current colleague packet is OFTC 1.0.5 host build 26, signed and notarized
+with guided upgrades, more visible menu graphics, independent controls, and
+clearer connection errors. It has not been installed or live-tested during
+this build. The earlier 1.0.3 setup/uninstall test used
+a Mac mini with an existing provider record. See the
+[pilot guide](docs/pilot-validation.md),
+[build 26 record](docs/evidence/v26-menu-visibility-and-upgrade-recovery.md), and
+[earlier build 20 record](docs/evidence/v20-packaged-pilot.md).
 
 The current checkout contains the standalone implementation. The former
 Fortinet-backed controller and experiment source are preserved in Git commit
@@ -55,11 +58,29 @@ cargo build --offline --release --manifest-path client/Cargo.toml
 
 `app/build.sh` runs offline checks and writes only to the selected build
 directory. It does not sign, install, activate, authenticate, or connect.
-The source builds the OFTC 1.0.4 candidate with final bundle IDs and a small
+The source builds the OFTC 1.0.5 candidate with final bundle IDs and a small
 public CLI: `setup`, `connect`, `disconnect`, `status`, and `uninstall`. See
 [the man page](client/man/oftc.1) for the complete command syntax. Fresh
-extension approval and live validation on the 1.0.4 package remain separate
+extension approval and live validation on the 1.0.5 package remain separate
 release steps.
+
+Build 23 adds a resident menu bar popover with Connect/Disconnect, connection
+duration, and VPN traffic rates and totals. Its refined tunnel icon greys
+out when disconnected. UI launch and VPN connection at login are separate
+settings. See [operations](docs/operations.md) and the
+[candidate validation record](docs/evidence/v23-menu-bar-candidate.md).
+Host build 24 adds 60-second receiving/sending sparklines and retains recent
+history while the popover is closed. It uses the existing build 23 provider.
+See the [sparkline record](docs/evidence/v24-traffic-sparklines.md).
+Host build 25 adds visible welcome guidance after installation and upgrades,
+checks the VPN component before connecting, and opens the menu controls on
+intentional app opening. See the [guided-install record](docs/evidence/v25-guided-install-and-upgrades.md)
+and updated [colleague guide](docs/pilot-validation.md).
+Host build 26 opens an independent compact controls window on explicit app
+opening, supplies concrete menu icon masks, preserves totals through sampling
+gaps, and reports safe helper failures. Installer can reach its native
+app-closing step after disconnection. See the
+[build 26 record](docs/evidence/v26-menu-visibility-and-upgrade-recovery.md).
 
 ## Scope
 

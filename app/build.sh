@@ -23,7 +23,7 @@ provider_frameworks="$extension/Contents/Frameworks"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app_frameworks" \
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources" "$app_frameworks" \
     "${agent_plist:h}" \
     "$extension/Contents/MacOS" "$provider_frameworks" "$build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$build/module-cache"
@@ -98,7 +98,19 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/MigrationBridge.swift" \
     "$root/Host/OFTCProfile.swift" \
     "$root/Host/Onboarding.swift" \
+    "$root/Host/LaunchExperience.swift" \
+    "$root/Host/ProviderReadiness.swift" \
+    "$root/Host/Welcome.swift" \
+    "$root/Host/ControlsWindow.swift" \
+    "$root/Host/MenuCommand.swift" \
     "$root/Host/AgentService.swift" \
+    "$root/Host/AgentIntent.swift" \
+    "$root/Host/SupervisorStatus.swift" \
+    "$root/Host/MenuModel.swift" \
+    "$root/Host/TrafficHistory.swift" \
+    "$root/Host/RateSparklineView.swift" \
+    "$root/Host/MenuBar.swift" \
+    "$root/support/TrafficStatistics.swift" \
     "$root/Host/ReconnectSupervisor.swift" \
     "$root/Provider/BootstrapInput.swift" "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"
@@ -109,6 +121,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCTunnel \
     -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
     "$root/support/Bootstrap.swift" \
     "$root/support/SettingsMapper.swift" \
+    "$root/support/TrafficStatistics.swift" \
     "$root/Provider/BootstrapInput.swift" "$root/Provider/FFISettings.swift" \
     "$root/Provider/main.swift" \
     "$root/Provider/PacketTunnelProvider.swift" \
@@ -131,6 +144,7 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/CandidateHostBridge.swift" \
     "$root/Provider/BootstrapInput.swift" \
     "$root/Host/ReconnectSupervisor.swift" \
+    "$root/Host/SupervisorStatus.swift" \
     "$root/Host/check-supervisor.swift" \
     -o "$build/supervisor-check"
 "$build/supervisor-check"
@@ -138,11 +152,27 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
     -o "$build/profile-check"
 "$build/profile-check"
+xcrun swiftc -swift-version 5 -target "$target" \
+    -framework Foundation -framework NetworkExtension \
+    "$root/Host/MenuModel.swift" "$root/Host/AgentIntent.swift" \
+    "$root/Host/TrafficHistory.swift" \
+    "$root/Host/SupervisorStatus.swift" "$root/support/TrafficStatistics.swift" \
+    "$root/Host/check-menu.swift" -o "$build/menu-check"
+"$build/menu-check"
+xcrun swiftc -swift-version 5 -target "$target" \
+    "$root/Host/LaunchExperience.swift" "$root/Host/check-experience.swift" \
+    -o "$build/experience-check"
+"$build/experience-check"
+xcrun swiftc -swift-version 5 -target "$target" \
+    "$root/Host/MenuCommand.swift" "$root/Host/check-menu-command.swift" \
+    -o "$build/menu-command-check"
+"$build/menu-command-check"
 CARGO_TARGET_DIR="$build/client-target" cargo test --offline --locked \
     --manifest-path "$root/../client/Cargo.toml"
 CARGO_TARGET_DIR="$build/client-target" cargo build --offline --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"
+cp "$build/oftc" "$app/Contents/Helpers/oftc"
 otool -L "$app/Contents/MacOS/OFTCAgent" \
     "$extension/Contents/MacOS/OFTCTunnel" | \
     grep -E 'liboftc_host_bootstrap|liboftc_provider_ffi|liboftc_preflight'

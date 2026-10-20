@@ -10,7 +10,7 @@ final class SupervisorLease {
 
     private let stateURL: URL
     private let stopURL: URL
-    private let identifier = UUID().uuidString
+    let identifier = UUID().uuidString
     private var descriptor: Int32 = -1
 
     init(bundleID: String, directory: URL? = nil) throws {
@@ -137,6 +137,13 @@ final class ReconnectSupervisor {
     private var unreachableBackoff: TimeInterval = 5
     private var restartAfter: Date?
     private var stopped = false
+    private let statusStore: SupervisorStatusStore
+    private var publishedPhase: SupervisorPhase = .acquiring
+
+    private func publish(_ phase: SupervisorPhase) {
+        publishedPhase = phase
+        statusStore.publish(phase, leaseID: lease.identifier)
+    }
 
     private func diagnostic(_ event: String) {
         fputs("OFTC supervisor: \(event)\n", stderr)
@@ -155,6 +162,8 @@ final class ReconnectSupervisor {
         self.insecure = insecure
         self.lease = lease
         self.loadPSK = loadPSK
+        self.statusStore = SupervisorStatusStore(bundleID:
+            String(providerID.dropLast(".provider".count)))
     }
 
     func run() {
@@ -182,6 +191,7 @@ final class ReconnectSupervisor {
             }
             if self.timerTicks % 5 == 0 { self.refreshStatus() }
             if self.timerTicks % 30 == 0 {
+                self.publish(self.publishedPhase)
                 self.diagnostic("heartbeat status=\(self.manager.connection.status.rawValue) established=\(self.everConnected ? 1 : 0) current=\(self.connectedThisAttempt ? 1 : 0) refresh=\(self.statusRefreshInFlight ? 1 : 0) error_fetch=\(self.fetchingError ? 1 : 0)")
             }
         }
@@ -254,6 +264,7 @@ final class ReconnectSupervisor {
             stop("OFTC status changed before supervised start", code: 1); return
         }
         starting = true
+        publish(.acquiring)
         diagnostic("begin attempt")
         sawConnecting = false
         connectedThisAttempt = false
@@ -269,21 +280,27 @@ final class ReconnectSupervisor {
             var beforeBrowser = false
             do {
                 psk = try self.loadPSK()
-                options = try CandidateHostBridge.acquireOptions(
-                    gateway: self.gateway, psk: psk, samlPort: self.samlPort,
-                    insecure: self.insecure)
-                options?[ProviderStartEnvelope.modeKey] = try self.mode.encode() as NSData
+                if !self.lease.stopRequested {
+                    options = try CandidateHostBridge.acquireOptions(
+                        gateway: self.gateway, psk: psk, samlPort: self.samlPort,
+                        insecure: self.insecure)
+                    options?[ProviderStartEnvelope.modeKey] = try self.mode.encode() as NSData
+                }
             } catch CandidateHostBridge.Failure.beforeBrowser {
                 beforeBrowser = true
             } catch { }
             psk.resetBytes(in: 0..<psk.count)
             DispatchQueue.main.async {
                 guard !self.stopped else { return }
+                guard !self.lease.stopRequested else {
+                    self.stop("Supervisor stopped", code: 0); return
+                }
                 guard let options else {
                     if beforeBrowser, !self.lease.stopRequested,
                        self.manager.connection.status == .disconnected,
                        let deadline = self.acquisitionDeadline, Date() < deadline {
                         self.starting = false
+                        self.publish(.recovering)
                         self.restartAfter = Date().addingTimeInterval(self.unreachableBackoff)
                         self.unreachableBackoff = min(self.unreachableBackoff * 2, 30)
                         fputs("OFTC supervisor: SAML bootstrap unavailable; retrying before token use\n", stderr)
@@ -308,6 +325,7 @@ final class ReconnectSupervisor {
                     }
                     do {
                         self.diagnostic("start request entering")
+                        self.publish(.connecting)
                         try CandidateHostBridge.start(self.manager.connection, options: options)
                         self.diagnostic("start request returned")
                         self.ownsConnection = true
@@ -335,6 +353,7 @@ final class ReconnectSupervisor {
                 diagnostic("VPN connected")
                 connectedThisAttempt = true
                 everConnected = true
+                publish(.connected)
             }
             starting = false
             startDeadline = nil
@@ -366,6 +385,7 @@ final class ReconnectSupervisor {
         connectedThisAttempt = false
         ownsConnection = false
         fetchingError = true
+        publish(.recovering)
         diagnostic("VPN disconnected; fetching error")
         errorFetchDeadline = Date().addingTimeInterval(10)
         disconnectEpoch += 1
@@ -398,6 +418,7 @@ final class ReconnectSupervisor {
             return
         }
         restartAfter = now.addingTimeInterval(2)
+        publish(.recovering)
         acquisitionDeadline = nil
         unreachableBackoff = 5
         fputs("OFTC supervisor: starting fresh SSO recovery\n", stderr)
@@ -424,6 +445,7 @@ final class ReconnectSupervisor {
     private func stop(_ message: String, code: Int32) {
         guard !stopped else { return }
         stopped = true
+        publish(code == 0 ? .stopped : .failed)
         timer?.cancel()
         signals.forEach { $0.cancel() }
         if let observer { NotificationCenter.default.removeObserver(observer) }

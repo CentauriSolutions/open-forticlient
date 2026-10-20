@@ -22,7 +22,7 @@ enum OFTCAgentService {
     static func register() throws {
         switch service.status {
         case .enabled:
-            return
+            break
         case .notRegistered, .notFound:
             try service.register()
         case .requiresApproval:
@@ -33,6 +33,14 @@ enum OFTCAgentService {
         guard service.status == .enabled else {
             throw AgentError.unavailable(status)
         }
+        let enable = Process()
+        enable.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        enable.arguments = ["enable", "gui/\(getuid())/com.chris.openforticlient.oftc.agent"]
+        enable.standardOutput = FileHandle.nullDevice
+        enable.standardError = FileHandle.nullDevice
+        try enable.run()
+        enable.waitUntilExit()
+        guard enable.terminationStatus == 0 else { throw AgentError.unavailable("disabled") }
     }
 
     static func unregister() throws {
@@ -43,6 +51,37 @@ enum OFTCAgentService {
             try service.unregister()
         @unknown default:
             throw AgentError.unavailable(status)
+        }
+    }
+
+    static var connectAtLogin: Bool {
+        AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
+            .connectAtLogin(legacyEnabled: status == "enabled")
+    }
+
+    static func prepareConnect() throws {
+        let intent = AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
+        if intent.preferences() == nil {
+            try intent.setConnectAtLogin(connectAtLogin)
+        }
+        try intent.request(connect: true)
+    }
+
+    static func setConnectAtLogin(_ enabled: Bool) throws {
+        let intent = AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
+        let previous = connectAtLogin
+        try intent.setConnectAtLogin(enabled)
+        if enabled && status != "enabled" {
+            // Register for future logins without starting SSO right now.
+            try intent.request(connect: false)
+            do { try register() }
+            catch {
+                intent.cancelRequest()
+                try? intent.setConnectAtLogin(previous)
+                throw error
+            }
+        } else if enabled {
+            try register() // Clear a launchd disabled override without starting SSO.
         }
     }
 

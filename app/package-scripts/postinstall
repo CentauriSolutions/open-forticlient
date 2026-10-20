@@ -16,6 +16,6 @@ case "$console_uid" in
 esac
 if [ -d /Applications/OFTC.app ]; then
     /usr/bin/sudo -u "$console_user" /bin/launchctl asuser "$console_uid" \
-        /usr/bin/open /Applications/OFTC.app >/dev/null 2>&1 || true
+        /usr/bin/open /Applications/OFTC.app --args --after-install >/dev/null 2>&1 || true
 fi
 exit 0

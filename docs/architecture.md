@@ -31,3 +31,38 @@ The host can reconnect after a recoverable provider drop using fresh SSO when
 needed. An explicit user stop disables agent autostart and stays down. The
 [rollout gaps](initial-rollout-gaps.md) distinguish measured recovery paths
 from untested ones.
+
+Opening the host without arguments runs the resident AppKit menu bar app.
+It observes NetworkExtension status and the supervisor's nonsecret phase
+record. Connection buttons invoke the CLI embedded in `Contents/Helpers`,
+so the menu and terminal share registration, migration, and stop semantics.
+The UI's login item is separate from the VPN agent. A one-use, expiring
+startup request permits an explicit connection without enabling VPN starts
+at login; registering automatic login starts uses an idle request so it
+does not authenticate immediately.
+
+The host uses the launch Apple event's login/service reason to keep automatic
+launches quiet. Explicit opening and the installer handoff reveal welcome
+guidance once per acknowledged host build, then an independent compact controls window on later
+opens. The controls window and menu popover share presentation and actions. The acknowledgement stores only a build number and grants no service,
+SSO, or activation permission. Provider readiness is queried using
+SystemExtensions properties, with no activation side effect. Disabled, old,
+approval-pending, ambiguous, and newer provider records remain distinct from
+a matching enabled provider. Setup activation stays behind a user action and
+a disconnected-status check; replacement refuses a downgrade.
+
+The provider counts successfully accepted inner IP bytes at the Swift
+packet-flow boundary. A versioned provider message returns only a session
+identifier, byte totals, and a monotonic sample time. The host samples once
+per second while connected, rejects stale session responses, and derives rates
+from consecutive samples. Rekeying retains the counters; a new provider
+connection resets them. Missing samples clear only the current rates and break the trace, preserving
+last reported totals for the same connection. Status notifications alone do
+not discard counters. No packet contents or credentials enter UI state.
+
+The menu host retains at most 120 rate samples over a rolling 60-second
+window. Its native sparklines use independent direction scales and break
+at missing samples or sampling gaps. A continuous clock ages history through
+sleep; the provider's monotonic sample clock still determines rate deltas.
+This history is never persisted. Host build 24 remains compatible with the
+activated build 23 provider and its existing stats message.

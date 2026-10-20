@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>OFTC</title>
+  <options customize="never" allow-external-scripts="true" hostArchitectures="arm64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <welcome file="Welcome.html" mime-type="text/html"/>
+  <conclusion file="Conclusion.html" mime-type="text/html"/>
+  <installation-check script="checkUpdate()"/>
+  <volume-check>
+    <allowed-os-versions><os-version min="15.0"/></allowed-os-versions>
+  </volume-check>
+  <script><![CDATA[
+    function stopWith(title, message) {
+      my.result.type = 'Fatal';
+      my.result.title = title;
+      my.result.message = message;
+      return false;
+    }
+    function checkUpdate() {
+      var vpn = system.run('/bin/sh', '-c',
+        'vpn_state=$(/usr/sbin/scutil --nc status "OFTC VPN" 2>/dev/null); case "$vpn_state" in Connected*|Connecting*|Disconnecting*|Reasserting*) exit 10;; *) exit 0;; esac');
+      if (vpn !== 0) {
+        return stopWith('Disconnect OFTC before updating',
+          'Disconnect OFTC from its controls or System Settings > VPN, then reopen this installer. Installer will ask to close the app. Your saved VPN settings will be kept.');
+      }
+      var app = system.run('/usr/bin/pgrep', '-f',
+        '^/Applications/OFTC\\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)');
+      // A running idle app is handled by must-close at the installation
+      // stage. Rejecting it here makes that native closing step unreachable.
+      if (app !== 0 && app !== 1) {
+        return stopWith('Could not check whether OFTC is running',
+          'Disconnect and quit OFTC, then reopen this installer to try again.');
+      }
+      return true;
+    }
+  ]]></script>
+  <choices-outline><line choice="oftc"/></choices-outline>
+  <choice id="oftc" title="OFTC" description="Menu bar VPN client" visible="false">
+    <pkg-ref id="com.chris.openforticlient.oftc.pkg"/>
+  </choice>
+  <pkg-ref id="com.chris.openforticlient.oftc.pkg" version="1.0.5">OFTC-component.pkg</pkg-ref>
+  <pkg-ref id="com.chris.openforticlient.oftc.pkg">
+    <must-close><app id="com.chris.openforticlient.oftc"/></must-close>
+  </pkg-ref>
+</installer-gui-script>

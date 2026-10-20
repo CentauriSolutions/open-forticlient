@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import NetworkExtension
 import Security
+import ServiceManagement
 import SystemExtensions
 
 private let appID = Bundle.main.bundleIdentifier ?? ""
@@ -348,18 +349,48 @@ private func runLive(gateway: String, port: UInt32,
 private let usage = "Usage: OFTCAgent activate|deactivate|agent-status|register-agent|unregister-agent|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|import-development-profile|show-profile|erase-profile|has-psk|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 let args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty {
-    guard let onboarding = OFTCOnboarding(appID: appID) else {
-        finish("Invalid OFTC app identity", code: 1)
-    }
-    onboarding.show()
-    withExtendedLifetime(onboarding) { NSApplication.shared.run() }
-    exit(0)
+    OFTCMenuBar.run(appID: appID)
 }
 guard let command = args.first, !appID.isEmpty else { finish(usage, code: 2) }
 
 switch command {
+case "--after-install" where args.count == 1:
+    OFTCMenuBar.run(appID: appID, afterInstall: true)
+
+case "preview-menu" where args.count == 2:
+    guard let state = MenuConnectionState(rawValue: args[1]) else { finish("Invalid preview state", code: 2) }
+    OFTCMenuBar.run(appID: appID, preview: state)
+
+case "render-menu-previews" where args.count == 2:
+    do { try OFTCMenuBar.renderPreviews(to: URL(fileURLWithPath: args[1], isDirectory: true)) }
+    catch { finish("Could not render menu previews: \(error)", code: 1) }
+
+case "prepare-connect" where args.count == 1:
+    do { try OFTCAgentService.prepareConnect() }
+    catch { finish("Could not prepare an OFTC connection", code: 1) }
+    finish("OFTC connection requested")
+
+case "cancel-connect-request" where args.count == 1:
+    AgentIntent(bundleID: appID).cancelRequest()
+    finish("OFTC connection request cancelled")
+
+case "unregister-menu-login" where args.count == 1:
+    if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
+        do { try SMAppService.mainApp.unregister() }
+        catch { finish("Could not unregister the OFTC menu login item", code: 1) }
+    }
+    finish("OFTC menu login item unregistered")
+
+case "quit-menu" where args.count == 1:
+    DistributedNotificationCenter.default().postNotificationName(
+        Notification.Name(appID + ".quit-menu"), object: nil, deliverImmediately: true)
+    finish("OFTC menu quit requested")
+
 case "agent-status" where args.count == 1:
     finish(OFTCAgentService.status)
+
+case "login-settings" where args.count == 1:
+    finish("Menu launch at login: \(SMAppService.mainApp.status == .enabled ? "enabled" : "disabled")\nVPN connect at login: \(OFTCAgentService.connectAtLogin ? "enabled" : "disabled")")
 
 case "register-agent" where args.count == 1:
     do { try OFTCAgentService.register() }
@@ -540,6 +571,10 @@ case "start-profile", "supervise-profile":
     if command == "supervise-profile" {
         do { try OFTCAgentService.redirectSupervisorOutput() }
         catch { finish(error.localizedDescription, code: 1) }
+        if ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1",
+           !AgentIntent(bundleID: appID).shouldStart() {
+            finish("OFTC automatic VPN connection is disabled")
+        }
     }
     let profile = storedProfile()
     var flags = Array(args.dropFirst())
@@ -579,6 +614,10 @@ case "stop" where args.count == 1:
     guard SupervisorLease.requestStop(bundleID: appID) else {
         finish("Could not signal OFTC supervisor; VPN left running", code: 1)
     }
+    let intent = AgentIntent(bundleID: appID)
+    do { try intent.setConnectAtLogin(false) }
+    catch { finish("Could not disable automatic VPN connection", code: 1) }
+    intent.cancelRequest()
     loadManager { manager in
         guard let manager else { finish("OFTC configuration absent") }
         manager.connection.stopVPNTunnel()

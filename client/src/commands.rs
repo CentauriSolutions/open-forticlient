@@ -24,7 +24,7 @@ USAGE:
     oftc setup --gateway HOST --saml-port PORT [--tcp]
     oftc setup --from-development
     oftc setup                         Choose a profile and answer setup prompts.
-    oftc connect                       Connect and enable starts at GUI login.
+    oftc connect                       Connect using the saved login preference.
     oftc disconnect                    Stop and disable automatic starts.
     oftc status                        Show VPN, profile, agent, and rekey state.
     oftc uninstall [--erase-profile]  Remove OFTC; keep credentials by default.
@@ -35,13 +35,13 @@ available, then activates the extension and installs its macOS VPN entry. It
 does not connect. A missing PSK is read securely from the terminal.
 Connect runs a supervised session that can recover from unexpected drops.
 Uninstall may prompt for administrator access. For a development build, prefix
-setup, connect, or status with --app /absolute/path/OFTC.app.";
+setup, connect, disconnect, or status with --app /absolute/path/OFTC.app.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Setup(PathBuf, SetupSource),
     Connect(PathBuf),
-    Disconnect,
+    Disconnect(PathBuf),
     Status(PathBuf),
     Uninstall { erase_profile: bool },
 }
@@ -322,7 +322,7 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
             Ok(Some(Action::Setup(app, source)))
         }
         "connect" if extra.is_empty() => Ok(Some(Action::Connect(app))),
-        "disconnect" if extra.is_empty() && !explicit_app => Ok(Some(Action::Disconnect)),
+        "disconnect" if extra.is_empty() => Ok(Some(Action::Disconnect(app))),
         "status" if extra.is_empty() => Ok(Some(Action::Status(app))),
         "uninstall" if !explicit_app && (extra.is_empty() || extra == ["--erase-profile"]) => {
             Ok(Some(Action::Uninstall {
@@ -479,7 +479,12 @@ fn run_connect(app: &Path) -> Result<(), Box<dyn Error>> {
                 .into(),
         );
     }
-    start_bundled_agent(&host, &home, &target)
+    run_host(&host, &["prepare-connect"])?;
+    if let Err(error) = start_bundled_agent(&host, &home, &target) {
+        let _ = run_host(&host, &["cancel-connect-request"]);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
@@ -514,6 +519,10 @@ fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
         }
     };
     println!("Login agent: {agent}");
+    let login = host_output(&host, "login-settings")?;
+    if login.status.success() {
+        print!("{}", String::from_utf8_lossy(&login.stdout));
+    }
     if vpn_text.contains("status: connected") {
         let rekeys = host_output(&host, "rekey-counts")?;
         if rekeys.status.success() {
@@ -588,6 +597,8 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
         return Err("OFTC login agent is still loaded; package removal stopped".into());
     }
     wait_disconnected(&host)?;
+    run_host(&host, &["unregister-menu-login"])?;
+    run_host(&host, &["quit-menu"])?;
     if erase_profile {
         run_host(&host, &["erase-profile"])?;
     }
@@ -721,7 +732,7 @@ fn start_bundled_agent(host: &Path, home: &Path, target: &str) -> Result<(), Box
     // register() bootstraps RunAtLoad. Kickstart also covers a previously
     // registered job that exited after a deliberate macOS VPN stop.
     launchctl(&["kickstart", target])?;
-    println!("OFTC agent launch requested; it will also start at future GUI logins.");
+    println!("OFTC agent launch requested; automatic connection at login follows OFTC settings.");
     println!("VPN: oftc status");
     println!("Logs: {}", agent_log(home).display());
     Ok(())
@@ -780,10 +791,16 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     match action {
         Action::Setup(app, source) => run_setup(&app, source),
         Action::Connect(app) => run_connect(&app),
-        Action::Disconnect => {
+        Action::Disconnect(app) => {
             let (home, _, target) = user_home_and_target()?;
-            let host = host_executable(Path::new(DEFAULT_APP))?;
+            let host = host_executable(&app.canonicalize()?)?;
             let stop_result = if agent_plist(&home).is_file() {
+                if installed_host(&agent_plist(&home))? != host {
+                    return Err(
+                        "OFTC login agent points to a different app; disconnect using that app"
+                            .into(),
+                    );
+                }
                 stop_legacy_agent()
             } else {
                 run_host(&host, &["stop"])
@@ -818,7 +835,7 @@ mod tests {
         );
         assert_eq!(
             parse(&words("disconnect")).unwrap(),
-            Some(Action::Disconnect)
+            Some(Action::Disconnect(DEFAULT_APP.into()))
         );
         assert_eq!(
             parse(&words("status")).unwrap(),
@@ -845,7 +862,10 @@ mod tests {
         assert!(parse(&words("activate")).is_err());
         assert!(parse(&words("rekey-counts")).is_err());
         assert!(parse(&words("connect --insecure-saml")).is_err());
-        assert!(parse(&words("--app /tmp/OFTC.app disconnect")).is_err());
+        assert_eq!(
+            parse(&words("--app /tmp/OFTC.app disconnect")).unwrap(),
+            Some(Action::Disconnect("/tmp/OFTC.app".into()))
+        );
         assert!(parse(&words("--app /tmp/OFTC.app uninstall")).is_err());
     }
 

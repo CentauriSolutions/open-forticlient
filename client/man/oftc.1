@@ -1,4 +1,4 @@
-.TH OFTC 1 "October 14, 2026" "OFTC 1.0.2" "User Commands"
+.TH OFTC 1 "October 15, 2026" "OFTC 1.0.4" "User Commands"
 .SH NAME
 oftc \- standalone macOS FortiGate IPsec VPN client
 .SH SYNOPSIS
@@ -57,7 +57,8 @@ development build. Stop the old VPN and its login agent first.
 .TP
 .B connect
 Start a supervised VPN connection. The app-bundled login agent is registered
-if needed and enabled for future GUI logins. A legacy per-user agent from an
+if needed. Automatic VPN connection at login follows the separate setting in
+the menu bar app; new installations leave it off. A legacy per-user agent from an
 earlier OFTC version is removed during the first connection. A browser sign-in may be required.
 Recoverable connection failures are retried by the supervisor.
 .TP
@@ -71,7 +72,7 @@ Show VPN state, nonsecret profile settings, login agent state, and CHILD SA
 rekey counts while connected.
 .TP
 .B uninstall
-Disconnect OFTC, unregister its bundled login agent, remove any legacy agent and VPN configuration,
+Disconnect OFTC, close the menu app, unregister both login services, remove any legacy agent and VPN configuration,
 deactivate its system extension, and invoke the package removal helper with
 administrator access. Profile, Keychain PSK, and logs are retained by default.
 The helper refuses to remove the app while the extension remains active.
@@ -87,6 +88,7 @@ Show a short command summary.
 Prefix
 .BR setup ,
 .BR connect ,
+.BR disconnect ,
 or
 .B status
 to target a signed development build. Its bundled login agent is registered

@@ -9,18 +9,43 @@ development Mac. Build v15 has the longer recovery and renewal evidence.
 The [1.0.3 build 20 colleague packet](evidence/v20-packaged-pilot.md) passed
 package trust and offline Mac mini setup/uninstall checks; live connection and
 fresh extension approval on that build remain open.
-OFTC 1.0.4 build 22 is currently installed on the development Mac for the
-bundled-agent label check; its provider has not been activated there.
+OFTC 1.0.4 build 22 passed the development Mac's bundled-agent label check.
+The [build 23 menu bar candidate](evidence/v23-menu-bar-candidate.md) passes
+offline build, state/counter checks, and native UI rendering. It is signed,
+notarized, installed, and its provider is activated on the development Mac.
+Live traffic/statistics on provider 23 and login-service lifecycle validation
+remain separate gates.
+
+The [signed/notarized build 24 host candidate](evidence/v24-traffic-sparklines.md)
+adds recent traffic-rate sparklines using the same build 23 provider; it is
+installed on the development Mac. Live sparkline and lifecycle validation
+remain separate gates.
+
+The [build 25 guided-install candidate](evidence/v25-guided-install-and-upgrades.md)
+is signed, notarized, and packaged with an updated colleague guide. It adds
+visible welcome guidance, provider-readiness checks, explicit app reopening,
+and clearer Installer update prerequisites. Offline and native UI checks pass;
+build 25 installation, actual login/reboot behaviour, and live traffic remain
+separate gates.
+
+The [build 26 follow-up](evidence/v26-menu-visibility-and-upgrade-recovery.md)
+addresses separate colleague reports of an invisible disconnected icon,
+inaccessible quit controls, first-menu connection failure, and disappearing
+statistics. It adds concrete masks and an independent controls window,
+keeps totals through missing samples, and improves safe helper error reporting.
+The first-connect cause and colleague-side rendering still need confirmation.
 
 ## Next: pilot validation
 
-1. On a new colleague's Mac, validate fresh 1.0.3 setup approval, browser SSO,
-   protected traffic, explicit stop/reconnect, and route/DNS cleanup. Then
-   validate recovery and a longer connection on the packaged build. The Mac
-   mini's 1.0.3 offline setup/uninstall test had an earlier provider record,
-   so it did not prove a fresh approval path. See the
+1. On a colleague's Mac, validate fresh 1.0.5 build 26 welcome/setup approval
+   and a separate 1.0.3/1.0.4-to-1.0.5 update. Check actual postinstall opening,
+   native app closing, reopening, quiet login launch, first menu connection,
+   browser SSO, protected traffic, idle statistics, menu rates
+   and history, explicit stop/reconnect, and route/DNS cleanup. Then validate
+   recovery and a longer connection. The earlier Mac mini 1.0.3 test had an
+   existing provider record and did not prove fresh approval. See the
    [pilot guide](pilot-validation.md) and
-   [build 20 record](evidence/v20-packaged-pilot.md).
+   [build 26 record](evidence/v26-menu-visibility-and-upgrade-recovery.md).
 2. Validate the [build 22 app-bundled agent](evidence/v22-bundled-agent-candidate.md)
    on a fresh Mac. Its upgrade on the development Mac displayed OFTC in
    Background App Activity without the old Developer ID row after refresh.

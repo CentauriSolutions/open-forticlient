@@ -20,9 +20,9 @@ cli="$build/oftc"
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extension/Contents/Info.plist") == "${bundle_id}.provider" ]] || {
     print -u2 'Provider bundle ID mismatch'; exit 2
 }
-[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 22 \
-   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$extension/Contents/Info.plist") == 22 ]] || {
-    print -u2 'App and provider must both be release build 22'; exit 2
+[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 26 \
+   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$extension/Contents/Info.plist") == 23 ]] || {
+    print -u2 'Expected host build 26 and compatible provider build 23'; exit 2
 }
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") == OFTCAgent \
    && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$extension/Contents/Info.plist") == OFTCTunnel \
@@ -109,13 +109,15 @@ for library in "${libraries[@]}"; do
 done
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$cli"
 codesign --verify --strict --verbose=2 "$cli"
+codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$app/Contents/Helpers/oftc"
+codesign --verify --strict --verbose=2 "$app/Contents/Helpers/oftc"
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime \
     --entitlements "$tmpdir/extension.entitlements" "$extension"
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime \
     --entitlements "$tmpdir/app.entitlements" "$app"
 codesign --verify --strict --verbose=2 "$extension"
 codesign --verify --deep --strict --verbose=2 "$app"
-python3 - "$app" "$extension" "$cli" "${libraries[@]}" <<'PY'
+python3 - "$app" "$extension" "$cli" "$app/Contents/Helpers/oftc" "${libraries[@]}" <<'PY'
 import subprocess
 import sys
 

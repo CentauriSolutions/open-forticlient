@@ -16,7 +16,9 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     }
 
     private let appID: String
+    private let onClose: (() -> Void)?
     private let providerID: String
+    private let updating: Bool
     private var sources = [Source]()
     private var request: OSSystemExtensionRequest?
     private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 390),
@@ -31,9 +33,11 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     private let setupButton = NSButton(title: "Set up OFTC", target: nil, action: nil)
     private let settingsButton = NSButton(title: "Open System Settings", target: nil, action: nil)
 
-    init?(appID: String) {
+    init?(appID: String, updating: Bool = false, onClose: (() -> Void)? = nil) {
         guard !appID.isEmpty else { return nil }
         self.appID = appID
+        self.onClose = onClose
+        self.updating = updating
         providerID = appID + ".provider"
         super.init()
         buildSources()
@@ -81,15 +85,17 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
 
     private func buildWindow() {
         window.title = "Set up OFTC"
+        window.isReleasedWhenClosed = false
         window.delegate = self
         let content = NSView(frame: window.contentView!.bounds)
         window.contentView = content
-        let title = NSTextField(labelWithString: "Set up OFTC VPN")
+        let title = NSTextField(labelWithString: updating ? "Update your OFTC VPN" : "Set up OFTC VPN")
         title.font = .boldSystemFont(ofSize: 22)
         title.frame = NSRect(x: 28, y: 334, width: 520, height: 32)
         content.addSubview(title)
-        let explanation = NSTextField(wrappingLabelWithString:
-            "Choose a saved profile or enter your gateway. macOS may ask you to enable the OFTC Network Extension. Setup will not connect the VPN.")
+        let explanation = NSTextField(wrappingLabelWithString: updating
+            ? "Your saved VPN settings and PSK are kept. Update the VPN component below and approve OFTC if macOS asks. You'll choose when to connect."
+            : "Choose a saved profile or enter your gateway. macOS may ask you to enable the OFTC Network Extension. Setup will not connect the VPN.")
         explanation.frame = NSRect(x: 28, y: 286, width: 524, height: 42)
         content.addSubview(explanation)
 
@@ -121,6 +127,7 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         content.addSubview(settingsButton)
         setupButton.target = self
         setupButton.action = #selector(setUp)
+        if updating { setupButton.title = "Update VPN" }
         setupButton.frame = NSRect(x: 444, y: 12, width: 112, height: 28)
         content.addSubview(setupButton)
     }
@@ -161,6 +168,29 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     }
 
     @objc private func setUp() {
+        // Recheck at the point of mutation: another UI or CLI may have
+        // connected since this window opened. Never replace a live provider.
+        setupButton.isEnabled = false
+        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let matching = (managers ?? []).filter {
+                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == self.providerID
+                }
+                guard error == nil, matching.count <= 1 else {
+                    self.message("Could not confirm your VPN is disconnected. Check VPN settings, then try again.")
+                    return
+                }
+                if let status = matching.first?.connection.status, status != .disconnected && status != .invalid {
+                    self.message("Disconnect OFTC before updating or changing VPN setup.")
+                    return
+                }
+                self.performSetup()
+            }
+        }
+    }
+
+    private func performSetup() {
         guard sources.indices.contains(sourceMenu.indexOfSelectedItem),
               let port = UInt32(portField.stringValue),
               let profile = try? OFTCProfile(gateway: gatewayField.stringValue,
@@ -245,7 +275,8 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     func request(_ request: OSSystemExtensionRequest,
                  actionForReplacingExtension existing: OSSystemExtensionProperties,
                  withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        .replace
+        VPNComponentState.canReplace(existing: existing.bundleVersion, replacement: replacement.bundleVersion)
+            ? .replace : .cancel
     }
 
     func request(_ request: OSSystemExtensionRequest,
@@ -317,14 +348,15 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
             "Contents/Library/SystemExtensions/\(providerID).systemextension/Contents/Info.plist")
         let metadata = NSDictionary(contentsOf: extensionPlist) as? [String: Any]
         let version = metadata?["CFBundleShortVersionString"] as? String ?? "installed"
-        message("OFTC \(version) is ready. The VPN remains disconnected; use `oftc connect` when ready.")
+        message("OFTC \(version) is ready. Use Connect in the OFTC menu bar when ready.")
         setupButton.title = "Done"
         setupButton.action = #selector(done)
     }
 
-    @objc private func done() { NSApplication.shared.terminate(nil) }
+    @objc private func done() { window.close() }
 
     func windowWillClose(_ notification: Notification) {
-        NSApplication.shared.terminate(nil)
+        if let onClose { onClose() }
+        else { NSApplication.shared.terminate(nil) }
     }
 }
