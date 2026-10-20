@@ -35,17 +35,24 @@ statistics. It adds concrete masks and an independent controls window,
 keeps totals through missing samples, and improves safe helper error reporting.
 The first-connect cause and colleague-side rendering still need confirmation.
 
+The [build 27 follow-up](evidence/v27-extension-approval-switch.md) (OFTC
+1.0.6) responds to a fresh-install report: the user mistook OFTC's listing in
+Login Items & Extensions for approval. Setup's approval button now opens the
+Network Extensions sheet, which holds OFTC's switch. The undocumented URL was
+observed only on macOS 27. It is signed, notarized, and packaged with the
+unchanged build 23 provider.
+
 ## Next: pilot validation
 
-1. On a colleague's Mac, validate fresh 1.0.5 build 26 welcome/setup approval
-   and a separate 1.0.3/1.0.4-to-1.0.5 update. Check actual postinstall opening,
+1. On a colleague's Mac, validate fresh 1.0.6 build 27 welcome/setup approval
+   and a separate 1.0.4/1.0.5-to-1.0.6 update. Check actual postinstall opening,
    native app closing, reopening, quiet login launch, first menu connection,
    browser SSO, protected traffic, idle statistics, menu rates
    and history, explicit stop/reconnect, and route/DNS cleanup. Then validate
    recovery and a longer connection. The earlier Mac mini 1.0.3 test had an
    existing provider record and did not prove fresh approval. See the
    [pilot guide](pilot-validation.md) and
-   [build 26 record](evidence/v26-menu-visibility-and-upgrade-recovery.md).
+   [build 27 record](evidence/v27-extension-approval-switch.md).
 2. Validate the [build 22 app-bundled agent](evidence/v22-bundled-agent-candidate.md)
    on a fresh Mac. Its upgrade on the development Mac displayed OFTC in
    Background App Activity without the old Developer ID row after refresh.

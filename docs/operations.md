@@ -1,9 +1,10 @@
 # Operating OFTC
 
 The release package installs `/Applications/OFTC.app`, `/usr/local/bin/oftc`,
-and `man oftc`. Host build 26 adds independent controls, concrete menu icon masks, and
-clearer update and connection handling to OFTC 1.0.5, using provider build 23.
-The [build 26 record](evidence/v26-menu-visibility-and-upgrade-recovery.md) separates
+and `man oftc`. OFTC 1.0.6 host build 27 uses provider build 23. It keeps build
+26's independent controls, concrete menu icon masks, and update and connection
+handling, and it opens the Network Extensions switch during setup approval.
+The [build 27 record](evidence/v27-extension-approval-switch.md) separates
 offline checks, package trust, installation, and live validation.
 
 For colleagues testing the package, use the shorter [pilot guide](pilot-validation.md)
@@ -97,7 +98,7 @@ active or recovering VPN, then uses its native app-closing declaration for
 an idle running app. The final preinstall guard still requires the host to
 have exited; command-line and managed installs must quit it first. Installer's
 welcome and completion pages explain the controls and preserve saved settings.
-Actual native app closing remains a pilot validation step for build 26.
+Actual native app closing remains a pilot validation step for build 27.
 
 `oftc disconnect` stops the VPN and its background agent; it leaves the app
 open. Open **OFTC** from Applications for its controls and choose **Quit OFTC**.
