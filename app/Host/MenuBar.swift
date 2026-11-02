@@ -244,6 +244,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var item: NSStatusItem?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    private var statusObservers: [NSObjectProtocol] = []
+    private var statusObserverKey = ""
     private var menuLock: Int32 = -1
     private var manager: NETunnelProviderManager?
     private var profile: OFTCProfile?
@@ -257,6 +259,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var refreshEpoch = 0
     private var refreshPending = false
     private var ticks = 0
+    private static let safetyReloadTicks = 600
     private var errorMessage: String?
     private var statusError: String?
     private var stoppingSince: Date?
@@ -332,9 +335,17 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             showPopover()
             return
         }
+        // The cached manager is the source of truth: status changes are read
+        // from it, and a full reload happens only when there is no manager
+        // yet, on a configuration change, after wake, on user actions, and as
+        // a rare safety net.
+        syncStatusObservers()
         observers.append(NotificationCenter.default.addObserver(
-            forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] _ in
-                self?.checkComponent()
+            forName: .NEVPNConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+                self?.refresh()
+            })
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.refresh()
             })
         for suffix in ["show-menu", "quit-menu"] {
@@ -349,6 +360,32 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let timer { RunLoop.main.add(timer, forMode: .common) }
         checkComponent()
         refresh()
+    }
+
+    // Status observers are scoped to the connections this menu actually shows,
+    // one observer per connection, so more than one tunnel can be added to the
+    // list later. Never observe with object: nil: every loadAllFromPreferences
+    // then leaks about 3 mach ports in this process (Issue 038).
+    private func syncStatusObservers() {
+        let connections: [NEVPNConnection] = manager.map { [$0.connection] } ?? []
+        let key = connections.map { String(UInt(bitPattern: ObjectIdentifier($0).hashValue)) }.joined(separator: ",")
+        guard key != statusObserverKey else { return }
+        statusObserverKey = key
+        statusObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        statusObservers = []
+        let handler: (Notification) -> Void = { [weak self] note in
+            guard let self else { return }
+            self.checkComponent()
+            if let manager = self.manager, (note.object as AnyObject?) === manager.connection {
+                self.reconcile()
+            } else if self.manager == nil {
+                self.refresh()
+            }
+        }
+        for connection in connections {
+            statusObservers.append(NotificationCenter.default.addObserver(
+                forName: .NEVPNStatusDidChange, object: connection, queue: .main, using: handler))
+        }
     }
 
     private func configureActions(_ controller: OFTCMenuViewController) {
@@ -410,6 +447,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     self.manager = matching.first
                     self.statusError = nil
                 }
+                self.syncStatusObservers()
                 self.reconcile()
                 self.finishInitialExperience()
             }
@@ -434,7 +472,11 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func tick() {
         ticks += 1
-        if ticks % 5 == 0 { refresh() }
+        syncStatusObservers()
+        if ticks % 5 == 0 {
+            profile = try? OFTCProfileStore(bundleID: appID).load()
+            if manager == nil || ticks % Self.safetyReloadTicks == 0 { refresh() }
+        }
         reconcile()
         sampleTraffic()
     }

@@ -30,6 +30,7 @@ unsafe extern "C" {
 }
 
 const READ_SLICE: Duration = Duration::from_millis(250);
+const READY_SLICE: Duration = Duration::from_millis(2);
 const INNER_MTU: usize = 1280;
 const MAX_QUEUED_INNER: usize = 32;
 // Gateway configuration records 24h IKE and 12h CHILD lifetimes. Rekey early;
@@ -559,7 +560,11 @@ impl Session {
     }
 
     fn read_one(&mut self) -> Result<Poll, Error> {
-        let deadline = Instant::now() + READ_SLICE;
+        self.read_one_within(READ_SLICE)
+    }
+
+    fn read_one_within(&mut self, slice: Duration) -> Result<Poll, Error> {
+        let deadline = Instant::now() + slice;
         let Some(frame) = self.socket.read(deadline, &self.cancel)?
             else { return Ok(Poll::Event(Event::Timeout)); };
         if self.socket.wire() == transport::Wire::Tcp4443 {
@@ -776,16 +781,35 @@ impl Session {
 
     /// Poll one outer packet. Cancellation wakes within READ_SLICE.
     pub fn receive(&mut self) -> Result<Event, Error> {
+        self.receive_within(READ_SLICE)
+    }
+
+    /// Like `receive`, but only waits `READY_SLICE`. The caller has already
+    /// waited for the outer socket to become readable without holding the
+    /// session, so sends are not stuck behind a full read slice.
+    pub fn receive_ready(&mut self) -> Result<Event, Error> {
+        self.receive_within(READY_SLICE)
+    }
+
+    fn receive_within(&mut self, slice: Duration) -> Result<Event, Error> {
         self.cancel.check()?;
         if let Some(ip) = self.queued_inner.pop_front() {
             return Ok(Event::IpPacket(ip));
         }
-        match self.read_one()? {
+        match self.read_one_within(slice)? {
             Poll::Event(event) => Ok(event),
             Poll::Ack(_) | Poll::RekeyReply(_, _) | Poll::IkeRekeyReply(_, _) =>
                 Ok(Event::Rejected),
         }
     }
+
+    /// True when an inner packet is already queued, so waiting on the socket
+    /// would only delay it.
+    pub fn has_queued(&self) -> bool { !self.queued_inner.is_empty() }
+
+    /// The outer socket's descriptor, for readiness waits made without
+    /// holding the session. Only ever polled, never read or written.
+    pub fn outer_fd(&self) -> i32 { self.socket.raw_fd() }
 
     fn await_info(&mut self, kind: lifecycle::Exchange,
                   honor_cancel: bool, queue_ip: bool) -> Result<(), Error> {

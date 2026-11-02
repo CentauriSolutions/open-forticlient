@@ -14,7 +14,10 @@ const TCP_CONNECT_DEADLINE: Duration = Duration::from_secs(4);
 // A short write deadline would tear down a healthy tunnel before liveness
 // has its own 60-second authenticated-silence grace period.
 const WRITE_DEADLINE: Duration = Duration::from_secs(45);
-const TCP_KEEPALIVE_RECORD: [u8; 3] = [0, 3, 0xff];
+// Length 7 (includes the length field), the four-zero non-ESP marker every
+// TCP-carried IKE record has, then the 0xff NAT keepalive byte. This is what
+// FortiClient sends every ~20 s; a bare 00 03 ff (no marker) draws a gateway RST.
+const TCP_KEEPALIVE_RECORD: [u8; 7] = [0, 7, 0, 0, 0, 0, 0xff];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wire {
@@ -292,6 +295,14 @@ impl Connection {
         }
     }
 
+    pub fn raw_fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+        match self {
+            Self::Udp(socket) => socket.as_raw_fd(),
+            Self::Tcp { stream, .. } => stream.as_raw_fd(),
+        }
+    }
+
     pub fn wire(&self) -> Wire {
         match self { Self::Udp(_) => Wire::Udp4500, Self::Tcp { .. } => Wire::Tcp4443 }
     }
@@ -379,7 +390,21 @@ mod tests {
     }
 
     #[test]
-    fn tcp_nat_keepalive_is_one_bounded_rfc9329_record() {
-        assert_eq!(TCP_KEEPALIVE_RECORD, [0, 3, 0xff]);
+    #[ignore = "loopback sockets require local-network permission in the sandbox"]
+    fn tcp_nat_keepalive_is_the_marked_seven_byte_record() {
+        assert_eq!(TCP_KEEPALIVE_RECORD, [0, 7, 0, 0, 0, 0, 0xff]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut conn = Connection::Tcp {
+            stream, reader: TcpReader::default(), prefix_sent: true, failed: false,
+        };
+        assert_eq!(conn.send_nat_keepalive(&Cancellation::default()), Ok(()));
+        let mut wire = [0u8; 16];
+        peer.set_nonblocking(false).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut wire).unwrap(), 7);
+        assert_eq!(&wire[..7], &TCP_KEEPALIVE_RECORD);
     }
 }

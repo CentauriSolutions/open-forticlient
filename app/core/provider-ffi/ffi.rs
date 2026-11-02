@@ -184,6 +184,24 @@ fn guard(f: impl FnOnce() -> i32) -> i32 {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(INTERNAL)
 }
 
+const RECEIVE_WAIT_MS: i32 = 250;
+
+#[repr(C)]
+struct PollFd { fd: i32, events: i16, revents: i16 }
+const POLLIN: i16 = 0x1;
+
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: i32) -> i32;
+}
+
+/// Blocks until `fd` is readable, errors, or `timeout_ms` passes. Only waits:
+/// it never reads, so a descriptor closed or reused meanwhile can at worst end
+/// the wait early, and the caller then re-checks under the session lock.
+fn wait_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+    unsafe { poll(&mut pfd, 1, timeout_ms) > 0 }
+}
+
 fn lock_inner(handle: &OftcHandle) -> Result<std::sync::MutexGuard<'_, Inner>, i32> {
     handle.inner.lock().map_err(|_| INTERNAL)
 }
@@ -702,10 +720,26 @@ pub unsafe extern "C" fn oftc_receive(
             }
             return code;
         }
+        // Wait for the outer socket without holding the session lock, so
+        // oftc_send_ip and the liveness tick can run while no packet is
+        // inbound. Holding it for the whole read slice delayed every
+        // outbound packet by up to 250 ms.
+        let wait_fd = match inner.session.as_ref() {
+            Some(s) if !s.has_queued() => Some(s.outer_fd()),
+            _ => None,
+        };
+        if let Some(fd) = wait_fd {
+            drop(inner);
+            wait_readable(fd, RECEIVE_WAIT_MS);
+            inner = match lock_inner(handle) {
+                Ok(inner) => inner,
+                Err(code) => return code,
+            };
+        }
         let Some(s) = inner.session.as_mut() else {
             return NOT_CONNECTED;
         };
-        let event = match s.receive() {
+        let event = match s.receive_ready() {
             Ok(event) => event,
             Err(error) => return mapped(error),
         };
@@ -803,6 +837,25 @@ pub unsafe extern "C" fn oftc_teardown(handle: *mut OftcHandle, out_result: *mut
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    #[ignore = "loopback sockets require local-network permission in the sandbox"]
+    fn wait_readable_returns_on_data_and_times_out_when_idle() {
+        use std::os::fd::AsRawFd;
+        use std::time::{Duration, Instant};
+        let rx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        tx.connect(rx.local_addr().unwrap()).unwrap();
+
+        let start = Instant::now();
+        assert!(!wait_readable(rx.as_raw_fd(), 60));
+        assert!(start.elapsed() >= Duration::from_millis(50));
+
+        tx.send(&[1]).unwrap();
+        let start = Instant::now();
+        assert!(wait_readable(rx.as_raw_fd(), 1000));
+        assert!(start.elapsed() < Duration::from_millis(200));
+    }
 
     #[test]
     fn policy_drop_is_distinct_from_fatal_esp_error() {

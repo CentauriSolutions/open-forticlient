@@ -9,6 +9,10 @@ import NetworkExtension
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let workQueue = DispatchQueue(label: "oftc.provider.session")
+    // oftc_receive waits for the outer socket without holding the session lock,
+    // but still blocks its caller. It gets its own queue so outbound sends and
+    // liveness ticks on workQueue never wait for it.
+    private let receiveQueue = DispatchQueue(label: "oftc.provider.receive")
     // State below is confined to DispatchQueue.main. The opaque Rust handle
     // has one provider reference until all queued work and teardown finish.
     private var handle: OpaquePointer?
@@ -238,7 +242,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func pollNext(_ handle: OpaquePointer) {
         guard running, !stopping else { return }
-        workQueue.async {
+        receiveQueue.async {
             var bytes = [UInt8](repeating: 0, count: 65_535)
             var length = 0
             var event: UInt32 = 0
@@ -337,6 +341,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if let previous {
                 var outcome: UInt32 = 0
                 _ = oftc_teardown(previous, &outcome)
+                // Join any receive still using the handle; oftc_cancel already
+                // ended its wait, so this returns within one receive slice.
+                self.receiveQueue.sync {}
             }
             DispatchQueue.main.async {
                 self.setTunnelNetworkSettings(nil) { _ in
