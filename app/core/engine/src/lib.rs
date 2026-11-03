@@ -19,5 +19,7 @@ pub mod mschapv2;
 mod rekey;
 mod session;
 pub mod transport;
+pub mod tunnel;
 
+pub use engine::AddressRange;
 pub use session::*;
