@@ -19,7 +19,7 @@ start and are not saved in VPN preferences, files, command arguments, or logs.
 
 | Source | Responsibility |
 | --- | --- |
-| [`app/Host/`](../app/Host/) | SAML orchestration, profile and Keychain access, VPN configuration, reconnection. |
+| [`app/Host/`](../app/Host/) | SAML orchestration, profile registry and Keychain access, per-profile VPN configuration, reconnection. |
 | [`app/Provider/`](../app/Provider/) | Packet tunnel lifecycle and Rust FFI adapter. |
 | [`app/core/`](../app/core/) | IKEv2, EAP-MSCHAPv2, ESP, transport, lifecycle, and C ABI. |
 | [`app/crypto/`](../app/crypto/) | Swift CryptoKit/CommonCrypto bridge. |
@@ -27,8 +27,22 @@ start and are not saved in VPN preferences, files, command arguments, or logs.
 | [`app/migration/`](../app/migration/) | FortiClient profile decryption for explicit one-time import. |
 | [`app/support/`](../app/support/) | Shared host/provider bootstrap and strict tunnel settings mapping. |
 
+Each configured VPN is a peer profile under `profiles/<id>/` in the host's
+Application Support directory, with its own nonsecret profile, macOS VPN
+entry (identified by `providerConfiguration["oftc.profile"]`), Keychain PSK,
+supervisor lease, stop request, status record and connect-at-login choice.
+Every profile's tunnel is a separate provider session of the one extension, so
+several can be connected at once. Each supervisor is its own host process;
+they take a shared file lock around browser SAML, so sign-ins (each listens on
+a local callback port) happen one at a time. The login agent runs
+`supervise-autostart`, which starts a supervisor for each profile whose
+connect-at-login choice is on. A profile from the original single-profile
+layout is migrated on first run and adopts the VPN entry that has no profile
+key. Route and DNS policy across profiles is not yet enforced; see Issue 40.
+
 The host can reconnect after a recoverable provider drop using fresh SSO when
-needed. An explicit user stop disables agent autostart and stays down. The
+needed. An explicit user stop stays down until the next connect and does not
+change connect-at-login. The
 [rollout gaps](initial-rollout-gaps.md) distinguish measured recovery paths
 from untested ones.
 

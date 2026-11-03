@@ -41,17 +41,55 @@ the controls window leaves the menu app running; reopening OFTC brings it back.
 Terminal setup remains available with `oftc setup`; see `man oftc` for explicit
 setup options.
 
+### Share profiles with a colleague
+
+```sh
+oftc export -o vpns.oftc            # every profile, in one file
+oftc export office-vpn warehouse -o vpns.oftc
+```
+
+In the app, **Settings → Export VPNs…** saves the same `.oftc` file from a
+Save dialog.
+
+Your colleague installs OFTC and either double-clicks the `.oftc` file (OFTC
+lists the VPNs and asks before adding them) or runs
+`oftc setup --from vpns.oftc`. Either way it adds
+each profile, stores its PSK in their Keychain, activates the extension, and
+installs the VPN entries; they then `oftc connect`. A gateway they already have
+is skipped, never changed. The file holds each profile's PSK. SAML is the real
+sign-in, so the PSK is not treated as a secret, but it is still configuration
+for a private gateway: share it only with the people who need it. Export
+creates the file with owner-only permissions and will not overwrite one.
+
+### Remove a VPN
+
+Click the **…** on a VPN's row and choose **Remove…**, or run
+`oftc remove warehouse`. OFTC disconnects it, then deletes its VPN entry, saved
+PSK, settings, connect-at-login choice and trusted gateway certificate. Other
+VPNs keep running. Export first (`oftc export`, or **Settings → Export VPNs…**)
+if you want a copy to import later.
+
 ## Connect and inspect
 
-Open OFTC to keep its tunnel icon in the menu bar. Click the icon, then
-**Connect**. Browser SSO may appear; the popover shows sign-in, connection,
-and recovery progress. Opening OFTC from Applications also reveals controls
-when its menu icon is inaccessible. **Disconnect** also cancels recovery and disables
-automatic VPN connection at login. The menu bar stays available to reconnect.
+Open OFTC to keep its tunnel icon in the menu bar. Click the icon to see
+every configured VPN. Each has its own row with its state, **Connect** or
+**Disconnect**, and its own **Connect at login** checkbox. Any number of VPNs
+can be connected at the same time; **Connect all** and **Disconnect all**
+appear when there is more than one. Browser SSO may appear, one VPN at a time;
+each row shows sign-in, connection, and recovery progress. Opening OFTC from
+Applications also reveals controls when its menu icon is inaccessible.
+**Disconnect** cancels recovery for that VPN only and leaves its Connect at
+login choice alone. The menu bar stays available to reconnect. Use
+**Settings → Add VPN…** to add another gateway.
+
+Concurrent VPNs are separate tunnels: macOS chooses between them by the most
+specific route, so two gateways that push the same prefix are ambiguous.
+OFTC does not yet detect overlapping routes or conflicting DNS between
+profiles; see Issue 40.
 
 The upper icon arches use fine lines. The tunnel is grey when disconnected.
-While connected, the popover shows connection duration, receive/send rates,
-and received/sent totals. Receiving and sending include sparklines of the
+While connected, each connected VPN's row shows its connection duration,
+receive/send rates, and received/sent totals. Receiving and sending include sparklines of the
 last 60 seconds, with separate scales available in their tooltips. These
 count inner IP traffic carried by OFTC,
 excluding IPsec overhead and traffic outside the tunnel. Totals reset on a
@@ -62,34 +100,43 @@ in the traces; a missing current rate is unavailable rather than zero. Last
 reported totals survive sampling gaps within the same connection.
 
 In **Settings**, **Launch OFTC at login** controls only the menu bar app.
-**Connect VPN at login** separately controls automatic VPN connection.
-Enabling either setting does not connect immediately. New installations
-leave automatic VPN connection off; an existing registered VPN agent keeps
-its prior login behavior until changed or explicitly disconnected.
+Each VPN's **Connect at login** checkbox separately controls whether the
+bundled agent connects it when you log in. Enabling either setting does not
+connect immediately. New VPNs start with automatic connection off; the VPN
+migrated from a single-profile install keeps its prior login behavior.
 The helper uses the GUI user's home directory and presents only fixed error
 categories and exit status, never raw command output. If the first connection
 fails before browser sign-in, record the displayed error before trying the CLI.
-**Set up OFTC…** reopens guided setup. **Disconnect and Quit OFTC** stops
-an active connection before closing the menu app.
+**Add VPN…** opens guided setup for another gateway. **Disconnect and Quit
+OFTC** stops every active connection before closing the menu app.
 
 The same connection controls are available from the terminal:
 
 ```sh
-oftc connect
+oftc setup --import "Warehouse"   # add another VPN
+oftc profiles
+oftc connect                     # every profile, or: oftc connect warehouse
 oftc status
-oftc disconnect
+oftc autostart warehouse on
+oftc disconnect                  # every profile, or: oftc disconnect warehouse
 ```
 
-`connect` starts a supervised connection using the saved connect-at-login
-preference and registers the agent bundled in `OFTC.app`. On the first connection
-after an upgrade, it removes the old per-user LaunchAgent plist. Browser SSO
-may appear. The supervisor retries recoverable drops.
-`disconnect` stops the VPN, disables automatic VPN connection, and unregisters
-the bundled agent, so a deliberate stop stays down until Connect is requested.
-It leaves the menu app running. `status` shows VPN and agent state, both login settings,
-nonsecret profile settings, and CHILD SA rekey counts when connected. Agent
-logs are in `~/Library/Logs/OFTC/agent.log`. Do not share raw SAML callbacks,
-PSKs, or packet captures.
+`connect` starts one supervised connection per profile; each supervisor runs
+independently and retries recoverable drops. Browser SSO may appear, one
+profile at a time. On the first connection after an upgrade, it removes the
+old per-user LaunchAgent plist. `disconnect` stops the named VPNs and leaves
+their connect-at-login choices alone, so a deliberate stop stays down until
+Connect is requested. `autostart` registers the bundled agent, which starts a
+supervisor for each profile with connect-at-login on. It leaves the menu app
+running. `status` shows each profile's state, the agent, login settings, and
+CHILD SA rekey counts when connected. Supervisor logs are in
+`~/Library/Logs/OFTC/<profile>.log`. Do not share raw SAML callbacks, PSKs, or
+packet captures.
+
+A profile is identified by a short id, such as `office-vpn`, made from its name.
+A profile created before multi-profile support is migrated automatically the
+first time the new app runs: its settings move into
+`profiles/<id>/` and its existing VPN entry and login choice are kept.
 
 ## Update or uninstall
 
@@ -100,20 +147,19 @@ have exited; command-line and managed installs must quit it first. Installer's
 welcome and completion pages explain the controls and preserve saved settings.
 Actual native app closing remains a pilot validation step for build 27.
 
-`oftc disconnect` stops the VPN and its background agent; it leaves the app
-open. Open **OFTC** from Applications for its controls and choose **Quit OFTC**.
+`oftc disconnect` stops every VPN; it leaves the app open. Open **OFTC** from Applications for its controls and choose **Quit OFTC**.
 For an older version with inaccessible controls, quit **OFTCAgent** in Activity
 Monitor after disconnecting. Do not kill **OFTCTunnel**: it is the system-managed
 VPN component. Reopen OFTC after updating and connect when ready.
 
 If Installer reports a failure, view its log and find the OFTC package error.
 The build 24 preinstall script reports either `OFTC is running` or
-`OFTC VPN is active` when it refuses an update for those reasons. The generic
+`An OFTC VPN is active` (any profile) when it refuses an update for those reasons. The generic
 failure summary alone does not establish the cause. Share only the relevant
 package error lines for diagnosis, rather than VPN logs or credentials.
 
 Installing a new app can leave the older provider activated. After an update,
-with OFTC disconnected, use **Settings → Set up OFTC…** to request approval
+with OFTC disconnected, use **Settings → Add VPN…** to request approval
 for the bundled provider before reconnecting. If traffic statistics remain
 unavailable after an upgrade, check that the new provider is activated rather
 than only installed inside the app.
