@@ -99,7 +99,6 @@ cp "$APP_PROFILE" "$app/Contents/embedded.provisionprofile"
 cp "$EXTENSION_PROFILE" "$extension/Contents/embedded.provisionprofile"
 libraries=(
     "$app_frameworks/liboftc_host_bootstrap.dylib"
-    "$provider_frameworks/libcrypto_swift.dylib"
     "$provider_frameworks/liboftc_provider_ffi.dylib"
     "$provider_frameworks/liboftc_preflight.dylib"
 )

@@ -40,46 +40,47 @@ cp "$root/assets/OFTCDocument.icns" "$app/Contents/Resources/OFTCDocument.icns"
 mkdir -p "$app/Contents/Resources/en.lproj"
 cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/InfoPlist.strings"
 
-xcrun swiftc -swift-version 5 -target "$target" -O -emit-library \
-    -Xlinker -install_name -Xlinker '@rpath/libcrypto_swift.dylib' \
-    "$root/crypto/swift-bridge.swift" -o "$provider_frameworks/libcrypto_swift.dylib"
-CARGO_TARGET_DIR="$build/modp14-target" cargo build --offline --locked --release \
-    --manifest-path "$root/core/modp14/Cargo.toml"
+CARGO_TARGET_DIR="$build/rust-target" cargo test --offline --locked --workspace \
+    --manifest-path "$root/Cargo.toml"
+CARGO_TARGET_DIR="$build/rust-target" cargo build --offline --locked --release --workspace \
+    --manifest-path "$root/Cargo.toml"
+rust_release="$build/rust-target/release"
 rustc --edition=2021 --crate-name oftc_session --crate-type rlib \
     "$root/core/provider-live-engine/session.rs" \
-    --extern oftc_modp14="$build/modp14-target/release/liboftc_modp14.rlib" \
-    -L "dependency=$build/modp14-target/release/deps" \
+    --extern oftc_modp14="$rust_release/liboftc_modp14.rlib" \
+    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
+    -L "dependency=$rust_release/deps" \
     -o "$build/liboftc_session.rlib"
 rustc --edition=2021 --test "$root/core/provider-live-engine/session.rs" \
-    --extern oftc_modp14="$build/modp14-target/release/liboftc_modp14.rlib" \
-    -L "dependency=$build/modp14-target/release/deps" \
-    -L "$provider_frameworks" -l dylib=crypto_swift \
-    -C 'link-arg=-Wl,-rpath,@loader_path' -o "$build/session-tests"
-DYLD_LIBRARY_PATH="$provider_frameworks" "$build/session-tests"
+    --extern oftc_modp14="$rust_release/liboftc_modp14.rlib" \
+    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
+    -L "dependency=$rust_release/deps" \
+    -o "$build/session-tests"
+"$build/session-tests"
 rustc --edition=2021 --crate-type cdylib -C opt-level=z \
     "$root/core/provider-ffi/ffi.rs" \
     --extern oftc_session="$build/liboftc_session.rlib" \
-    -L "dependency=$build/modp14-target/release/deps" \
-    -L "$provider_frameworks" -l dylib=crypto_swift \
+    -L "dependency=$rust_release/deps" \
     -C 'link-arg=-Wl,-install_name,@rpath/liboftc_provider_ffi.dylib' \
     -C 'link-arg=-Wl,-rpath,@loader_path' \
     -o "$provider_frameworks/liboftc_provider_ffi.dylib"
 rustc --edition=2021 --test "$root/core/provider-ffi/ffi.rs" \
     --extern oftc_session="$build/liboftc_session.rlib" \
-    -L "dependency=$build/modp14-target/release/deps" \
-    -L "$provider_frameworks" -l dylib=crypto_swift \
-    -C 'link-arg=-Wl,-rpath,@loader_path' -o "$build/ffi-tests"
-DYLD_LIBRARY_PATH="$provider_frameworks" "$build/ffi-tests"
+    -L "dependency=$rust_release/deps" \
+    -o "$build/ffi-tests"
+"$build/ffi-tests"
 rustc --edition=2021 --crate-type cdylib -C opt-level=z \
     "$root/Provider/preflight.rs" \
-    -L "$provider_frameworks" -l dylib=crypto_swift \
+    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
+    -L "dependency=$rust_release/deps" \
     -C 'link-arg=-Wl,-install_name,@rpath/liboftc_preflight.dylib' \
     -C 'link-arg=-Wl,-rpath,@loader_path' \
     -o "$provider_frameworks/liboftc_preflight.dylib"
 rustc --edition=2021 --test "$root/Provider/preflight.rs" \
-    -L "$provider_frameworks" -l dylib=crypto_swift \
-    -C 'link-arg=-Wl,-rpath,@loader_path' -o "$build/preflight-tests"
-DYLD_LIBRARY_PATH="$provider_frameworks" "$build/preflight-tests"
+    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
+    -L "dependency=$rust_release/deps" \
+    -o "$build/preflight-tests"
+"$build/preflight-tests"
 
 rustc --edition=2021 --crate-type cdylib -C opt-level=z \
     "$root/core/host-bootstrap/lib.rs" \

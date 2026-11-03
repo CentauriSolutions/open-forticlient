@@ -27,7 +27,7 @@ jobs:
       - name: Fetch locked Rust dependencies
         # build.sh builds with --offline, so fill the cargo cache first.
         run: |
-          cargo fetch --locked --manifest-path app/core/modp14/Cargo.toml
+          cargo fetch --locked --manifest-path app/Cargo.toml
           cargo fetch --locked --manifest-path client/Cargo.toml
 
       - name: Build and run all offline checks

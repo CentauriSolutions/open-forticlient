@@ -10,21 +10,6 @@ const CREATE_CHILD_SA: u8 = 36;
 const MAX_IKE_PACKET: usize = 4096;
 const ICV_LEN: usize = 16;
 
-unsafe extern "C" {
-    fn oftc_swift_aes256_cbc(
-        encrypt: i32,
-        key: *const u8,
-        key_len: usize,
-        iv: *const u8,
-        iv_len: usize,
-        input: *const u8,
-        input_len: usize,
-        output: *mut u8,
-        output_len: usize,
-    ) -> i32;
-    fn oftc_swift_random(output: *mut u8, output_len: usize) -> i32;
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildSpis {
     /// Our inbound ESP SPI; this goes into an initiator CHILD_SA DELETE request.
@@ -495,32 +480,16 @@ fn cbc(encrypt: bool, key: &[u8; 32], iv: &[u8; 16], input: &[u8]) -> Result<Vec
     if input.is_empty() || input.len() % 16 != 0 {
         return Err("invalid CBC length".into());
     }
-    let mut out = vec![0; input.len()];
-    if unsafe {
-        oftc_swift_aes256_cbc(
-            encrypt as i32,
-            key.as_ptr(),
-            key.len(),
-            iv.as_ptr(),
-            iv.len(),
-            input.as_ptr(),
-            input.len(),
-            out.as_mut_ptr(),
-            out.len(),
-        )
-    } != 0
-    {
-        return Err("AES-256-CBC failed".into());
-    }
-    Ok(out)
+    let out = if encrypt {
+        oftc_crypto::aes256_cbc_encrypt(key, iv, input)
+    } else {
+        oftc_crypto::aes256_cbc_decrypt(key, iv, input)
+    };
+    out.map_err(|_| "AES-256-CBC failed".into())
 }
 
 fn random_iv() -> Result<[u8; 16], String> {
-    let mut iv = [0; 16];
-    if unsafe { oftc_swift_random(iv.as_mut_ptr(), iv.len()) } != 0 {
-        return Err("secure random failed".into());
-    }
-    Ok(iv)
+    oftc_crypto::random_array().map_err(|_| "secure random failed".into())
 }
 
 fn equal_ct(a: &[u8], b: &[u8]) -> bool {

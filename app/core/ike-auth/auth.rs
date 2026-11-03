@@ -13,47 +13,8 @@ const TSI: u8 = 44;
 const TSR: u8 = 45;
 const CP: u8 = 47;
 
-unsafe extern "C" {
-    fn oftc_swift_hmac(
-        sha256: i32,
-        key: *const u8,
-        key_len: usize,
-        input: *const u8,
-        input_len: usize,
-        digest: *mut u8,
-        digest_len: usize,
-    ) -> i32;
-    fn oftc_swift_aes256_cbc(
-        encrypt: i32,
-        key: *const u8,
-        key_len: usize,
-        iv: *const u8,
-        iv_len: usize,
-        input: *const u8,
-        input_len: usize,
-        output: *mut u8,
-        output_len: usize,
-    ) -> i32;
-    fn oftc_swift_random(output: *mut u8, output_len: usize) -> i32;
-}
-
 fn hmac(key: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
-    let mut out = [0u8; 32];
-    if unsafe {
-        oftc_swift_hmac(
-            1,
-            key.as_ptr(),
-            key.len(),
-            data.as_ptr(),
-            data.len(),
-            out.as_mut_ptr(),
-            out.len(),
-        )
-    } != 0
-    {
-        return Err("HMAC-SHA256 failed".into());
-    }
-    Ok(out)
+    Ok(oftc_crypto::hmac_sha256(key, data))
 }
 
 pub fn prf_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
@@ -64,32 +25,16 @@ fn cbc(encrypt: bool, key: &[u8; 32], iv: &[u8; 16], input: &[u8]) -> Result<Vec
     if input.is_empty() || input.len() % 16 != 0 {
         return Err("CBC input length is not block aligned".into());
     }
-    let mut out = vec![0; input.len()];
-    if unsafe {
-        oftc_swift_aes256_cbc(
-            encrypt as i32,
-            key.as_ptr(),
-            key.len(),
-            iv.as_ptr(),
-            iv.len(),
-            input.as_ptr(),
-            input.len(),
-            out.as_mut_ptr(),
-            out.len(),
-        )
-    } != 0
-    {
-        return Err("AES-256-CBC failed".into());
-    }
-    Ok(out)
+    let out = if encrypt {
+        oftc_crypto::aes256_cbc_encrypt(key, iv, input)
+    } else {
+        oftc_crypto::aes256_cbc_decrypt(key, iv, input)
+    };
+    out.map_err(|_| "AES-256-CBC failed".into())
 }
 
 fn random<const N: usize>() -> Result<[u8; N], String> {
-    let mut out = [0; N];
-    if unsafe { oftc_swift_random(out.as_mut_ptr(), out.len()) } != 0 {
-        return Err("secure random failed".into());
-    }
-    Ok(out)
+    oftc_crypto::random_array().map_err(|_| "secure random failed".into())
 }
 
 fn prf_plus(key: &[u8], seed: &[u8], needed: usize) -> Result<Vec<u8>, String> {

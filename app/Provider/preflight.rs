@@ -8,21 +8,8 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-unsafe extern "C" {
-    fn oftc_swift_group20_generate(key: *mut *mut std::ffi::c_void, public: *mut u8) -> i32;
-    fn oftc_swift_group20_shared(key: *mut std::ffi::c_void, peer: *const u8,
-                                 peer_len: usize, secret: *mut u8, secret_len: usize) -> i32;
-    fn oftc_swift_group20_free(key: *mut std::ffi::c_void);
-    fn oftc_swift_random(output: *mut u8, len: usize) -> i32;
-}
-
-struct Key(*mut std::ffi::c_void);
-impl Drop for Key { fn drop(&mut self) { unsafe { oftc_swift_group20_free(self.0) }; } }
-
 fn random<const N: usize>() -> Result<[u8; N], i32> {
-    let mut bytes = [0; N];
-    if unsafe { oftc_swift_random(bytes.as_mut_ptr(), N) } != 0 { return Err(3); }
-    Ok(bytes)
+    oftc_crypto::random_array().map_err(|_| 3)
 }
 
 fn exchange(socket: &UdpSocket, ike: &[u8], id: u32) -> Result<Vec<u8>, i32> {
@@ -57,13 +44,7 @@ fn run(gateway: &str, uid: &str, psk: &[u8]) -> Result<(), i32> {
     socket.connect(remote).map_err(|_| 2)?;
     let local = socket.local_addr().map_err(|_| 2)?;
     let IpAddr::V4(local_v4) = local.ip() else { return Err(2); };
-    let mut raw_key = std::ptr::null_mut();
-    let mut public = [0u8; 96];
-    if unsafe { oftc_swift_group20_generate(&mut raw_key, public.as_mut_ptr()) } != 0 || raw_key.is_null() {
-        if !raw_key.is_null() { unsafe { oftc_swift_group20_free(raw_key) }; }
-        return Err(3);
-    }
-    let key = Key(raw_key);
+    let (key, public) = oftc_crypto::Group20Key::generate().map_err(|_| 3)?;
     let mut spi_i = random::<8>()?;
     if spi_i == [0; 8] { spi_i[7] = 1; }
     let nonce_i = random::<32>()?;
@@ -71,11 +52,8 @@ fn run(gateway: &str, uid: &str, psk: &[u8]) -> Result<(), i32> {
     let first_reply = exchange(&socket, &first, 0)?;
     let response = init::parse_response(&first_reply, &spi_i, local, remote).map_err(|_| 3)?;
     if response.selected != 1 { return Err(3); }
-    let mut dh = [0u8; 48];
-    if unsafe { oftc_swift_group20_shared(key.0, response.peer_public.as_ptr(),
-        response.peer_public.len(), dh.as_mut_ptr(), dh.len()) } != 0 { return Err(3); }
+    let dh = key.shared_secret(&response.peer_public).map_err(|_| 3)?;
     let keys_result = auth::derive_keys(&nonce_i, &response.nonce, &spi_i, &response.spi_r, &dh);
-    dh.fill(0);
     let keys = keys_result.map_err(|_| 3)?;
     let first_auth = auth::first_request(&spi_i, &response.spi_r, &keys, local_v4).map_err(|_| 4)?;
     let auth_reply = exchange(&socket, &first_auth, 1)?;
