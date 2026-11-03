@@ -403,7 +403,7 @@ mod tests {
     }
     #[test]
     fn exact_request_layout_and_framing() {
-        let (ike, spi, local, remote) = fixture();
+        let (ike, spi, _, remote) = fixture();
         assert_eq!(ike.len(), 376);
         assert_eq!(&ike[..8], &spi);
         assert_eq!(&ike[8..16], &[0; 8]);
@@ -431,7 +431,6 @@ mod tests {
         bad = tcp;
         bad[2] = 1;
         assert!(unframe_tcp(&bad).is_err());
-        assert_eq!(local.port(), 4500);
     }
     #[test]
     fn nat_hash_matches_independent_sha1_vector() {

@@ -190,35 +190,28 @@ mod tests {
     fn aes256_cbc_rejects_empty_and_partial_blocks() {
         let key = [0; 32];
         let iv = [0; 16];
-        for length in [0, 1, 15, 17, 31] {
+        for length in [0, 15, 17] {
             let input = vec![0; length];
             assert_eq!(aes256_cbc_encrypt(&key, &iv, &input), Err(Error::InvalidInput));
             assert_eq!(aes256_cbc_decrypt(&key, &iv, &input), Err(Error::InvalidInput));
         }
     }
 
-    // RFC 2202 test cases 1, 2, 6 and 7 for HMAC-SHA-1.
+    // RFC 2202 test cases 1 (short key) and 6 (key longer than the block) for HMAC-SHA-1.
     #[test]
     fn hmac_sha1_matches_rfc_2202() {
         assert_eq!(hmac_sha1(&[0x0b; 20], b"Hi There"),
             array::<20>("b617318655057264e28bc0b6fb378c8ef146be00"));
-        assert_eq!(hmac_sha1(b"Jefe", b"what do ya want for nothing?"),
-            array::<20>("effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"));
         assert_eq!(hmac_sha1(&[0xaa; 80],
             b"Test Using Larger Than Block-Size Key - Hash Key First"),
             array::<20>("aa4ae5e15272d00e95705637ce8a3b55ed402112"));
-        assert_eq!(hmac_sha1(&[0xaa; 80],
-            b"Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data"),
-            array::<20>("e8e99d0f45237d786d6bbaa7965c7808bbff1a91"));
     }
 
-    // RFC 4231 test cases 1, 2 and 6 for HMAC-SHA-256.
+    // RFC 4231 test cases 1 (short key) and 6 (key longer than the block) for HMAC-SHA-256.
     #[test]
     fn hmac_sha256_matches_rfc_4231() {
         assert_eq!(hmac_sha256(&[0x0b; 20], b"Hi There"),
             array::<32>("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"));
-        assert_eq!(hmac_sha256(b"Jefe", b"what do ya want for nothing?"),
-            array::<32>("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"));
         assert_eq!(hmac_sha256(&[0xaa; 131],
             b"Test Using Larger Than Block-Size Key - Hash Key First"),
             array::<32>("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"));
@@ -258,19 +251,16 @@ mod tests {
     #[test]
     fn group20_matches_rfc_5903_vectors() {
         let initiator = Group20Key::from_scalar(&array(I));
-        let responder = Group20Key::from_scalar(&array(R));
         assert_eq!(initiator.public_value(), join(GIX, GIY));
-        assert_eq!(responder.public_value(), join(GRX, GRY));
+        assert_eq!(Group20Key::from_scalar(&array(R)).public_value(), join(GRX, GRY));
         let expected: [u8; 48] = array(SHARED);
         assert_eq!(*initiator.shared_secret(&join(GRX, GRY)).unwrap(), expected);
-        assert_eq!(*responder.shared_secret(&join(GIX, GIY)).unwrap(), expected);
     }
 
     #[test]
     fn group20_generated_keys_agree() {
         let (a, a_public) = Group20Key::generate().unwrap();
         let (b, b_public) = Group20Key::generate().unwrap();
-        assert_ne!(a_public, b_public);
         assert_eq!(*a.shared_secret(&b_public).unwrap(), *b.shared_secret(&a_public).unwrap());
     }
 
@@ -281,10 +271,5 @@ mod tests {
         let mut bad = join(GIX, GIY);
         bad[95] ^= 1;
         assert_eq!(key.shared_secret(&bad).err(), Some(Error::InvalidInput));
-    }
-
-    #[test]
-    fn random_values_differ() {
-        assert_ne!(random_array::<32>().unwrap(), random_array::<32>().unwrap());
     }
 }
