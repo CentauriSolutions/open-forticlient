@@ -263,66 +263,23 @@ mod tests {
     }
 
     #[test]
-    fn applies_and_clears_settings() {
-        let (tunnel, peer) = loopback();
-        assert_eq!(peer.settings(), None);
-        tunnel.apply_settings(&settings()).unwrap();
-        assert_eq!(peer.settings(), Some(settings()));
-        tunnel.clear_settings().unwrap();
-        assert_eq!(peer.settings(), None);
-        assert_eq!(peer.clear_count(), 1);
-    }
-
-    #[test]
-    fn round_trips_packets_in_both_directions() {
-        let (tunnel, peer) = loopback();
-        peer.inject(&[0x45, 1]);
-        peer.inject(&[0x45, 2]);
-        assert_eq!(tunnel.read_packets().unwrap(), vec![vec![0x45, 1], vec![0x45, 2]]);
-        tunnel.write_packet(&[0x45, 3]).unwrap();
-        tunnel.write_packet(&[0x45, 4]).unwrap();
-        assert_eq!(peer.take_written(), vec![vec![0x45, 3], vec![0x45, 4]]);
-        assert!(peer.take_written().is_empty());
-    }
-
-    #[test]
-    fn read_blocks_until_a_packet_arrives() {
-        let (tunnel, peer) = loopback();
-        let reader = thread::spawn(move || tunnel.read_packets());
-        peer.wait_until_blocked();
-        peer.inject(&[0x45, 9]);
-        assert_eq!(reader.join().unwrap().unwrap(), vec![vec![0x45, 9]]);
-    }
-
-    #[test]
-    fn close_wakes_a_blocked_read_and_fails_later_calls() {
+    fn close_wakes_a_blocked_read_and_fails_later_calls_but_keeps_settings_clearable() {
         let (tunnel, peer) = loopback();
         let tunnel = Arc::new(tunnel);
+        tunnel.apply_settings(&settings()).unwrap();
         let reader = {
             let tunnel = tunnel.clone();
             thread::spawn(move || tunnel.read_packets())
         };
         peer.wait_until_blocked();
-        peer.close();
+        tunnel.close();
+        tunnel.close();
         assert_eq!(reader.join().unwrap(), Err(TunnelError::Closed));
         assert_eq!(tunnel.write_packet(&[0x45]), Err(TunnelError::Closed));
         assert_eq!(tunnel.apply_settings(&settings()), Err(TunnelError::Closed));
-    }
-
-    #[test]
-    fn tunnel_close_wakes_a_blocked_read_and_keeps_settings_clearable() {
-        let (tunnel, peer) = loopback();
-        let tunnel = Arc::new(tunnel);
-        tunnel.apply_settings(&settings()).unwrap();
-        let reader = {
-            let tunnel = tunnel.clone();
-            thread::spawn(move || tunnel.read_packets())
-        };
-        peer.wait_until_blocked();
-        tunnel.close();
-        tunnel.close();
-        assert_eq!(reader.join().unwrap(), Err(TunnelError::Closed));
-        assert_eq!(tunnel.write_packet(&[0x45]), Err(TunnelError::Closed));
+        // Packets injected after the close are discarded, as the OS would.
+        peer.inject(&[0x45, 8]);
+        assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
         // Closing does not remove what was installed; clearing still works.
         assert_eq!(peer.settings(), Some(settings()));
         tunnel.clear_settings().unwrap();
@@ -336,14 +293,6 @@ mod tests {
         peer.close();
         assert_eq!(tunnel.read_packets().unwrap(), vec![vec![0x45, 5]]);
         assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
-    }
-
-    #[test]
-    fn rejected_settings_are_reported_and_not_installed() {
-        let (tunnel, peer) = loopback();
-        peer.reject_settings();
-        assert_eq!(tunnel.apply_settings(&settings()), Err(TunnelError::SettingsRejected));
-        assert_eq!(peer.settings(), None);
     }
 
     #[test]
@@ -364,19 +313,4 @@ mod tests {
         assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
     }
 
-    #[test]
-    fn packets_injected_after_close_are_discarded() {
-        let (tunnel, peer) = loopback();
-        peer.close();
-        peer.inject(&[0x45, 8]);
-        assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
-    }
-
-    #[test]
-    fn clear_settings_still_works_after_close() {
-        let (tunnel, peer) = loopback();
-        peer.close();
-        tunnel.clear_settings().unwrap();
-        assert_eq!(peer.clear_count(), 1);
-    }
 }

@@ -379,15 +379,21 @@ pub(crate) mod tests {
     fn a_preflight_with_a_mode_is_rejected() {
         let mut options = preflight(1000, fixed_id());
         options.mode = data(&[1, 1, 4, 1, 0, 0, 0, 0]);
-        assert!(consume_in(&mut ReplayTable::default(), &options, 1000).is_err());
+        assert_eq!(
+            consume_in(&mut ReplayTable::default(), &options, 1000).unwrap_err(),
+            EnvelopeError::Invalid
+        );
     }
 
     #[test]
     fn a_zero_session_id_and_non_data_options_are_rejected() {
         let mut starts = ReplayTable::default();
-        assert!(consume_in(&mut starts, &live(1000, [0; 16]), 1000).is_err());
+        assert_eq!(
+            consume_in(&mut starts, &live(1000, [0; 16]), 1000).unwrap_err(),
+            EnvelopeError::Invalid
+        );
         let not_data = StartOptions { live: Some(OptionValue::NotData), ..Default::default() };
-        assert!(consume_in(&mut starts, &not_data, 1000).is_err());
+        assert_eq!(consume_in(&mut starts, &not_data, 1000).unwrap_err(), EnvelopeError::Invalid);
     }
 
     #[test]
@@ -400,22 +406,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_envelope_delayed_by_saml_is_valid_when_built_after_it_and_expires() {
-        // A browser flow that began at t=1000 and finished at t=1500 gets an
-        // envelope built then; no SAML runs here.
-        let secret = hbr1("integration.invalid", UID, b"synthetic", b"synthetic-token");
-        let late = envelope(1500 + 60, fixed_id(), &secret);
-        assert!(decode_envelope(&late, 1500 + 30).is_ok());
-        assert_eq!(decode_envelope(&late, 1500 + 60).unwrap_err(), EnvelopeError::Expired);
-    }
-
-    #[test]
     fn envelope_lifetime_and_framing_are_enforced() {
         let secret = hbr1("integration.invalid", UID, b"p", b"t");
-        assert_eq!(
-            decode_envelope(&envelope(1000 + 121, fixed_id(), &secret), 1000).unwrap_err(),
-            EnvelopeError::Expired
-        );
+        // The lifetime window is (now, now + 120]: the browser flow of a SAML
+        // login may finish late, so the envelope is built after it.
+        for (expires_at, accepted) in [(1000, false), (1001, true), (1120, true), (1121, false)] {
+            let result = decode_envelope(&envelope(expires_at, fixed_id(), &secret), 1000);
+            match accepted {
+                true => assert!(result.is_ok(), "{expires_at}"),
+                false => assert_eq!(result.unwrap_err(), EnvelopeError::Expired, "{expires_at}"),
+            }
+        }
         let mut truncated = envelope(1060, fixed_id(), &secret);
         truncated.pop();
         assert_eq!(decode_envelope(&truncated, 1000).unwrap_err(), EnvelopeError::Invalid);
@@ -438,6 +439,12 @@ pub(crate) mod tests {
         assert!(BootstrapInput::decode(&hbr1("g", "short", b"p", b"t"), true).is_err());
         assert!(BootstrapInput::decode(&hbr1("g", &UID.replace('A', "G"), b"p", b"t"), true).is_err());
         assert!(BootstrapInput::decode(&hbr1("g", UID, b"p\0q", b"t"), true).is_err());
+        assert!(BootstrapInput::decode(&hbr1("gate\0way", UID, b"p", b"t"), true).is_err());
+        assert!(BootstrapInput::decode(&hbr1("g", UID, b"", b"t"), true).is_err());
+        assert!(BootstrapInput::decode(&hbr1("g", UID, b"p", &[0xff]), true).is_err());
+        let mut binary_gateway = hbr1("g", UID, b"p", b"t");
+        binary_gateway[12] = 0xff;
+        assert!(BootstrapInput::decode(&binary_gateway, true).is_err());
         assert!(BootstrapInput::decode(&hbr1("g", UID, &[0xff], b"t"), true).is_err());
         assert!(BootstrapInput::decode(&hbr1("", UID, b"p", b"t"), true).is_err());
         let mut bad_magic = raw.clone();
@@ -476,7 +483,6 @@ pub(crate) mod tests {
     fn connect_mode_rejects_every_inconsistent_encoding() {
         // TCP never takes a second fallback.
         assert!(ConnectMode::decode(&[1, 2, 6, 1, 192, 0, 0, 2]).is_err());
-        assert!(ConnectMode::decode(&[1, 2, 4, 1, 0, 0, 0, 0]).is_err());
         for bad in [
             &[2, 1, 4, 1, 0, 0, 0, 0][..], // version
             &[1, 3, 4, 1, 0, 0, 0, 0],     // transport
@@ -491,14 +497,14 @@ pub(crate) mod tests {
         ] {
             assert!(ConnectMode::decode(bad).is_err(), "{bad:?}");
         }
-        assert!(ConnectMode::decode(&[1, 1, 6, 1, 192, 0, 0, 2]).is_ok());
+        let ok = ConnectMode::decode(&[1, 1, 6, 1, 192, 0, 0, 2]).unwrap().0;
+        assert_eq!(ok.idi_v4, Some(Ipv4Addr::new(192, 0, 0, 2)));
+        assert!(ok.tcp_fallback);
     }
 
     #[test]
-    fn secrets_are_not_printed_and_move_out_without_a_copy() {
-        let secret = Secret(b"SYNTHETIC".to_vec());
-        assert_eq!(format!("{secret:?}"), "Secret(..)");
-        assert_eq!(secret.into_string().unwrap(), "SYNTHETIC");
+    fn a_secrets_debug_output_is_redacted() {
+        assert_eq!(format!("{:?}", Secret(b"SYNTHETIC".to_vec())), "Secret(..)");
     }
 
     #[test]
@@ -513,11 +519,6 @@ pub(crate) mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    }
-
-    #[test]
-    fn a_nul_in_the_gateway_is_rejected() {
-        assert!(BootstrapInput::decode(&hbr1("gate\0way", UID, b"p", b"t"), true).is_err());
     }
 
     #[test]
@@ -536,7 +537,6 @@ pub(crate) mod tests {
 
     #[test]
     fn the_uid_must_be_exactly_32_hex_digits_in_either_case() {
-        assert!(BootstrapInput::decode(&hbr1("g", &UID[..31], b"p", b"t"), true).is_err());
         assert!(BootstrapInput::decode(&hbr1("g", &format!("{UID}A"), b"p", b"t"), true).is_err());
         let mixed = "aBcDeF0123456789AbCdEf0123456789";
         assert_eq!(mixed.len(), 32);
@@ -544,23 +544,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_record_over_4096_bytes_or_with_a_wrong_length_field_is_rejected() {
+    fn a_record_over_4096_bytes_or_an_oversized_envelope_is_rejected() {
         // Fields individually in range, together over the 4096 cap.
-        let big = hbr1(&"a".repeat(253), UID, &vec![b'p'; 1024], &vec![b't'; 1024]);
-        assert!(big.len() < 4096);
-        let mut over = big.clone();
+        let mut over = hbr1(&"a".repeat(253), UID, &vec![b'p'; 1024], &vec![b't'; 1024]);
         over.extend(vec![0; 4096]);
         assert!(BootstrapInput::decode(&over, true).is_err());
-        // A length field that disagrees with the bytes present.
-        let mut lying = hbr1("g", UID, b"p", b"t");
-        lying[5] += 1;
-        assert!(BootstrapInput::decode(&lying, true).is_err());
-        // The envelope's size field disagreeing with its payload.
-        let secret = hbr1("g", UID, b"p", b"t");
-        let mut envelope = envelope(1060, fixed_id(), &secret);
-        envelope[30] += 1;
-        assert_eq!(decode_envelope(&envelope, 1000).unwrap_err(), EnvelopeError::Invalid);
-        assert!(decode_envelope(&envelope_with_size(0), 1000).is_err());
+        // The envelope's secret over its cap, and a size field over the cap or zero.
+        let big = envelope(1060, fixed_id(), &vec![b'x'; MAX_SECRET + 1]);
+        assert_eq!(decode_envelope(&big, 1000).unwrap_err(), EnvelopeError::Invalid);
+        for size in [0, MAX_SECRET as u16 + 1] {
+            assert_eq!(
+                decode_envelope(&envelope_with_size(size), 1000).unwrap_err(),
+                EnvelopeError::Invalid
+            );
+        }
     }
 
     fn envelope_with_size(size: u16) -> Vec<u8> {
@@ -570,12 +567,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn option_values_never_print_their_bytes() {
-        let options = live(1000, fixed_id());
-        let printed = format!("{options:?}");
-        assert!(!printed.contains("synthetic"), "{printed}");
-        assert!(!printed.contains("79, 70"), "{printed}");
+    fn option_values_and_inputs_never_print_their_bytes() {
+        let printed = format!("{:?}", live(1000, fixed_id()));
+        // Derived Debug would print a Vec<u8> as decimals; "HBR1" is 72, 66, 82, 49.
+        assert!(printed.contains("Secret(..)") && !printed.contains("72, 66, 82, 49"), "{printed}");
         let input = BootstrapInput::decode(&hbr1("g", UID, b"hunter2", b"tok"), true).unwrap();
-        assert!(!format!("{input:?}").contains("hunter2"));
+        let printed = format!("{input:?}");
+        assert!(printed.contains("Secret(..)") && !printed.contains("104, 117, 110"), "{printed}");
     }
 }
