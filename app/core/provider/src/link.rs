@@ -52,7 +52,9 @@ pub trait Link: Send + Sync + 'static {
     fn rekey_counts(&self) -> Result<(u32, u32, u32), Status>;
     fn rekey_child_once(&self) -> Result<(), Status>;
     fn rekey_ike_once(&self) -> Result<(), Status>;
-    /// End any blocked `receive` promptly.
+    /// End any blocked `receive` promptly. The provider calls this while holding
+    /// its state lock, so it must not block, wait for any other call on this
+    /// link, or take a lock the provider uses.
     fn cancel(&self);
     /// Send the authenticated DELETEs and drop the session. Called once.
     fn teardown(&self);
@@ -179,7 +181,9 @@ impl Link for SessionLink {
             Ok(match session.receive_ready()? {
                 Event::IpPacket(packet) => Inbound::Packet(packet),
                 Event::PeerDeletedChild | Event::PeerDeletedIke => Inbound::PeerDeleted,
-                _ => Inbound::Idle,
+                Event::PeerDpd | Event::NatKeepalive | Event::Rejected | Event::Timeout => {
+                    Inbound::Idle
+                }
             })
         })
     }
@@ -216,7 +220,9 @@ impl Link for SessionLink {
     }
 
     fn teardown(&self) {
-        if let Some(session) = self.lock().take() {
+        // Take it out first: the guard must not be held across the DELETE exchange.
+        let session = self.lock().take();
+        if let Some(session) = session {
             // The outcome is diagnostic only; the tunnel is going away either way.
             let _ = session.disconnect();
         }

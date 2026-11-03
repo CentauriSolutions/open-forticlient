@@ -66,9 +66,8 @@ fn run(gateway: &str, uid: &str, psk: &[u8]) -> Result<(), i32> {
     Ok(())
 }
 
-/// 0 = authenticated EAP challenge received; 1 = invalid input;
-/// 2 = socket/timeout; 3 = SA_INIT; 4 = responder AUTH; 5 = EAP challenge.
-/// No diagnostic may include PSK or packet bytes.
+/// The safe entry the C export and the Rust provider share; the status codes
+/// are listed on [`oftc_provider_preflight`].
 pub fn preflight(gateway: &str, uid: &str, psk: &[u8]) -> i32 {
     if gateway.is_empty() || gateway.len() > 253 || uid.len() != 32 ||
         psk.is_empty() || psk.len() > 1024 ||
@@ -76,6 +75,9 @@ pub fn preflight(gateway: &str, uid: &str, psk: &[u8]) -> i32 {
     run(gateway, uid, psk).map_or_else(|code| code, |_| 0)
 }
 
+/// 0 = authenticated EAP challenge received; 1 = invalid input;
+/// 2 = socket/timeout; 3 = SA_INIT; 4 = responder AUTH; 5 = EAP challenge.
+/// No diagnostic may include PSK or packet bytes.
 #[no_mangle]
 pub unsafe extern "C" fn oftc_provider_preflight(
     gateway: *const u8, gateway_len: usize,

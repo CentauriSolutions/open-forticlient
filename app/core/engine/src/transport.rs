@@ -18,6 +18,8 @@ const WRITE_DEADLINE: Duration = Duration::from_secs(45);
 // Length 7 (includes the length field), the four-zero non-ESP marker every
 // TCP-carried IKE record has, then the 0xff NAT keepalive byte. This is what
 // FortiClient sends every ~20 s; a bare 00 03 ff (no marker) draws a gateway RST.
+const TCP_KEEPALIVE_RECORD: [u8; 7] = [0, 7, 0, 0, 0, 0, 0xff];
+
 #[repr(C)]
 struct PollFd {
     fd: i32,
@@ -37,12 +39,11 @@ unsafe extern "C" {
 pub fn wait_readable(fd: i32, timeout: Duration) -> bool {
     const POLLIN: i16 = 0x1;
     let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
-    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // Round up: a sub-millisecond wait must not become a zero-length poll.
+    let millis = i32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
     // SAFETY: `pfd` is one valid, exclusively borrowed entry and nfds is 1.
     unsafe { poll(&mut pfd, 1, millis) > 0 }
 }
-
-const TCP_KEEPALIVE_RECORD: [u8; 7] = [0, 7, 0, 0, 0, 0, 0xff];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wire {

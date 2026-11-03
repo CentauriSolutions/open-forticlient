@@ -10,7 +10,8 @@
 //!   slices of 64;
 //! - **liveness**: every 5 s ticks DPD, and every third tick a NAT keepalive.
 //!
-//! No thread holds the state lock across a call into the link or the tunnel, so
+//! No thread holds the state lock across a blocking call into the link or the
+//! tunnel (the one call made under it, [`Link::cancel`], must not block), so
 //! sends and ticks never wait behind a blocked receive (Issue 39).
 //!
 //! Shutdown order is the Swift one: cancel the engine, send the DELETEs, close
@@ -19,6 +20,7 @@
 //! or applying settings (`busy`) defers all of that until it returns, which is
 //! what `settingsApplyPending` did.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,8 +28,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use oftc_engine::tunnel::Tunnel;
 use oftc_engine::Cancellation;
 
-use crate::envelope::{StartEnvelopes, StartMode, StartOptions};
-use crate::link::{Backend, Inbound, Link, PACKET_DROPPED, RECONNECT_NEEDED};
+use crate::envelope::{consume, StartMode, StartOptions};
+use crate::link::{Backend, Inbound, Link, INTERNAL, PACKET_DROPPED, RECONNECT_NEEDED};
 use crate::settings;
 use crate::traffic::TrafficCounters;
 
@@ -58,11 +60,20 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 const STOPPED_BY_HOST: Failure = Failure(9);
+const PANICKED: Failure = Failure(900);
+
+/// Run a call into the backend, the link or the tunnel; a panic becomes `Err`
+/// instead of unwinding through the state machine and leaving it half-moved.
+fn guarded<R>(call: impl FnOnce() -> R) -> Result<R, ()> {
+    catch_unwind(AssertUnwindSafe(call)).map_err(|_| ())
+}
 
 struct State<L> {
-    starts: StartEnvelopes,
     /// A `start` has not finished (Swift's `pendingStart`).
     starting: bool,
+    /// A `start` call is somewhere between its first and last line, including
+    /// after the tunnel came up. `on_failure` is held back until it has returned.
+    in_start: bool,
     /// `start` is inside connect, preflight or `apply_settings`; cleanup waits.
     busy: bool,
     running: bool,
@@ -122,8 +133,8 @@ impl<B: Backend, T: Tunnel + 'static> Provider<B, T> {
             liveness_interval,
             epoch: Instant::now(),
             state: Mutex::new(State {
-                starts: StartEnvelopes::default(),
                 starting: false,
+                in_start: false,
                 busy: false,
                 running: false,
                 stopping: false,
@@ -147,18 +158,35 @@ impl<B: Backend, T: Tunnel + 'static> Provider<B, T> {
     /// running. Blocks; a concurrent [`stop`](Self::stop) makes it return the
     /// stop's failure after cleanup.
     pub fn start(&self, options: &StartOptions) -> Result<(), Failure> {
-        self.0.start(options)
+        let result = self.0.start(options);
+        let mut st = self.0.lock();
+        st.in_start = false;
+        self.0.changed.notify_all();
+        drop(st);
+        result
     }
 
     /// Stop the tunnel and block until cleanup has finished. Safe to call
-    /// concurrently, repeatedly, and before or during a start.
+    /// concurrently, repeatedly, and before or during a start. A start that is
+    /// in `Backend::preflight` finishes it first (there is nothing to cancel).
     pub fn stop(&self) {
         self.0.stop();
     }
 
-    /// Answer a provider message (`docs/provider-messages.md`); `None` is "no reply data".
+    /// Answer a provider message (`docs/provider-messages.md`); `None` is "no
+    /// reply data". Runs on the caller's thread and may block: a rekey probe
+    /// takes as long as the rekey, so a backend must not call this on a thread
+    /// that must stay responsive (the NetworkExtension main queue).
     pub fn handle_message(&self, message: &[u8]) -> Option<Vec<u8>> {
         self.0.handle_message(message)
+    }
+}
+
+/// Dropping a provider that was never stopped would leave its three workers
+/// running, so a drop stops it (a no-op after `stop`).
+impl<B: Backend, T: Tunnel + 'static> Drop for Provider<B, T> {
+    fn drop(&mut self) {
+        self.0.stop();
     }
 }
 
@@ -180,7 +208,8 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
             if st.starting || st.link.is_some() || st.stopping {
                 return Err(Failure(1));
             }
-            let mode = st.starts.consume(options, unix_now()).map_err(|_| Failure(2))?;
+            let mode = consume(options, unix_now()).map_err(|_| Failure(2))?;
+            st.in_start = true;
             st.starting = true;
             st.busy = true;
             mode
@@ -188,7 +217,9 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
         match mode {
             StartMode::Preflight(input) => {
                 // A diagnostic-only connection: no settings, routes, DNS or packets.
-                let status = self.backend.preflight(&input);
+                let Ok(status) = guarded(|| self.backend.preflight(&input)) else {
+                    return self.fail_start(PANICKED);
+                };
                 drop(input);
                 let mut st = self.leave_busy(self.lock())?;
                 st.preflight = Some(status);
@@ -196,17 +227,19 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
                 Ok(())
             }
             StartMode::Live(input, mode) => {
-                let connected = self.backend.connect(input, mode.0, self.cancel.clone());
+                let connected =
+                    guarded(|| self.backend.connect(input, mode.0, self.cancel.clone()));
                 let link = match connected {
-                    Ok(link) => Arc::new(link),
-                    Err(status) => return self.fail_start(Failure(100 + status)),
+                    Ok(Ok(link)) => Arc::new(link),
+                    Ok(Err(status)) => return self.fail_start(Failure(100 + status)),
+                    Err(()) => return self.fail_start(PANICKED),
                 };
                 {
                     let mut st = self.lock();
                     // Visible to a stop that arrives from here on, so it is cancelled.
                     st.link = Some(link.clone());
                     if st.stopping {
-                        link.cancel();
+                        let _ = guarded(|| link.cancel());
                         return self.leave_busy(st).map(drop);
                     }
                 }
@@ -216,17 +249,26 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
     }
 
     fn finish_live_start(self: &Arc<Self>, link: Arc<B::Link>) -> Result<(), Failure> {
-        let settings = link.settings();
+        let Ok(settings) = guarded(|| link.settings()) else {
+            return self.fail_start(PANICKED);
+        };
         if settings::validate(&settings).is_err() {
             return self.fail_start(Failure(4));
         }
         // A stop that arrives now is deferred until this call returns: the
         // OS may be applying the settings, and they must be cleared after.
-        let applied = self.tunnel.apply_settings(&settings);
+        let applied = guarded(|| self.tunnel.apply_settings(&settings));
         let mut st = self.leave_busy(self.lock())?;
-        if applied.is_err() {
-            self.begin_shutdown(&mut st, Failure(5));
-            return Err(self.await_cleanup(st));
+        match applied {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.begin_shutdown(&mut st, Failure(5));
+                return Err(self.await_cleanup(st));
+            }
+            Err(()) => {
+                self.begin_shutdown(&mut st, PANICKED);
+                return Err(self.await_cleanup(st));
+            }
         }
         let Ok(traffic) = TrafficCounters::new() else {
             self.begin_shutdown(&mut st, Failure(3));
@@ -284,9 +326,11 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
         st.failure = failure;
         st.was_started = !st.starting;
         // Cancels a connect in progress; a connected link is cancelled too.
+        // `Link::cancel` is called under the state lock, so it must not block
+        // or take any lock the provider holds.
         self.cancel.cancel();
         if let Some(link) = &st.link {
-            link.cancel();
+            let _ = guarded(|| link.cancel());
         }
         self.changed.notify_all();
         if !st.busy {
@@ -316,18 +360,20 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
     }
 
     fn cleanup(self: &Arc<Self>) {
+        // Each step is guarded: whatever one does, the rest still run and
+        // `cleanup_finished` is set, so no `stop` or `start` waits forever.
         let link = self.lock().link.clone();
         if let Some(link) = &link {
-            link.teardown();
+            let _ = guarded(|| link.teardown());
         }
         // Wake the sender, which is blocked in `read_packets`, then join the
         // workers; the engine was cancelled, so the receiver returns too.
-        self.tunnel.close();
+        let _ = guarded(|| self.tunnel.close());
         let workers = std::mem::take(&mut self.lock().workers);
         for worker in workers {
             let _ = worker.join();
         }
-        let _ = self.tunnel.clear_settings();
+        let _ = guarded(|| self.tunnel.clear_settings());
         let (notify, failure) = {
             let mut st = self.lock();
             st.link = None;
@@ -336,6 +382,12 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
             (st.was_started && st.waiters == 0, st.failure)
         };
         if notify {
+            // The host must see its start succeed before it is told the tunnel failed.
+            let mut st = self.lock();
+            while st.in_start {
+                st = self.wait(st);
+            }
+            drop(st);
             (self.on_failure)(failure);
         }
     }
@@ -351,7 +403,7 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
         std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&this, &link)));
             if outcome.is_err() {
-                this.shutdown(Failure(900));
+                this.shutdown(PANICKED);
             }
         })
     }
@@ -397,6 +449,10 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
                 }
                 let (mut sent, mut failed) = (0, None);
                 for packet in slice {
+                    // Raw IP from the OS; only IPv4 goes through the tunnel.
+                    if packet.first().map(|b| b >> 4) != Some(4) {
+                        continue;
+                    }
                     match link.send_ip(packet) {
                         Ok(()) => sent += packet.len(),
                         Err(PACKET_DROPPED) => {}
@@ -468,11 +524,11 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
             b"oftc.traffic.v1" => {
                 let st = self.lock();
                 let traffic = st.traffic.as_ref().filter(|_| st.running && !st.stopping)?;
-                Some(traffic.snapshot_json(self.epoch.elapsed().as_secs_f64()))
+                traffic.snapshot_json(self.epoch.elapsed().as_secs_f64())
             }
             b"oftc.rekey-counts.v1" => {
                 let link = self.running_link()?;
-                let counts = link.rekey_counts();
+                let counts = guarded(|| link.rekey_counts()).unwrap_or(Err(INTERNAL));
                 let st = self.lock();
                 match counts {
                     Ok((local, peer, ike)) if st.running && !st.stopping => Some(
@@ -515,7 +571,8 @@ impl<B: Backend, T: Tunnel + 'static> Shared<B, T> {
                 None => return b"rekey_unavailable".to_vec(),
             }
         };
-        let status = probe(&link);
+        // A panicking probe is a failed probe, and must not leave one pending.
+        let status = guarded(|| probe(&link)).unwrap_or(Err(INTERNAL));
         let mut st = self.lock();
         st.rekey_pending = false;
         if st.stopping {
@@ -551,8 +608,17 @@ mod tests {
         log.lock().unwrap().push(event.to_owned());
     }
 
+    /// The log without worker-exit markers, so exact-sequence checks stay readable.
     fn events(log: &Log) -> Vec<String> {
+        all_events(log).into_iter().filter(|e| !e.starts_with("exit.") && !e.starts_with("callback.")).collect()
+    }
+
+    fn all_events(log: &Log) -> Vec<String> {
         log.lock().unwrap().clone()
+    }
+
+    fn position(log: &Log, event: &str) -> usize {
+        all_events(log).iter().position(|e| e == event).unwrap_or_else(|| panic!("no {event}"))
     }
 
     /// Spin (no sleeps) until `condition` holds. A broken test hits the deadline
@@ -594,6 +660,9 @@ mod tests {
         tick_error: Option<Status>,
         rekey_result: Result<(), Status>,
         rekey_gate: Option<Receiver<()>>,
+        counts_error: Option<Status>,
+        panic_receive: bool,
+        panic_teardown: bool,
     }
 
     #[derive(Clone)]
@@ -620,6 +689,9 @@ mod tests {
                         tick_error: None,
                         rekey_result: Ok(()),
                         rekey_gate: None,
+                        counts_error: None,
+                        panic_receive: false,
+                        panic_teardown: false,
                     }),
                     Condvar::new(),
                 )),
@@ -663,10 +735,15 @@ mod tests {
         fn receive(&self) -> Result<Inbound, Status> {
             let (lock, changed) = &*self.state;
             let mut s = lock.lock().unwrap();
+            if s.panic_receive {
+                drop(s);
+                panic!("synthetic receive panic");
+            }
             s.receiving += 1;
             changed.notify_all();
             let result = loop {
                 if s.cancelled {
+                    note(&self.log, "exit.receive");
                     break Err(CANCELLED);
                 }
                 if let Some(event) = s.inbound.pop_front() {
@@ -698,6 +775,9 @@ mod tests {
         }
 
         fn rekey_counts(&self) -> Result<(u32, u32, u32), Status> {
+            if let Some(status) = self.with(|s| s.counts_error) {
+                return Err(status);
+            }
             Ok((3, 2, 1))
         }
 
@@ -720,6 +800,9 @@ mod tests {
 
         fn teardown(&self) {
             note(&self.log, "link.teardown");
+            if self.with(|s| s.panic_teardown) {
+                panic!("synthetic teardown panic");
+            }
         }
     }
 
@@ -730,6 +813,8 @@ mod tests {
         /// `(entered, release)`: connect signals it has started, then waits.
         connect_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
         preflight_status: Status,
+        panic_connect: AtomicBool,
+        panic_preflight: AtomicBool,
     }
 
     impl Backend for FakeBackend {
@@ -743,6 +828,9 @@ mod tests {
         ) -> Result<FakeLink, Status> {
             assert_eq!(input.token.as_bytes(), b"synthetic-token");
             note(&self.log, "connect");
+            if self.panic_connect.load(Ordering::SeqCst) {
+                panic!("synthetic connect panic");
+            }
             if let Some((entered, release)) = self.connect_gate.lock().unwrap().take() {
                 entered.send(()).unwrap();
                 release.recv().unwrap();
@@ -752,6 +840,13 @@ mod tests {
 
         fn preflight(&self, _input: &crate::envelope::BootstrapInput) -> Status {
             note(&self.log, "preflight");
+            if self.panic_preflight.load(Ordering::SeqCst) {
+                panic!("synthetic preflight panic");
+            }
+            if let Some((entered, release)) = self.connect_gate.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
             self.preflight_status
         }
     }
@@ -764,11 +859,15 @@ mod tests {
         /// `(entered, release)`: apply signals it has started, then waits.
         apply_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
         fail_writes: AtomicBool,
+        panic_apply: AtomicBool,
     }
 
     impl Tunnel for FakeTunnel {
         fn apply_settings(&self, settings: &NetworkSettings) -> Result<(), TunnelError> {
             note(&self.log, "tunnel.apply");
+            if self.panic_apply.load(Ordering::SeqCst) {
+                panic!("synthetic apply panic");
+            }
             if let Some((entered, release)) = self.apply_gate.lock().unwrap().take() {
                 entered.send(()).unwrap();
                 release.recv().unwrap();
@@ -777,7 +876,11 @@ mod tests {
         }
 
         fn read_packets(&self) -> Result<Vec<Vec<u8>>, TunnelError> {
-            self.inner.read_packets()
+            let result = self.inner.read_packets();
+            if result.is_err() {
+                note(&self.log, "exit.send");
+            }
+            result
         }
 
         fn write_packet(&self, packet: &[u8]) -> Result<(), TunnelError> {
@@ -806,12 +909,22 @@ mod tests {
         failures: Receiver<Failure>,
     }
 
+    type Shared_ = Shared<FakeBackend, FakeTunnel>;
+
     impl Rig {
         fn new() -> Self {
             Self::build(|_, _| {})
         }
 
         fn build(configure: impl FnOnce(&mut FakeBackend, &mut FakeTunnel)) -> Self {
+            // An hour: most tests drive ticks themselves, never the timer.
+            Self::build_with(Duration::from_secs(3600), configure)
+        }
+
+        fn build_with(
+            liveness_interval: Duration,
+            configure: impl FnOnce(&mut FakeBackend, &mut FakeTunnel),
+        ) -> Self {
             let log: Log = Arc::default();
             let link = FakeLink::new(&log);
             let (tunnel, peer) = loopback();
@@ -821,24 +934,40 @@ mod tests {
                 connect_status: Mutex::new(None),
                 connect_gate: Mutex::new(None),
                 preflight_status: 0,
+                panic_connect: AtomicBool::new(false),
+                panic_preflight: AtomicBool::new(false),
             };
             let mut tunnel = FakeTunnel {
                 log: log.clone(),
                 inner: tunnel,
                 apply_gate: Mutex::new(None),
                 fail_writes: AtomicBool::new(false),
+                panic_apply: AtomicBool::new(false),
             };
             configure(&mut backend, &mut tunnel);
             let (report, failures) = channel();
             let report = Mutex::new(report);
-            // An hour: the tests drive ticks themselves, never the timer.
+            let weak: Arc<std::sync::OnceLock<std::sync::Weak<Shared_>>> = Arc::default();
             let provider = Provider::with_liveness_interval(
                 backend,
                 tunnel,
-                move |failure| report.lock().unwrap().send(failure).unwrap(),
-                Duration::from_secs(3600),
+                {
+                    let (log, weak) = (log.clone(), weak.clone());
+                    move |failure| {
+                        let returned = weak
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|shared| !shared.lock().in_start);
+                        note(&log, if returned { "callback.after_start" } else { "callback.during_start" });
+                        note(&log, "callback");
+                        report.lock().unwrap().send(failure).unwrap();
+                    }
+                },
+                liveness_interval,
             );
-            Self { provider: Arc::new(provider), link, peer, log, failures }
+            let provider = Arc::new(provider);
+            weak.set(Arc::downgrade(&provider.0)).unwrap();
+            Self { provider, link, peer, log, failures }
         }
 
         fn live(&self) -> Result<(), Failure> {
@@ -1077,7 +1206,10 @@ mod tests {
         rig.peer.close();
         assert_eq!(rig.failures.recv().unwrap(), Failure(10));
         let log = events(&rig.log);
-        assert_eq!(&log[log.len() - 3..], ["link.teardown", "tunnel.close", "tunnel.clear"]);
+        assert_eq!(
+            &log[log.len() - 4..],
+            ["link.teardown", "tunnel.close", "tunnel.clear", "callback"]
+        );
         // A later stop returns at once and does not report a second failure.
         rig.provider.stop();
         assert!(rig.failures.try_recv().is_err());
@@ -1218,8 +1350,8 @@ mod tests {
                 let secret = crate::envelope::tests::hbr1(
                     "integration.invalid", crate::envelope::tests::UID, b"synthetic", b"");
                 crate::envelope::StartOptions {
-                    preflight: Some(crate::envelope::OptionValue::Data(
-                        crate::envelope::tests::envelope(unix_now() + 60, id(), &secret))),
+                    preflight: Some(crate::envelope::OptionValue::Data(crate::envelope::Secret::new(
+                        crate::envelope::tests::envelope(unix_now() + 60, id(), &secret)))),
                     ..Default::default()
                 }
             };
@@ -1229,5 +1361,180 @@ mod tests {
             assert_eq!(rig.peer.settings(), None);
             rig.provider.stop();
         }
+    }
+
+    // ---- review follow-ups ----------------------------------------------------
+
+    #[test]
+    fn a_non_ipv4_outbound_packet_is_dropped_before_the_engine() {
+        let rig = Rig::running();
+        rig.peer.wait_until_blocked();
+        let mut v6 = vec![0u8; 60];
+        v6[0] = 0x60;
+        rig.peer.inject(&v6);
+        rig.peer.inject(&[]);
+        rig.peer.inject(&packet(1, 40));
+        assert_eq!(rig.link.wait_sent(1), [packet(1, 40)]);
+        eventually(|| {
+            text(rig.provider.handle_message(b"oftc.traffic.v1")).unwrap().contains("\"sentBytes\":40,")
+        });
+        assert_eq!(rig.link.with(|s| s.sent.len()), 1);
+    }
+
+    #[test]
+    fn a_worker_panic_stops_the_tunnel_with_900_instead_of_hanging() {
+        let rig = Rig::build(|_, _| {});
+        rig.link.with(|s| s.panic_receive = true);
+        rig.live().unwrap();
+        assert_eq!(rig.failures.recv().unwrap(), Failure(900));
+        rig.provider.stop();
+    }
+
+    #[test]
+    fn a_panic_in_teardown_does_not_stop_cleanup_from_finishing() {
+        let rig = Rig::running();
+        rig.link.with(|s| s.panic_teardown = true);
+        rig.provider.stop();
+        let log = events(&rig.log);
+        assert_eq!(&log[log.len() - 3..], ["link.teardown", "tunnel.close", "tunnel.clear"]);
+        rig.provider.stop();
+    }
+
+    #[test]
+    fn a_panic_in_connect_preflight_or_apply_fails_the_start_and_a_stop_still_returns() {
+        let rig = Rig::build(|b, _| b.panic_connect.store(true, Ordering::SeqCst));
+        assert_eq!(rig.live(), Err(Failure(900)));
+        rig.provider.stop();
+        let rig = Rig::build(|_, t| t.panic_apply.store(true, Ordering::SeqCst));
+        assert_eq!(rig.live(), Err(Failure(900)));
+        assert!(events(&rig.log).contains(&"link.teardown".to_owned()));
+        rig.provider.stop();
+        let rig = Rig::build(|b, _| b.panic_preflight.store(true, Ordering::SeqCst));
+        assert_eq!(rig.provider.start(&preflight_options()), Err(Failure(900)));
+        rig.provider.stop();
+    }
+
+    fn preflight_options() -> StartOptions {
+        let secret = crate::envelope::tests::hbr1(
+            "integration.invalid", crate::envelope::tests::UID, b"synthetic", b"");
+        StartOptions {
+            preflight: Some(crate::envelope::OptionValue::Data(crate::envelope::Secret::new(
+                crate::envelope::tests::envelope(unix_now() + 60, id(), &secret)))),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stop_during_preflight_waits_for_it_then_finishes_the_start_with_the_stop() {
+        let (entered, entered_rx) = channel();
+        let (release, release_rx) = channel();
+        let rig = Rig::build(|b, _| *b.connect_gate.lock().unwrap() = Some((entered, release_rx)));
+        let starter = {
+            let provider = rig.provider.clone();
+            thread::spawn(move || provider.start(&preflight_options()))
+        };
+        entered_rx.recv().unwrap();
+        let stopper = {
+            let provider = rig.provider.clone();
+            thread::spawn(move || provider.stop())
+        };
+        eventually(|| rig.is_stopping());
+        assert_eq!(events(&rig.log), ["preflight"]);
+        release.send(()).unwrap();
+        assert_eq!(starter.join().unwrap(), Err(Failure(9)));
+        stopper.join().unwrap();
+        assert_eq!(events(&rig.log), ["preflight", "tunnel.close", "tunnel.clear"]);
+    }
+
+    #[test]
+    fn apply_settings_on_a_closed_tunnel_fails_the_start() {
+        let rig = Rig::new();
+        rig.peer.close();
+        assert_eq!(rig.live(), Err(Failure(5)));
+        assert!(events(&rig.log).contains(&"link.teardown".to_owned()));
+    }
+
+    #[test]
+    fn a_rekey_counts_error_gets_no_data() {
+        let rig = Rig::running();
+        rig.link.with(|s| s.counts_error = Some(2));
+        assert_eq!(rig.provider.handle_message(b"oftc.rekey-counts.v1"), None);
+        rig.provider.stop();
+    }
+
+    #[test]
+    fn the_real_liveness_timer_fires_and_stop_wakes_it() {
+        let rig = Rig::build_with(Duration::from_millis(1), |_, _| {});
+        rig.live().unwrap();
+        eventually(|| rig.link.with(|s| s.ticks >= 4 && s.keepalives >= 1));
+        rig.provider.stop();
+        let after_stop = rig.link.with(|s| s.ticks);
+        thread::yield_now();
+        assert_eq!(rig.link.with(|s| s.ticks), after_stop, "no tick after the stop returned");
+    }
+
+    #[test]
+    fn two_concurrent_stops_both_return_and_tear_down_once() {
+        let rig = Rig::running();
+        let stops: Vec<_> = (0..2)
+            .map(|_| {
+                let provider = rig.provider.clone();
+                thread::spawn(move || provider.stop())
+            })
+            .collect();
+        for stop in stops {
+            stop.join().unwrap();
+        }
+        let teardowns = events(&rig.log).iter().filter(|e| *e == "link.teardown").count();
+        assert_eq!(teardowns, 1);
+        assert!(rig.failures.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_failure_racing_a_stop_is_reported_at_most_once() {
+        for _ in 0..20 {
+            let rig = Rig::running();
+            rig.link.push(Ok(Inbound::PeerDeleted));
+            rig.provider.stop();
+            // Either the stop was first (no callback) or the failure was, and
+            // the stop arrived after cleanup (one callback); never two.
+            assert!(rig.failures.try_iter().count() <= 1);
+        }
+    }
+
+    #[test]
+    fn workers_are_joined_before_settings_are_cleared_and_the_callback_comes_last() {
+        let rig = Rig::running();
+        rig.link.wait_receiving();
+        rig.peer.wait_until_blocked();
+        rig.provider.stop();
+        let clear = position(&rig.log, "tunnel.clear");
+        assert!(position(&rig.log, "exit.receive") < clear);
+        assert!(position(&rig.log, "exit.send") < clear);
+
+        let rig = Rig::running();
+        rig.link.push(Ok(Inbound::PeerDeleted));
+        rig.failures.recv().unwrap();
+        assert!(position(&rig.log, "tunnel.clear") < position(&rig.log, "callback"));
+    }
+
+    #[test]
+    fn a_failure_straight_after_start_is_reported_only_after_start_has_returned() {
+        for _ in 0..20 {
+            let rig = Rig::new();
+            rig.link.push(Ok(Inbound::PeerDeleted));
+            rig.live().unwrap();
+            assert_eq!(rig.failures.recv().unwrap(), Failure(8));
+            assert!(all_events(&rig.log).contains(&"callback.after_start".to_owned()));
+        }
+    }
+
+    #[test]
+    fn dropping_a_running_provider_stops_it() {
+        let rig = Rig::running();
+        let (log, peer) = (rig.log.clone(), rig.peer.clone());
+        drop(rig);
+        assert!(events(&log).contains(&"tunnel.clear".to_owned()));
+        assert_eq!(peer.settings(), None);
     }
 }
