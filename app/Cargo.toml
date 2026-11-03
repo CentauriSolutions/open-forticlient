@@ -1,3 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["core/modp14", "core/crypto"]
+members = [
+    "core/crypto",
+    "core/engine",
+    "core/modp14",
+    "core/preflight",
+    "core/provider-ffi",
+]
+
+[profile.release]
+opt-level = "z"
+# The engine parses peer-controlled lengths. It used to be built unoptimised with
+# overflow checks on, so an overflow panicked (caught at the FFI boundary) rather
+# than wrapping; keep that in the optimised build.
+overflow-checks = true

@@ -40,47 +40,12 @@ cp "$root/assets/OFTCDocument.icns" "$app/Contents/Resources/OFTCDocument.icns"
 mkdir -p "$app/Contents/Resources/en.lproj"
 cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/InfoPlist.strings"
 
-CARGO_TARGET_DIR="$build/rust-target" cargo test --offline --locked --workspace \
-    --manifest-path "$root/Cargo.toml"
-CARGO_TARGET_DIR="$build/rust-target" cargo build --offline --locked --release --workspace \
-    --manifest-path "$root/Cargo.toml"
-rust_release="$build/rust-target/release"
-rustc --edition=2021 --crate-name oftc_session --crate-type rlib \
-    "$root/core/provider-live-engine/session.rs" \
-    --extern oftc_modp14="$rust_release/liboftc_modp14.rlib" \
-    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -o "$build/liboftc_session.rlib"
-rustc --edition=2021 --test "$root/core/provider-live-engine/session.rs" \
-    --extern oftc_modp14="$rust_release/liboftc_modp14.rlib" \
-    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -o "$build/session-tests"
-"$build/session-tests"
-rustc --edition=2021 --crate-type cdylib -C opt-level=z \
-    "$root/core/provider-ffi/ffi.rs" \
-    --extern oftc_session="$build/liboftc_session.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -C 'link-arg=-Wl,-install_name,@rpath/liboftc_provider_ffi.dylib' \
-    -C 'link-arg=-Wl,-rpath,@loader_path' \
-    -o "$provider_frameworks/liboftc_provider_ffi.dylib"
-rustc --edition=2021 --test "$root/core/provider-ffi/ffi.rs" \
-    --extern oftc_session="$build/liboftc_session.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -o "$build/ffi-tests"
-"$build/ffi-tests"
-rustc --edition=2021 --crate-type cdylib -C opt-level=z \
-    "$root/Provider/preflight.rs" \
-    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -C 'link-arg=-Wl,-install_name,@rpath/liboftc_preflight.dylib' \
-    -C 'link-arg=-Wl,-rpath,@loader_path' \
-    -o "$provider_frameworks/liboftc_preflight.dylib"
-rustc --edition=2021 --test "$root/Provider/preflight.rs" \
-    --extern oftc_crypto="$rust_release/liboftc_crypto.rlib" \
-    -L "dependency=$rust_release/deps" \
-    -o "$build/preflight-tests"
-"$build/preflight-tests"
+export CARGO_TARGET_DIR="$build/rust-target"
+cargo test --locked --workspace --manifest-path "$root/Cargo.toml"
+cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
+cp "$CARGO_TARGET_DIR/release/liboftc_provider_ffi.dylib" "$CARGO_TARGET_DIR/release/liboftc_preflight.dylib" \
+    "$provider_frameworks/"
+unset CARGO_TARGET_DIR
 
 rustc --edition=2021 --crate-type cdylib -C opt-level=z \
     "$root/core/host-bootstrap/lib.rs" \
@@ -184,9 +149,9 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/MenuCommand.swift" "$root/Host/check-menu-command.swift" \
     -o "$build/menu-command-check"
 "$build/menu-command-check"
-CARGO_TARGET_DIR="$build/client-target" cargo test --offline --locked \
+CARGO_TARGET_DIR="$build/client-target" cargo test --locked \
     --manifest-path "$root/../client/Cargo.toml"
-CARGO_TARGET_DIR="$build/client-target" cargo build --offline --locked --release \
+CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"
 cp "$build/oftc" "$app/Contents/Helpers/oftc"

@@ -279,11 +279,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "oftc-engine"
+version = "0.1.0"
+dependencies = [
+ "oftc-crypto",
+ "oftc-modp14",
+]
+
+[[package]]
 name = "oftc-modp14"
 version = "0.1.0"
 dependencies = [
  "crypto-bigint",
  "zeroize",
+]
+
+[[package]]
+name = "oftc-preflight"
+version = "0.1.0"
+dependencies = [
+ "oftc-crypto",
+ "oftc-engine",
+]
+
+[[package]]
+name = "oftc-provider-ffi"
+version = "0.1.0"
+dependencies = [
+ "oftc-engine",
 ]
 
 [[package]]

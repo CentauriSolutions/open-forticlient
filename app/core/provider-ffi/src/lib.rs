@@ -1,7 +1,6 @@
 //! Opaque C ABI for the provider-owned Rust UDP/TCP Session. No secrets, keys,
 //! raw IKE packets, or ESP SA state are exported to Swift.
-#![allow(dead_code)] // The imported session also contains offline engine APIs.
-extern crate oftc_session as session;
+use oftc_engine as session;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::panic::{catch_unwind, AssertUnwindSafe};

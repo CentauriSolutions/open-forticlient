@@ -5,7 +5,8 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::{engine, init, Cancellation, Error, READ_SLICE};
+use crate::session::{Cancellation, Error, READ_SLICE};
+use crate::{engine, init};
 
 const MAX_RECORD: usize = 8192;
 const DNS_DEADLINE: Duration = Duration::from_secs(3);

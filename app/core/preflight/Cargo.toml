@@ -1,0 +1,14 @@
+[package]
+name = "oftc-preflight"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "oftc_preflight"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+oftc-crypto = { path = "../crypto" }
+oftc-engine = { path = "../engine" }
