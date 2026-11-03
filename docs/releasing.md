@@ -14,6 +14,13 @@ then `OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh`, and uploads
 artifact (kept 14 days). The unsigned package is for inspecting the payload and
 install scripts; macOS will not activate its extension, and it is not for users.
 
+### Required checks
+
+`main` is protected by a ruleset (squash only, merge queue, required checks). The
+build job is required. Whoever adds a new CI job makes it required after their PR
+merges, with `scripts/require-check.sh --apply "<job name>"` (run without `--apply`
+to preview). That needs admin rights on the repo.
+
 ## Cutting a release
 
 1. Bump the version in `app/Host/Info.plist` (`CFBundleShortVersionString`,

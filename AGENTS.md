@@ -39,6 +39,13 @@ commit messages that say "Issue 13" mean GitHub issue #13.
   signing, notarization and the GitHub draft release run from `app/release.sh` on a
   maintainer's Mac ([docs/releasing.md](docs/releasing.md)). Never put signing
   identities, profiles or notary credentials in the repo or in CI.
+- **New CI checks are required by whoever adds them.** Tests added to an existing job
+  are covered by that job's required check. A new workflow or job is not required
+  until it is added to the `main` ruleset: after the PR that introduces it merges (so
+  the check name has reported on `main`), run
+  `scripts/require-check.sh --apply "<job name>"` and say so in the PR or issue.
+  Do not add the check before its PR merges, or the merge queue waits on a check
+  that never reports.
 - **Release dev assets when a test is done.** Every `OFTC.app` a build leaves
   under `/private/tmp` gets registered with Launch Services under the shipping
   bundle id, and stale copies keep old file-type declarations, icons and names
