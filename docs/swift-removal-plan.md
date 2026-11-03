@@ -110,7 +110,8 @@ Exploratory work leaves residue. These rules keep it from reaching `main`:
    identical. Each lane adds a compatibility test for what it touches.
 7. **Tests move with code.** Each ported `check-*.swift` becomes a `cargo test`
    with the same cases; the issue lists the mapping and the Swift check is deleted
-   with its subject.
+   with its subject. A moved or ported test that duplicates the coverage of another is dropped, not
+   carried over; see "Every test earns its place" in `AGENTS.md`.
 8. **Residue report.** At the end of a lane, write in the issue: scaffolding still
    present, anything that looked clever but should be simpler, anything you
    would cut. Issue 50 starts from these reports.
