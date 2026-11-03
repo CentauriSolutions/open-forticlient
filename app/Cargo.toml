@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "core/apple",
     "core/crypto",
     "core/engine",
     "core/host-bootstrap",
