@@ -34,7 +34,18 @@ jobs:
         # /private/tmp/oftc-build-*. It does not sign, install or connect.
         run: |
           echo "OFTC_BUILD_DIR=/private/tmp/oftc-build-ci" >> "$GITHUB_ENV"
-          OFTC_BUILD_DIR=/private/tmp/oftc-build-ci zsh app/build.sh
+          OFTC_BUILD_DIR=/private/tmp/oftc-build-ci zsh app/build.sh 2>&1 | tee build.log
+
+      - name: Test summary
+        if: always()
+        run: |
+          {
+            echo "### Tests"
+            echo "Rust:"
+            grep -E '^test result:' build.log | sed 's/^/- /'
+            echo "Swift checks:"
+            grep -E 'checks? passed|synthetic checks passed|isolated commands only' build.log | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble unsigned package
         run: OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh
