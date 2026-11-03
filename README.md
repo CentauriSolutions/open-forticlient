@@ -1,93 +1,132 @@
-# Open FortiClient (OFTC)
+# Open Forticlient (OFTC)
 
-OFTC is a macOS IKEv2/IPsec VPN client for a FortiGate that uses browser SAML
-authentication. Its host app manages login and reconnection; a NetworkExtension
-packet-tunnel provider owns IKE, ESP, routes, and DNS. Normal connections do not
-run Fortinet daemons or read FortiClient files. The app can import an existing
-FortiClient profile once during setup.
+A macOS VPN client for **FortiGate IPsec IKEv2 gateways that use browser SAML
+sign-in**. It lives in the menu bar, keeps more than one VPN connected at a time,
+and reconnects by itself after sleep, lock, and network changes.
 
-## Current state
+OFTC runs its own IKEv2 and ESP engine inside a NetworkExtension packet tunnel.
+Normal connections do not run Fortinet's daemons or read FortiClient's files;
+the app can import an existing FortiClient profile once, during setup.
 
-The signed and notarized v15 development app passed an IPv4 UDP connection,
-explicit IKE renewal, two automatic CHILD rekeys during an uninterrupted
-55-minute run, and recovery from a 75-second Ethernet outage through Wi-Fi.
-A macOS VPN-style stop stayed down. See the [live evidence](docs/evidence/v15-live-gate.md)
-and [initial rollout gaps](docs/initial-rollout-gaps.md). The OFTC 1.0.2
-build 19 package was built from pinned commit `6bebfa6`, signed, notarized,
-installed, and activated on the development Mac. A short live IPv4 UDP
-connection to the approved target and explicit stop passed. Its longer
-lifecycle and recovery gates remain open on that packaged build. See the
-[build 19 package record](docs/evidence/v19-packaged-pilot.md).
+> **Not affiliated with Fortinet.** "FortiGate" and "FortiClient" are trademarks
+> of Fortinet, Inc., used here only to say which gateways this client talks to.
+> OFTC performs the same authentication the official client does; it changes how
+> reconnection behaves, not what you are allowed to reach.
 
-The current colleague packet is OFTC 1.0.6 host build 27, signed and notarized.
-It keeps build 26's guided upgrades, menu graphics, controls, and connection
-errors. Setup's approval button now opens the Network Extensions switch
-directly. It has not been installed or live-tested during this build. The earlier 1.0.3 setup/uninstall test used
-a Mac mini with an existing provider record. See the
-[pilot guide](docs/pilot-validation.md),
-[build 27 record](docs/evidence/v27-extension-approval-switch.md), and
-[earlier build 20 record](docs/evidence/v20-packaged-pilot.md).
+## Features
 
-The current checkout contains the standalone implementation. The former
-Fortinet-backed controller and experiment source are preserved in Git commit
-`b9ade25`; for example, `git show b9ade25:client/README.md` describes the
-rollback controller. An installed app is independent of source-tree changes.
+- **Several tunnels at once.** Every VPN is a peer profile with its own macOS VPN
+  entry, Keychain PSK, supervisor, and connect-at-login setting. Each reconnects
+  independently, and each tunnel's routes go through its own interface. (Detecting
+  *overlapping* routes between tunnels is not built yet; see the roadmap.)
+- **Menu bar controls.** A row per VPN with its state, Connect/Disconnect,
+  per-VPN "Connect at login", and live traffic rates and sparklines while connected.
+- **Survives sleep, lock, and roaming.** A supervisor re-authenticates with fresh
+  SSO when the gateway drops the session; browser sign-ins are queued one at a
+  time.
+- **Share VPN setups.** `oftc export` (or *Settings → Export VPNs…*) writes your
+  profiles to a `.oftc` file; opening that file on a colleague's Mac adds them.
+- **Safe with self-signed gateways.** If a gateway's certificate is not trusted
+  you are asked, with the fingerprint, and the choice is pinned; a later change
+  is flagged.
+- **Update notices.** The app can tell you a new release exists (it never installs
+  anything itself).
+- A small `oftc` command-line tool for everything above.
 
-## Source and build
+## Requirements
 
-| Path | Purpose |
-| --- | --- |
-| [app/](app/) | macOS host, packet-tunnel provider, Rust IKE/ESP engine, and offline bundle build. |
-| [client/](client/) | `oftc` command-line interface for the standalone app. |
-| [docs/operations.md](docs/operations.md) | Setup, connection, stop, and diagnostics. |
-| [docs/pilot-validation.md](docs/pilot-validation.md) | Short install and test guide for colleagues. |
-| [docs/managed-deployment.md](docs/managed-deployment.md) | Narrow MDM approval policy for managed Macs. |
-| [scripts/collect-pilot-report.zsh](scripts/collect-pilot-report.zsh) | Local state and connectivity report for the pilot target. |
-| [docs/architecture.md](docs/architecture.md) | Component boundaries and secret handling. |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Release work and validation gates. |
-| [Issues/](Issues/) | In-repo work items. |
+- macOS 15 or later on Apple silicon.
+- A FortiGate IPsec IKEv2 VPN that signs in with SAML, and its pre-shared key.
+  (The PSK is not the secret that protects access; your SAML sign-in is.)
+- An administrator password to install, and approval of OFTC's system extension
+  in *System Settings → General → Login Items & Extensions* the first time.
 
-An unsigned development bundle and the CLI can be built without changing the
-installed VPN:
+## Install
+
+Download a release from the
+[Releases page](https://github.com/ChrisMacNaughton/open-forticlient/releases):
+
+- `Open-Forticlient-<version>.dmg`: open it and double-click **1 Install OFTC.pkg**.
+- or `OFTC-<version>.pkg` directly.
+
+Both are signed with a Developer ID and notarized. The installer puts
+**Open Forticlient** in `/Applications`, the `oftc` command in `/usr/local/bin`,
+and `man oftc`. An interactive install opens the app, so its icon appears in the
+menu bar. On a fresh install it also starts at login; turn that off in *Settings*. Quit OFTC
+and disconnect first if you are updating.
+
+Then add a VPN: choose **Add VPN…** in the menu bar popover, run `oftc setup`, or
+open a `.oftc` file someone sent you. You sign in to each VPN in your browser.
+
+## Use
+
+```sh
+oftc setup --gateway vpn.example.com --saml-port 9443 --name "Office VPN"
+oftc profiles                  # list VPNs
+oftc connect                   # connect every VPN (or: oftc connect office-vpn)
+oftc status
+oftc autostart office-vpn on   # connect at login
+oftc disconnect
+oftc export -o vpns.oftc       # share your VPNs (the file contains each PSK)
+oftc setup --from vpns.oftc    # import a shared file
+oftc remove office-vpn
+```
+
+`oftc help` and `man oftc` list everything. More detail is in
+[docs/operations.md](docs/operations.md); managed deployment is in
+[docs/managed-deployment.md](docs/managed-deployment.md).
+
+## How it works
+
+`oftc` → host app → NetworkExtension provider → Rust IKE/ESP engine. The host owns
+profiles, Keychain access, browser SAML, VPN configuration, and the reconnect
+supervisor; the provider owns transport, IKEv2/EAP, ESP, routes, and DNS. SAML
+tokens are handed to the provider for a single start and never written down. See
+[docs/architecture.md](docs/architecture.md) and the protocol notes in
+[docs/](docs/).
+
+## Build from source
+
+You can build and check an unsigned development bundle and the CLI without
+touching any installed VPN:
 
 ```sh
 OFTC_BUILD_DIR=/private/tmp/oftc-build-local zsh app/build.sh
 cargo test --offline --manifest-path client/Cargo.toml
-cargo build --offline --release --manifest-path client/Cargo.toml
 ```
 
-`app/build.sh` runs offline checks and writes only to the selected build
-directory. It does not sign, install, activate, authenticate, or connect.
-The source builds the OFTC 1.0.6 candidate with final bundle IDs and a small
-public CLI: `setup`, `connect`, `disconnect`, `status`, and `uninstall`. See
-[the man page](client/man/oftc.1) for the complete command syntax. Fresh
-extension approval and live validation on the 1.0.6 package remain separate
-release steps.
+`app/build.sh` writes only to the build directory and runs the offline checks. It
+does not sign, install, activate, authenticate, or connect. A NetworkExtension
+only runs when signed with a Developer ID and matching provisioning profiles;
+the release scripts (`app/sign-developer-id.sh`, `notarize-app.sh`, `package.sh`,
+`make-dmg.sh`) take those identities from the environment. [AGENTS.md](AGENTS.md)
+has the working conventions.
 
-Build 23 adds a resident menu bar popover with Connect/Disconnect, connection
-duration, and VPN traffic rates and totals. Its refined tunnel icon greys
-out when disconnected. UI launch and VPN connection at login are separate
-settings. See [operations](docs/operations.md) and the
-[candidate validation record](docs/evidence/v23-menu-bar-candidate.md).
-Host build 24 adds 60-second receiving/sending sparklines and retains recent
-history while the popover is closed. It uses the existing build 23 provider.
-See the [sparkline record](docs/evidence/v24-traffic-sparklines.md).
-Host build 25 adds visible welcome guidance after installation and upgrades,
-checks the VPN component before connecting, and opens the menu controls on
-intentional app opening. See the [guided-install record](docs/evidence/v25-guided-install-and-upgrades.md)
-and updated [colleague guide](docs/pilot-validation.md).
-Host build 26 opens an independent compact controls window on explicit app
-opening, supplies concrete menu icon masks, preserves totals through sampling
-gaps, and reports safe helper failures. Installer can reach its native
-app-closing step after disconnection. See the
-[build 26 record](docs/evidence/v26-menu-visibility-and-upgrade-recovery.md).
-Host build 27 (OFTC 1.0.6) opens the Network Extensions sheet from setup's
-approval button. Setup also explains that a listed extension may not be
-enabled yet. The provider is unchanged at build 23. See the
-[build 27 record](docs/evidence/v27-extension-approval-switch.md).
+## Status
 
-## Scope
+Working: UDP and TCP outer transport, IKE and CHILD SA rekeying, concurrent
+tunnels, recovery after sleep, SAML re-authentication, the menu bar app, `.oftc`
+sharing, and signed installers. Still open: overlapping-route detection and DNS
+policy across tunnels, IPv6-only/NAT64 acceptance, and an installer test on a
+clean Mac. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-This project is for the machine's legitimate VPN operator and FortiGate admin.
-OFTC uses the same SAML and IKE authentication; it changes client behavior, not
-access control. Do not commit credentials, SAML tokens, PSKs, or raw captures.
+## Acknowledgements
+
+OFTC was built at [The San Francisco Compute Company](https://sfcompute.com), where
+people reach several private networks over FortiGate VPNs from laptops that sleep,
+lock, and wander between Wi-Fi networks, and the stock client's habit of dropping
+the tunnel every time got old. We wrote the client we wanted to use, and they were
+kind enough to let it go out into the world as open source. Thank you to the team.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work, as defined in the Apache-2.0 license, shall be dual
+licensed as above, without any additional terms or conditions.

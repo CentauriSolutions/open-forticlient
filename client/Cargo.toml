@@ -3,7 +3,7 @@ name = "oftc"
 version = "0.1.0"
 edition = "2021"
 description = "CLI for the OFTC macOS IKEv2 and SAML VPN client"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 OR MIT"
 publish = false
 
 [[bin]]

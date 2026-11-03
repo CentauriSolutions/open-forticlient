@@ -1,75 +1,39 @@
 # Roadmap
 
-The active implementation is the standalone macOS app in [`app/`](../app/).
-The Fortinet-backed controller and the research gates are available in Git
-commit `b9ade25`; they are no longer build inputs. OFTC 1.0.2 build 19 is a
-signed, notarized package from pinned commit `6bebfa6`. Its extension
-activation, short live IPv4 UDP canary, and explicit stop passed on the
-development Mac. Build v15 has the longer recovery and renewal evidence.
-The [1.0.3 build 20 colleague packet](evidence/v20-packaged-pilot.md) passed
-package trust and offline Mac mini setup/uninstall checks; live connection and
-fresh extension approval on that build remain open.
-OFTC 1.0.4 build 22 passed the development Mac's bundled-agent label check.
-The [build 23 menu bar candidate](evidence/v23-menu-bar-candidate.md) passes
-offline build, state/counter checks, and native UI rendering. It is signed,
-notarized, installed, and its provider is activated on the development Mac.
-Live traffic/statistics on provider 23 and login-service lifecycle validation
-remain separate gates.
+The active implementation is the standalone macOS app in [`app/`](../app/) and
+the `oftc` CLI in [`client/`](../client/). The earlier controller that reused
+Fortinet's daemons, and the research behind this client, are under the
+`legacy-controller` tag; they are no longer build inputs.
 
-The [signed/notarized build 24 host candidate](evidence/v24-traffic-sparklines.md)
-adds recent traffic-rate sparklines using the same build 23 provider; it is
-installed on the development Mac. Live sparkline and lifecycle validation
-remain separate gates.
+## Where things stand
 
-The [build 25 guided-install candidate](evidence/v25-guided-install-and-upgrades.md)
-is signed, notarized, and packaged with an updated colleague guide. It adds
-visible welcome guidance, provider-readiness checks, explicit app reopening,
-and clearer Installer update prerequisites. Offline and native UI checks pass;
-build 25 installation, actual login/reboot behaviour, and live traffic remain
-separate gates.
+Measured on real FortiGates with a signed, notarized build: IPv4 UDP and TCP
+connections, explicit and scheduled IKE renewal, CHILD SA rekeying, recovery
+from network loss and from sleep with fresh SSO, and two tunnels to different
+gateways connected at once, each routing its own prefixes through its own
+interface. Offline build checks, Developer ID signing, notarization,
+installation, extension activation, and live traffic are separate claims; each
+document says which one it relies on.
 
-The [build 26 follow-up](evidence/v26-menu-visibility-and-upgrade-recovery.md)
-addresses separate colleague reports of an invisible disconnected icon,
-inaccessible quit controls, first-menu connection failure, and disappearing
-statistics. It adds concrete masks and an independent controls window,
-keeps totals through missing samples, and improves safe helper error reporting.
-The first-connect cause and colleague-side rendering still need confirmation.
+## Open work
 
-The [build 27 follow-up](evidence/v27-extension-approval-switch.md) (OFTC
-1.0.6) responds to a fresh-install report: the user mistook OFTC's listing in
-Login Items & Extensions for approval. Setup's approval button now opens the
-Network Extensions sheet, which holds OFTC's switch. The undocumented URL was
-observed only on macOS 27. It is signed, notarized, and packaged with the
-unchanged build 23 provider.
+1. **Concurrent tunnels.** Detect overlapping prefixes across active tunnels
+   (refuse, warn, or let the user pick a winner); exclude every other active
+   gateway's outer address from each tunnel; allow at most one default
+   (empty-suffix) DNS resolver and require match domains for the rest; check for
+   inner-address collisions between gateways. (Issue 40)
+2. **Installer and first run on a clean Mac.** Validate fresh-install approval,
+   the post-install app launch, quiet launch at login, and an update over an
+   older release, from the DMG. The post-install launch was fixed and tested
+   with a stand-in Installer process, not yet with the real one.
+3. **Crash recovery.** The login agent uses `KeepAlive=false` because the host
+   supervises recovery itself; launchd restart after a host crash has not been
+   validated.
+4. **Wider network acceptance.** Peer loss, Wi-Fi and tether roaming, TCP stalls,
+   peer-initiated or simultaneous rekey, and sustained IPv6-only/NAT64. Short
+   IPv6 and TCP packet tests show capability, not acceptance.
+5. **Distribution.** GitHub releases with the generic package and image, and the
+   in-app update notice pointed at them.
 
-## Next: pilot validation
-
-1. On a colleague's Mac, validate fresh 1.0.6 build 27 welcome/setup approval
-   and a separate 1.0.4/1.0.5-to-1.0.6 update. Check actual postinstall opening,
-   native app closing, reopening, quiet login launch, first menu connection,
-   browser SSO, protected traffic, idle statistics, menu rates
-   and history, explicit stop/reconnect, and route/DNS cleanup. Then validate
-   recovery and a longer connection. The earlier Mac mini 1.0.3 test had an
-   existing provider record and did not prove fresh approval. See the
-   [pilot guide](pilot-validation.md) and
-   [build 27 record](evidence/v27-extension-approval-switch.md).
-2. Validate the [build 22 app-bundled agent](evidence/v22-bundled-agent-candidate.md)
-   on a fresh Mac. Its upgrade on the development Mac displayed OFTC in
-   Background App Activity without the old Developer ID row after refresh.
-3. Make recovery after a host crash explicit. The current LaunchAgent uses
-   `KeepAlive=false` because the host supervises connection recovery itself;
-   launchd restart after a crash has not been validated.
-4. Complete the [initial rollout gates](initial-rollout-gaps.md) on the target
-   IPv4 UDP connection. Keep the old client recoverable from Git history until
-   those gates pass.
-
-## Wider network acceptance
-
-Validate real sleep/wake, peer loss, Wi-Fi and tether roaming, TCP stalls,
-peer-initiated or simultaneous rekey, and sustained IPv6-only/NAT64 during
-initial rollout. Short IPv6 and TCP packet tests are evidence of capability,
-not acceptance for those environments. The scheduled 20-hour IKE renewal
-trigger also needs a live observation; explicit renewal passed.
-
-See [Issue 13](../Issues/013-replace-fortinet-vpn-daemons.md) for the acceptance
-ledger and [the v15 gate](evidence/v15-live-gate.md) for measured results.
+See [architecture.md](architecture.md) for how the pieces fit and
+[operations.md](operations.md) for day-to-day use.
