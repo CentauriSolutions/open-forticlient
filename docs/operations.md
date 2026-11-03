@@ -2,14 +2,9 @@
 
 The release package installs `/Applications/Open Forticlient.app` (OFTC for short;
 releases before 1.2 used `OFTC.app`, which an upgrade removes), `/usr/local/bin/oftc`,
-and `man oftc`. OFTC 1.0.6 host build 27 uses provider build 23. It keeps build
-26's independent controls, concrete menu icon masks, and update and connection
-handling, and it opens the Network Extensions switch during setup approval.
-The [build 27 record](evidence/v27-extension-approval-switch.md) separates
-offline checks, package trust, installation, and live validation.
-
-For colleagues testing the package, use the shorter [pilot guide](pilot-validation.md)
-and its [local report script](../scripts/collect-pilot-report.zsh).
+and `man oftc`. Offline build checks, Developer ID signing, notarization,
+installation, extension activation, and live traffic are separate claims; this
+guide says which one each step relies on.
 
 ## Install and set up
 
@@ -202,7 +197,7 @@ and logs. Use `oftc uninstall --erase-profile` to erase that profile and its
 PSK as well. If macOS defers extension removal, complete its approval or
 reboot and rerun uninstall; the helper refuses to remove an active extension.
 
-The older Fortinet-backed controller remains available from Git history, not
-from the active source tree. See [initial rollout gaps](initial-rollout-gaps.md)
-for deployment limits and [Issue 17](../Issues/017-package-distributable-macos-client.md)
-for release validation status.
+The older Fortinet-backed controller remains available from Git history (the
+`legacy-controller` tag), not from the active source tree. See
+Issue 17 for release
+validation status.

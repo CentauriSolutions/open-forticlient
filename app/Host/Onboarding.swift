@@ -9,7 +9,6 @@ import SystemExtensions
 // session. In particular, neither the profile nor its PSK belongs to root.
 final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindowDelegate {
     private enum Source {
-        case development(OFTCProfile)
         case fortiClient(String, String, UInt32)
         case manual
     }
@@ -56,11 +55,6 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     private func buildSources() {
         let configured = Set(OFTCProfileScope.entries(root: OFTCProfileScope.defaultRoot(bundleID: appID))
             .map { $0.profile.gateway })
-        if let profile = try? OFTCProfileStore(bundleID: "com.chris.openforticlient.gate0").load(),
-           !configured.contains(profile.gateway) {
-            sources.append(.development(profile))
-            sourceMenu.addItem(withTitle: "OFTC development profile")
-        }
         let plist = URL(fileURLWithPath: "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist")
         if let values = try? plist.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
            values.isRegularFile == true, values.isSymbolicLink != true,
@@ -141,9 +135,6 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         var profile: OFTCProfile?
         var name = ""
         switch sources[sourceMenu.indexOfSelectedItem] {
-        case .development(let value):
-            profile = value
-            name = "Development"
         case .fortiClient(let label, let gateway, let port):
             profile = try? OFTCProfile(gateway: gateway, samlPort: port)
             name = label

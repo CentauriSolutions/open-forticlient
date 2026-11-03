@@ -79,7 +79,6 @@ USAGE:
     oftc setup --import NAME           Add a profile from a FortiClient profile.
     oftc setup --gateway HOST --saml-port PORT [--tcp] [--name NAME]
     oftc setup --from FILE             Import profiles from a file made by `oftc export` (- is stdin).
-    oftc setup --from-development
     oftc setup                         Add a profile interactively, or repair setup.
     oftc profiles                      List configured profiles.
     oftc export [PROFILE...] [-o FILE] Write profiles, with their PSKs, to a file to share.
@@ -123,7 +122,6 @@ enum SetupSource {
         gateway: String,
         port: u16,
     },
-    Development,
     Manual {
         gateway: String,
         port: u16,
@@ -141,7 +139,6 @@ struct SetupCandidate {
 }
 
 const FORTICLIENT_PLIST: &str = "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist";
-const DEVELOPMENT_BUNDLE_ID: &str = "com.chris.openforticlient.gate0";
 
 fn plist_raw(plist: &Path, key: &str) -> Option<String> {
     let output = Command::new("/usr/bin/plutil")
@@ -169,41 +166,6 @@ fn valid_gateway(value: &str) -> bool {
         && !value.starts_with('.')
         && !value.ends_with('.')
         && !value.contains("..")
-}
-
-fn development_candidate() -> Option<SetupCandidate> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    let profile = home
-        .join("Library/Application Support")
-        .join(DEVELOPMENT_BUNDLE_ID)
-        .join("profile.json");
-    development_candidate_from(&profile)
-}
-
-fn development_candidate_from(profile: &Path) -> Option<SetupCandidate> {
-    if !regular_file(&profile) || plist_raw(&profile, "version")?.trim() != "1" {
-        return None;
-    }
-    let gateway = plist_raw(&profile, "gateway")?;
-    let port = plist_raw(&profile, "samlPort")?
-        .trim()
-        .parse::<u16>()
-        .ok()?;
-    let tcp = match plist_raw(&profile, "transport")?.trim() {
-        "udp" => false,
-        "tcp" => true,
-        _ => return None,
-    };
-    if !valid_gateway(&gateway) || port == 0 {
-        return None;
-    }
-    Some(SetupCandidate {
-        label: "OFTC development profile".into(),
-        gateway,
-        port,
-        tcp,
-        source: SetupSource::Development,
-    })
 }
 
 fn forticlient_candidates() -> Vec<SetupCandidate> {
@@ -269,9 +231,6 @@ fn prompt(label: &str, default: &str) -> Result<String, Box<dyn Error>> {
 
 fn interactive_source(existing: &[Profile]) -> Result<SetupSource, Box<dyn Error>> {
     let mut candidates = Vec::new();
-    if let Some(candidate) = development_candidate() {
-        candidates.push(candidate);
-    }
     candidates.extend(forticlient_candidates());
     candidates.retain(|c| !existing.iter().any(|p| p.gateway == c.gateway));
     println!("OFTC setup sources:");
@@ -382,7 +341,6 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
                 [flag, path] if flag == "--from" && !path.is_empty() => {
                     SetupSource::File(path.clone())
                 }
-                [flag] if flag == "--from-development" => SetupSource::Development,
                 [gateway_flag, gateway, port_flag, port, rest @ ..]
                     if gateway_flag == "--gateway"
                         && port_flag == "--saml-port"
@@ -537,29 +495,6 @@ fn has_psk(executable: &Path, profile: &str) -> Result<bool, Box<dyn Error>> {
         .success())
 }
 
-fn try_development_psk(executable: &Path, profile: &str) {
-    let Some(development) = development_candidate() else {
-        return;
-    };
-    for candidate in forticlient_candidates() {
-        if candidate.gateway != development.gateway {
-            continue;
-        }
-        let SetupSource::ImportWithDefaults { name, .. } = candidate.source else {
-            continue;
-        };
-        let migrated = host_output_for(
-            executable,
-            profile,
-            &["migrate-psk", &name, &development.gateway],
-        );
-        if migrated.is_ok_and(|result| result.status.success()) {
-            println!("Saved FortiClient PSK copied into the OFTC Keychain item.");
-            return;
-        }
-    }
-}
-
 /// Imports a profile file (a path, or `-` for stdin) through the host and
 /// returns the ids of the profiles it created.
 fn import_bundle(host: &Path, source: &str) -> Result<Vec<String>, Box<dyn Error>> {
@@ -683,13 +618,6 @@ fn run_setup(app: &Path, source: SetupSource) -> Result<(), Box<dyn Error>> {
                 )?]
             }
         },
-        SetupSource::Development => {
-            let id = add_profile(&host, &["import-development-profile"])?;
-            if !has_psk(&host, &id)? {
-                try_development_psk(&host, &id);
-            }
-            vec![id]
-        }
         SetupSource::Manual {
             gateway,
             port,
@@ -1301,10 +1229,6 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse(&words("setup --from-development")).unwrap(),
-            Some(Action::Setup(DEFAULT_APP.into(), SetupSource::Development))
-        );
-        assert_eq!(
             parse(&words(
                 "--app /tmp/OFTC.app setup --gateway vpn.example.test --saml-port 9443 --tcp"
             ))
@@ -1391,21 +1315,12 @@ mod tests {
         assert!(!valid_gateway("vpn.example.test\u{1b}[2J"));
         let temp = std::env::temp_dir().join(format!("oftc-setup-test-{}", std::process::id()));
         fs::create_dir(&temp).unwrap();
-        let development = temp.join("development.json");
         let forticlient = temp.join("forticlient.json");
-        fs::write(
-            &development,
-            r#"{"version":1,"gateway":"vpn.example.test","samlPort":9443,"transport":"udp"}"#,
-        )
-        .unwrap();
         fs::write(
             &forticlient,
             r#"{"Profiles":{"Work VPN":{"Server":"vpn.example.test","IKESamlPort":9443}}}"#,
         )
         .unwrap();
-        let dev = development_candidate_from(&development).unwrap();
-        assert_eq!(dev.gateway, "vpn.example.test");
-        assert_eq!(dev.source, SetupSource::Development);
         let imported = forticlient_candidates_from(&forticlient);
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].port, 9443);

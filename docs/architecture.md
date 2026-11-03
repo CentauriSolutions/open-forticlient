@@ -42,9 +42,7 @@ key. Route and DNS policy across profiles is not yet enforced; see Issue 40.
 
 The host can reconnect after a recoverable provider drop using fresh SSO when
 needed. An explicit user stop stays down until the next connect and does not
-change connect-at-login. The
-[rollout gaps](initial-rollout-gaps.md) distinguish measured recovery paths
-from untested ones.
+change connect-at-login.
 
 Opening the host without arguments runs the resident AppKit menu bar app.
 It observes NetworkExtension status and the supervisor's nonsecret phase

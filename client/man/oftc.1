@@ -13,9 +13,6 @@ oftc \- standalone macOS FortiGate IPsec VPN client
 .B oftc setup
 \fB\-\-from\fR \fIFILE\fR
 .br
-.B oftc setup
-\fB\-\-from\-development\fR
-.br
 .B oftc profiles
 .br
 .B oftc export
@@ -56,7 +53,7 @@ profile when none is named.
 Add a profile, activate OFTC's system extension, and add the profile's macOS
 VPN configuration. It does not connect. Run it again to add another VPN. With no
 options, ask which local settings to use; if profiles already exist and
-standard input is not a terminal, resume setup for all of them. The OFTC development profile and FortiClient
+standard input is not a terminal, resume setup for all of them. FortiClient
 profiles, when present, provide editable gateway and SAML port defaults. A
 matching FortiClient credential is tried before asking for a PSK in the
 terminal.
@@ -82,12 +79,6 @@ Use
 to read standard input. A gateway that already has a profile is skipped, so
 importing never changes an existing profile or its PSK. The file carries each
 profile's PSK, so no PSK prompt follows.
-.TP
-.B setup \-\-from\-development
-Copy the nonsecret OFTC development profile and prompt for its PSK under the
-release app's Keychain identity if no matching saved FortiClient PSK is
-available. This is only for migration from the OFTC
-development build. Stop the old VPN and its login agent first.
 .TP
 .B profiles
 List configured profiles.

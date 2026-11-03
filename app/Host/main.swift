@@ -579,17 +579,6 @@ case "import-profile" where args.count == 2:
     let entry = newProfile(profile)
     finish("FortiClient profile imported into OFTC configuration and Keychain: id=\(entry.id)")
 
-case "import-development-profile" where args.count == 1:
-    // The old profile is nonsecret. Its Keychain PSK needs separate explicit
-    // provisioning under the new signed identity.
-    let profile: OFTCProfile
-    do {
-        profile = try OFTCProfileStore(bundleID: "com.chris.openforticlient.gate0").load()
-            .with(name: "Development")
-    } catch { finish("Could not import development profile", code: 1) }
-    let entry = newProfile(profile)
-    finish("Development profile copied; provision its PSK before connecting: id=\(entry.id)")
-
 case "export-profiles":
     // Writes a shareable bundle of the named profile ids (all when none) to
     // stdout, including each PSK from the Keychain.
