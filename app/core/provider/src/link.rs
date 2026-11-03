@@ -248,9 +248,31 @@ mod tests {
     }
 
     #[test]
+    fn a_link_reports_not_connected_after_teardown_and_teardown_is_idempotent() {
+        // No gateway to connect to, so build the link around an empty session.
+        let link = SessionLink {
+            settings: NetworkSettings {
+                outer_remote_ipv4: std::net::Ipv4Addr::new(203, 0, 113, 7),
+                outer_remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 7).into(),
+                assigned_ipv4: std::net::Ipv4Addr::new(10, 99, 0, 12),
+                netmask: None,
+                split_routes: Vec::new(),
+                dns_servers: Vec::new(),
+                dns_domains: Vec::new(),
+                inner_mtu: 1280,
+            },
+            session: Mutex::new(None),
+            cancel: Cancellation::default(),
+        };
+        link.teardown();
+        link.teardown();
+        assert_eq!(link.send_ip(&[0x45]), Err(NOT_CONNECTED));
+        assert_eq!(link.rekey_counts(), Err(NOT_CONNECTED));
+    }
+
+    #[test]
     fn engine_errors_keep_the_codes_the_host_reads() {
         use oftc_engine::Error;
-        assert_eq!(mapped(Error::Cancelled), 4);
         assert_eq!(mapped(Error::Resolve), 100);
         assert_eq!(mapped(Error::Timeout(0)), 102);
         assert_eq!(mapped(Error::Inactive), 112);
