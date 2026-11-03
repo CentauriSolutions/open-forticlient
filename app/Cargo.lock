@@ -287,6 +287,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oftc-host-bootstrap"
+version = "0.1.0"
+
+[[package]]
+name = "oftc-migration"
+version = "0.1.0"
+
+[[package]]
 name = "oftc-modp14"
 version = "0.1.0"
 dependencies = [

@@ -1,10 +1,10 @@
 //! In-memory host SAML -> provider bootstrap library. No executable entry.
 #![allow(dead_code)]
 
-#[path = "../../bootstrap/log.rs"] mod log;
-#[path = "../../bootstrap/uid.rs"] mod uid;
-#[path = "../../bootstrap/tls.rs"] mod tls;
-#[path = "../../bootstrap/saml.rs"] mod saml;
+mod log;
+mod uid;
+mod tls;
+mod saml;
 
 use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
@@ -133,21 +133,6 @@ pub unsafe extern "C" fn oftc_host_acquire(
         Ok(Ok(wire)) => { leak_for_swift(wire, &mut *output); 0 },
         Ok(Err(AcquireFailure::BeforeBrowser)) => 3,
         _ => 2,
-    }
-}
-
-/// Synthetic build only. It opens no browser and reads no profile or secret.
-#[cfg(oftc_synthetic)]
-#[no_mangle]
-pub unsafe extern "C" fn oftc_host_prepare_synthetic(output: *mut WireBuffer) -> i32 {
-    if output.is_null() { return 1; }
-    *output = WireBuffer::default();
-    let input = Input { gateway: "integration.invalid".into(),
-        uid: "SYNTHETICUID0123".into(), psk: SecretString("SYNTHETIC-PSK".into()),
-        token: SecretString("SYNTHETIC-TOKEN".into()) };
-    match encode(input) {
-        Ok(wire) => { leak_for_swift(wire, &mut *output); 0 },
-        Err(_) => 2,
     }
 }
 
