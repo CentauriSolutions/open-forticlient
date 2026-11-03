@@ -248,8 +248,17 @@ mod tests {
             );
         }
         let mut multicast = base();
-        multicast.outer_remote_ip = v4(224, 0, 0, 1);
-        assert_eq!(convert(&multicast), Err(TunnelError::SettingsRejected));
+        for outer in [
+            v4(224, 0, 0, 1),
+            IpAddr::V6(Ipv4Addr::new(224, 0, 0, 1).to_ipv6_mapped()),
+        ] {
+            multicast.outer_remote_ip = outer;
+            assert_eq!(
+                convert(&multicast),
+                Err(TunnelError::SettingsRejected),
+                "{outer}"
+            );
+        }
     }
 
     #[test]
