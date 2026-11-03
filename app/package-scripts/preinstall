@@ -7,11 +7,11 @@ if /usr/bin/pgrep -f '^/Applications/OFTC\.app/Contents/MacOS/OFTCAgent([[:space
     echo 'OFTC is running. Disconnect the VPN and quit OFTC before updating. Open OFTC from Applications if its controls are hidden.' >&2
     exit 1
 fi
-vpn_status=$(/usr/sbin/scutil --nc status 'OFTC VPN' 2>/dev/null || true)
-case "$vpn_status" in
-    Connected*|Connecting*|Disconnecting*|Reasserting*)
-        echo 'OFTC VPN is active. Disconnect it before updating.' >&2
-        exit 1
-        ;;
-esac
+# Every profile has its own VPN entry ("OFTC VPN", "OFTC VPN (<name>)", ...).
+active=$(/usr/sbin/scutil --nc list 2>/dev/null | /usr/bin/grep 'com\.chris\.openforticlient\.oftc' \
+    | /usr/bin/grep -E '\((Connected|Connecting|Disconnecting|Reasserting)\)' || true)
+if [ -n "$active" ]; then
+    echo 'An OFTC VPN is active. Disconnect every OFTC VPN before updating.' >&2
+    exit 1
+fi
 exit 0

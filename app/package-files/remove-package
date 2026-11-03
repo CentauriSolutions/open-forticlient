@@ -22,13 +22,13 @@ if /usr/bin/pgrep -f '^/Applications/OFTC.app/Contents/MacOS/OFTCAgent([[:space:
     echo 'OFTC agent is running; stop it before uninstalling.' >&2
     exit 1
 fi
-vpn_status=$(/usr/sbin/scutil --nc status 'OFTC VPN' 2>/dev/null || true)
-case "$vpn_status" in
-    Connected*|Connecting*|Disconnecting*)
-        echo 'OFTC VPN is active; disconnect it before uninstalling.' >&2
-        exit 1
-        ;;
-esac
+# Every profile has its own VPN entry ("OFTC VPN", "OFTC VPN (<name>)", ...).
+active=$(/usr/sbin/scutil --nc list 2>/dev/null | /usr/bin/grep 'com\.chris\.openforticlient\.oftc' \
+    | /usr/bin/grep -E '\((Connected|Connecting|Disconnecting|Reasserting)\)' || true)
+if [ -n "$active" ]; then
+    echo 'An OFTC VPN is active; disconnect every OFTC VPN before uninstalling.' >&2
+    exit 1
+fi
 for agent in /Users/*/Library/LaunchAgents/$agent_label.plist; do
     if [ -e "$agent" ] || [ -L "$agent" ]; then
         echo "OFTC LaunchAgent remains at $agent; remove it as that user first." >&2
