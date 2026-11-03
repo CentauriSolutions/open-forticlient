@@ -10,7 +10,7 @@
 //! is handed to the code under test, and the [`LoopbackPeer`] side plays the OS.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use crate::session::NetworkSettings;
 
@@ -48,7 +48,6 @@ pub trait Tunnel {
     fn clear_settings(&mut self) -> Result<(), TunnelError>;
 }
 
-#[derive(Default)]
 struct State {
     outbound: VecDeque<Vec<u8>>,
     written: Vec<Vec<u8>>,
@@ -56,29 +55,55 @@ struct State {
     clears: usize,
     reject_settings: bool,
     closed: bool,
+    /// Live `LoopbackPeer` handles; the interface closes when the last drops.
+    peers: usize,
+    /// Threads currently blocked in `read_packets`.
+    waiting: usize,
 }
 
 struct Shared {
     state: Mutex<State>,
     ready: Condvar,
+    blocked: Condvar,
+}
+
+impl Shared {
+    // A panic in one test thread must not turn into a second panic in teardown.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The engine-facing half of an in-memory tunnel.
 pub struct LoopbackTunnel(Arc<Shared>);
 
 /// The OS-facing half: injects outbound packets and inspects what was done.
-#[derive(Clone)]
+/// Dropping the last peer closes the interface, so a test that forgets
+/// [`LoopbackPeer::close`] fails instead of hanging in `read_packets`.
 pub struct LoopbackPeer(Arc<Shared>);
 
 /// Create a connected in-memory tunnel and its peer.
 pub fn loopback() -> (LoopbackTunnel, LoopbackPeer) {
-    let shared = Arc::new(Shared { state: Mutex::new(State::default()), ready: Condvar::new() });
+    let shared = Arc::new(Shared {
+        state: Mutex::new(State {
+            outbound: VecDeque::new(),
+            written: Vec::new(),
+            settings: None,
+            clears: 0,
+            reject_settings: false,
+            closed: false,
+            peers: 1,
+            waiting: 0,
+        }),
+        ready: Condvar::new(),
+        blocked: Condvar::new(),
+    });
     (LoopbackTunnel(shared.clone()), LoopbackPeer(shared))
 }
 
 impl Tunnel for LoopbackTunnel {
     fn apply_settings(&mut self, settings: &NetworkSettings) -> Result<(), TunnelError> {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock();
         if state.closed {
             return Err(TunnelError::Closed);
         }
@@ -90,7 +115,7 @@ impl Tunnel for LoopbackTunnel {
     }
 
     fn read_packets(&mut self) -> Result<Vec<Vec<u8>>, TunnelError> {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock();
         loop {
             if !state.outbound.is_empty() {
                 return Ok(state.outbound.drain(..).collect());
@@ -98,12 +123,15 @@ impl Tunnel for LoopbackTunnel {
             if state.closed {
                 return Err(TunnelError::Closed);
             }
-            state = self.0.ready.wait(state).unwrap();
+            state.waiting += 1;
+            self.0.blocked.notify_all();
+            state = self.0.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
+            state.waiting -= 1;
         }
     }
 
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), TunnelError> {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock();
         if state.closed {
             return Err(TunnelError::Closed);
         }
@@ -112,44 +140,75 @@ impl Tunnel for LoopbackTunnel {
     }
 
     fn clear_settings(&mut self) -> Result<(), TunnelError> {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock();
         state.settings = None;
         state.clears += 1;
         Ok(())
     }
 }
 
+impl Clone for LoopbackPeer {
+    fn clone(&self) -> Self {
+        self.0.lock().peers += 1;
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for LoopbackPeer {
+    fn drop(&mut self) {
+        let mut state = self.0.lock();
+        state.peers -= 1;
+        if state.peers == 0 {
+            state.closed = true;
+            self.0.ready.notify_all();
+        }
+    }
+}
+
 impl LoopbackPeer {
     /// Queue one outbound packet as if the OS had routed it into the tunnel.
+    /// Once the interface is closed the packet is discarded, as the OS would.
     pub fn inject(&self, packet: &[u8]) {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.lock();
+        if state.closed {
+            return;
+        }
         state.outbound.push_back(packet.to_vec());
         self.0.ready.notify_all();
     }
 
+    /// Block until a thread is waiting in `read_packets`. Lets a test close or
+    /// inject only after the reader is really blocked, with no sleeps.
+    pub fn wait_until_blocked(&self) {
+        let mut state = self.0.lock();
+        while state.waiting == 0 {
+            state = self.0.blocked.wait(state).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
     /// Take every packet the engine has written so far.
     pub fn take_written(&self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.0.state.lock().unwrap().written)
+        std::mem::take(&mut self.0.lock().written)
     }
 
     /// The settings currently installed, if any.
     pub fn settings(&self) -> Option<NetworkSettings> {
-        self.0.state.lock().unwrap().settings.clone()
+        self.0.lock().settings.clone()
     }
 
     /// How many times `clear_settings` has been called.
     pub fn clear_count(&self) -> usize {
-        self.0.state.lock().unwrap().clears
+        self.0.lock().clears
     }
 
     /// Make the next `apply_settings` calls fail, as an OS refusal would.
     pub fn reject_settings(&self) {
-        self.0.state.lock().unwrap().reject_settings = true;
+        self.0.lock().reject_settings = true;
     }
 
     /// Simulate the OS closing the interface: blocked reads return `Closed`.
     pub fn close(&self) {
-        self.0.state.lock().unwrap().closed = true;
+        self.0.lock().closed = true;
         self.0.ready.notify_all();
     }
 }
@@ -159,7 +218,6 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::thread;
-    use std::time::Duration;
 
     fn settings() -> NetworkSettings {
         NetworkSettings {
@@ -204,7 +262,7 @@ mod tests {
     fn read_blocks_until_a_packet_arrives() {
         let (mut tunnel, peer) = loopback();
         let reader = thread::spawn(move || tunnel.read_packets());
-        thread::sleep(Duration::from_millis(50));
+        peer.wait_until_blocked();
         peer.inject(&[0x45, 9]);
         assert_eq!(reader.join().unwrap().unwrap(), vec![vec![0x45, 9]]);
     }
@@ -214,7 +272,7 @@ mod tests {
         let (mut tunnel, peer) = loopback();
         let mut blocked = LoopbackTunnel(tunnel.0.clone());
         let reader = thread::spawn(move || blocked.read_packets());
-        thread::sleep(Duration::from_millis(50));
+        peer.wait_until_blocked();
         peer.close();
         assert_eq!(reader.join().unwrap(), Err(TunnelError::Closed));
         assert_eq!(tunnel.write_packet(&[0x45]), Err(TunnelError::Closed));
@@ -236,5 +294,36 @@ mod tests {
         peer.reject_settings();
         assert_eq!(tunnel.apply_settings(&settings()), Err(TunnelError::SettingsRejected));
         assert_eq!(peer.settings(), None);
+    }
+
+    #[test]
+    fn dropping_the_last_peer_closes_the_interface() {
+        let (mut tunnel, peer) = loopback();
+        let second = peer.clone();
+        let mut blocked = LoopbackTunnel(tunnel.0.clone());
+        let reader = thread::spawn(move || blocked.read_packets());
+        peer.wait_until_blocked();
+        drop(peer);
+        // One peer is still alive, so the reader must still be waiting.
+        second.inject(&[0x45, 7]);
+        assert_eq!(reader.join().unwrap().unwrap(), vec![vec![0x45, 7]]);
+        drop(second);
+        assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
+    }
+
+    #[test]
+    fn packets_injected_after_close_are_discarded() {
+        let (mut tunnel, peer) = loopback();
+        peer.close();
+        peer.inject(&[0x45, 8]);
+        assert_eq!(tunnel.read_packets(), Err(TunnelError::Closed));
+    }
+
+    #[test]
+    fn clear_settings_still_works_after_close() {
+        let (mut tunnel, peer) = loopback();
+        peer.close();
+        tunnel.clear_settings().unwrap();
+        assert_eq!(peer.clear_count(), 1);
     }
 }
