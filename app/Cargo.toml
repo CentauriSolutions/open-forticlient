@@ -10,3 +10,7 @@ members = [
 
 [profile.release]
 opt-level = "z"
+# The engine parses peer-controlled lengths. It used to be built unoptimised with
+# overflow checks on, so an overflow panicked (caught at the FFI boundary) rather
+# than wrapping; keep that in the optimised build.
+overflow-checks = true
