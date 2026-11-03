@@ -397,6 +397,9 @@ mod tests {
         assert_eq!(&started[0].1[..], b"env");
         assert_eq!(started[0].2.as_deref(), Some(&b"m"[..]));
 
+        vpn.stop(entry);
+        assert_eq!(mock.stops(), 1);
+
         mock.push_reply(Ok(b"pong".to_vec()));
         assert_eq!(
             vpn.send_provider_message(entry, b"ping", wait),
@@ -405,6 +408,14 @@ mod tests {
         assert_eq!(
             vpn.send_provider_message(entry, b"ping", wait),
             Err(AppleError::TimedOut)
+        );
+        assert_eq!(mock.sent(), vec![b"ping".to_vec(), b"ping".to_vec()]);
+
+        assert_eq!(vpn.last_disconnect_error(entry, wait), Ok(None));
+        mock.set_last_error(Some(AppleError::TimedOut));
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Ok(Some(AppleError::TimedOut))
         );
 
         let (tx, rx) = channel();
@@ -416,8 +427,24 @@ mod tests {
         mock.set_status(VpnStatus::Disconnected);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
 
+        vpn.create("p2", "k2", "n").unwrap();
+        let created = vpn
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.profile_key.as_deref() == Some("k2"))
+            .unwrap();
+        assert_eq!(created.provider_id, "p2");
+        assert!(created.enabled);
+
         vpn.remove(entry).unwrap();
-        assert!(vpn.load_all().unwrap().is_empty());
+        assert_eq!(vpn.load_all().unwrap().len(), 1);
+        vpn.stop(entry);
+        assert_eq!(mock.stops(), 1);
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Err(AppleError::StaleEntry)
+        );
         assert_eq!(vpn.reload(entry).err(), Some(AppleError::StaleEntry));
         assert_eq!(vpn.status(entry), VpnStatus::Invalid);
     }
