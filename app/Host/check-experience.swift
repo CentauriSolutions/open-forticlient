@@ -22,6 +22,14 @@ import Foundation
         precondition(!AppLaunchReason.isAutomatic(property: nil))
         precondition(!AppLaunchReason.isAutomatic(property: 0))
 
+        let loginDefault = MenuLoginDefaultStore(directory: directory.appendingPathComponent("login"))
+        precondition(!loginDefault.decided)
+        try loginDefault.markDecided()
+        precondition(loginDefault.decided)
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: directory.appendingPathComponent("login/menu-login-default.json").path)[.posixPermissions] as? Int
+        precondition(mode == 0o600)
+
         typealias Component = VPNComponentState
         precondition(Component.resolve(expected: "23", records: []) == .missing)
         precondition(Component.resolve(expected: "23", records: [.init(build: "20", enabled: true)]) == .updateRequired)
