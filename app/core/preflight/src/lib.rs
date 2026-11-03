@@ -69,6 +69,13 @@ fn run(gateway: &str, uid: &str, psk: &[u8]) -> Result<(), i32> {
 /// 0 = authenticated EAP challenge received; 1 = invalid input;
 /// 2 = socket/timeout; 3 = SA_INIT; 4 = responder AUTH; 5 = EAP challenge.
 /// No diagnostic may include PSK or packet bytes.
+pub fn preflight(gateway: &str, uid: &str, psk: &[u8]) -> i32 {
+    if gateway.is_empty() || gateway.len() > 253 || uid.len() != 32 ||
+        psk.is_empty() || psk.len() > 1024 ||
+        !uid.bytes().all(|b| b.is_ascii_hexdigit()) || psk.contains(&0) { return 1; }
+    run(gateway, uid, psk).map_or_else(|code| code, |_| 0)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn oftc_provider_preflight(
     gateway: *const u8, gateway_len: usize,
@@ -76,6 +83,7 @@ pub unsafe extern "C" fn oftc_provider_preflight(
     psk: *const u8, psk_len: usize,
 ) -> i32 {
     std::panic::catch_unwind(|| {
+        // Bound the lengths before building slices from caller-supplied sizes.
         if gateway.is_null() || uid.is_null() || psk.is_null() ||
             gateway_len == 0 || gateway_len > 253 || uid_len != 32 ||
             psk_len == 0 || psk_len > 1024 { return 1; }
@@ -84,8 +92,7 @@ pub unsafe extern "C" fn oftc_provider_preflight(
         let psk = unsafe { std::slice::from_raw_parts(psk, psk_len) };
         let Ok(gateway) = std::str::from_utf8(gateway) else { return 1; };
         let Ok(uid) = std::str::from_utf8(uid) else { return 1; };
-        if !uid.bytes().all(|b| b.is_ascii_hexdigit()) || psk.contains(&0) { return 1; }
-        run(gateway, uid, psk).map_or_else(|code| code, |_| 0)
+        preflight(gateway, uid, psk)
     }).unwrap_or(5)
 }
 

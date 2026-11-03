@@ -7,5 +7,7 @@
 //! the `Tunnel`, forwards start and stop, and moves provider messages.
 
 pub mod envelope;
+pub mod link;
+pub mod provider;
 pub mod settings;
 pub mod traffic;
