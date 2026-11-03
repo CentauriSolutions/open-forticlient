@@ -1,0 +1,16 @@
+[package]
+name = "oftc-provider"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "oftc_provider"
+path = "src/lib.rs"
+
+[dependencies]
+oftc-crypto = { path = "../crypto" }
+oftc-engine = { path = "../engine" }
+
+[lints]
+workspace = true

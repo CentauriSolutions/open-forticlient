@@ -311,6 +311,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oftc-provider"
+version = "0.1.0"
+dependencies = [
+ "oftc-crypto",
+ "oftc-engine",
+]
+
+[[package]]
 name = "oftc-provider-ffi"
 version = "0.1.0"
 dependencies = [
