@@ -417,7 +417,7 @@ private func superviseAutostart() -> Never {
     finish("OFTC supervisors exited")
 }
 
-private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 var args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--profile" {
     guard args.count >= 3, OFTCProfileScope.isValidID(args[1]) else {
@@ -639,6 +639,10 @@ case "import-profiles" where args.count == 1:
         lines.append("Imported \(entry.name): id=\(entry.id)")
     }
     finish(lines.joined(separator: "\n"))
+
+case "launcher-alias" where args.count == 2 && ["ensure", "remove"].contains(args[1]):
+    if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }
+    finish("Launcher alias \(args[1] == "ensure" ? "checked" : "removed")")
 
 case "list-profiles" where args.count == 1:
     // id, display name, gateway, SAML port, transport; tab separated.

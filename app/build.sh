@@ -102,6 +102,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/OFTCProfile.swift" \
     "$root/Host/ProfileScope.swift" \
     "$root/Host/ProfileBundle.swift" \
+    "$root/Host/LauncherAlias.swift" \
     "$root/Host/GatewayTrust.swift" \
     "$root/Host/GatewayTrustPrompt.swift" \
     "$root/Host/Onboarding.swift" \
@@ -155,6 +156,7 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" \
     "$root/Host/AgentIntent.swift" \
     "$root/Host/ProfileBundle.swift" \
+    "$root/Host/LauncherAlias.swift" \
     "$root/Host/GatewayTrust.swift" \
     "$root/Host/check-supervisor.swift" \
     -o "$build/supervisor-check"

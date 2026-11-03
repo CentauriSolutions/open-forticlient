@@ -480,6 +480,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         captureLaunchReason()
+        if preview == nil { DispatchQueue.global(qos: .utility).async { LauncherAlias.ensure() } }
         if preview == nil, !acquireMenuLock() {
             if !automaticLaunch {
                 DistributedNotificationCenter.default().postNotificationName(
