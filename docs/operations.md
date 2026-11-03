@@ -1,6 +1,7 @@
 # Operating OFTC
 
-The release package installs `/Applications/OFTC.app`, `/usr/local/bin/oftc`,
+The release package installs `/Applications/Open Forticlient.app` (OFTC for short;
+releases before 1.2 used `OFTC.app`, which an upgrade removes), `/usr/local/bin/oftc`,
 and `man oftc`. OFTC 1.0.6 host build 27 uses provider build 23. It keeps build
 26's independent controls, concrete menu icon masks, and update and connection
 handling, and it opens the Network Extensions switch during setup approval.

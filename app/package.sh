@@ -13,13 +13,13 @@ cli="$build/oftc"
 stage="$build/package-root"
 unsigned="$build/OFTC-unsigned.pkg"
 component="$build/OFTC-component.pkg"
-package="$build/OFTC-1.1.7.pkg"
+package="$build/OFTC-1.2.0.pkg"
 : "${DEVELOPER_ID_INSTALLER_IDENTITY:?Set DEVELOPER_ID_INSTALLER_IDENTITY to a Developer ID Installer identity}"
 [[ -d "$app" && -f "$cli" && ! -e "$stage" && ! -e "$unsigned" && ! -e "$package" && ! -e "$component" ]] || {
     print -u2 'Need a signed app and CLI in a fresh packaging output path'; exit 2
 }
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist") == com.chris.openforticlient.oftc \
-   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 38 ]] || {
+   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 39 ]] || {
     print -u2 'Unexpected app identity or build number'; exit 2
 }
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -28,12 +28,12 @@ xcrun stapler validate "$app"
 spctl --assess --type execute --verbose=2 "$app"
 mkdir -p "$stage/Applications" "$stage/usr/local/bin" "$stage/usr/local/libexec/oftc" \
     "$stage/usr/local/share/man/man1"
-ditto "$app" "$stage/Applications/OFTC.app"
+ditto "$app" "$stage/Applications/Open Forticlient.app"
 cp "$cli" "$stage/usr/local/bin/oftc"
 cp "$root/package-files/remove-package" "$stage/usr/local/libexec/oftc/remove-package"
 cp "$root/../client/man/oftc.1" "$stage/usr/local/share/man/man1/oftc.1"
 pkgbuild --root "$stage" --install-location / --ownership recommended \
-    --identifier com.chris.openforticlient.oftc.pkg --version 1.1.7 \
+    --identifier com.chris.openforticlient.oftc.pkg --version 1.2.0 \
     --scripts "$root/package-scripts" "$component"
 productbuild --distribution "$root/package-resources/Distribution.xml" \
     --resources "$root/package-resources" --package-path "$build" "$unsigned"

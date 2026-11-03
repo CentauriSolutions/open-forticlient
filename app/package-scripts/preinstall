@@ -3,7 +3,7 @@ set -eu
 
 # Replacing an active app binary can interrupt an extension or supervisor.
 # The operator must stop OFTC before an update. Fresh installs pass directly.
-if /usr/bin/pgrep -f '^/Applications/OFTC\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
+if /usr/bin/pgrep -f '^/Applications/(OFTC|Open Forticlient)\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
     echo 'OFTC is running. Disconnect the VPN and quit OFTC before updating. Open OFTC from Applications if its controls are hidden.' >&2
     exit 1
 fi

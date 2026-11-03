@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_APP: &str = "/Applications/OFTC.app";
+const DEFAULT_APP: &str = "/Applications/Open Forticlient.app";
 const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
 const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
 const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
@@ -976,6 +976,8 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
         run_host(&host, &["deactivate"])?;
     }
     run_host(&host, &["remove-config"])?;
+    // The per-user "OFTC" search alias is the app's; remove it with the app.
+    let _ = run_host(&host, &["launcher-alias", "remove"]);
     let status = Command::new("/usr/bin/sudo").arg(helper).status()?;
     if !status.success() {
         return Err("package removal stopped; complete any macOS system extension approval and rerun `oftc uninstall`".into());

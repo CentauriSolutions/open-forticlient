@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# Before the app was renamed it installed as OFTC.app. Remove that copy only if
+# it is exactly our bundle, so two apps never share one bundle identifier.
+old=/Applications/OFTC.app
+if [ -d "$old" ] && [ ! -L "$old" ] &&
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$old/Contents/Info.plist" 2>/dev/null)" = com.chris.openforticlient.oftc ]; then
+    /bin/rm -rf "$old"
+fi
+
 # The signed app owns onboarding. A package install can only hand off to the
 # logged-in user; managed and headless installs finish without a GUI session.
 if ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
@@ -14,8 +22,9 @@ console_uid=$(/usr/bin/id -u "$console_user" 2>/dev/null) || exit 0
 case "$console_uid" in
     ''|*[!0-9]*|0) exit 0 ;;
 esac
-if [ -d /Applications/OFTC.app ]; then
+app="/Applications/Open Forticlient.app"
+if [ -d "$app" ]; then
     /usr/bin/sudo -u "$console_user" /bin/launchctl asuser "$console_uid" \
-        /usr/bin/open /Applications/OFTC.app --args --after-install >/dev/null 2>&1 || true
+        /usr/bin/open "$app" --args --after-install >/dev/null 2>&1 || true
 fi
 exit 0

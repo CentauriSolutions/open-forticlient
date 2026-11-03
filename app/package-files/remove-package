@@ -2,7 +2,8 @@
 # Remove the exact OFTC package payload after per-user VPN cleanup.
 set -eu
 
-app=/Applications/OFTC.app
+app="/Applications/Open Forticlient.app"
+old_app=/Applications/OFTC.app
 cli=/usr/local/bin/oftc
 self=/usr/local/libexec/oftc/remove-package
 manpage=/usr/local/share/man/man1/oftc.1
@@ -13,12 +14,23 @@ if [ "$(/usr/bin/id -u)" != 0 ]; then
     echo 'Run this tool with sudo after per-user OFTC cleanup.' >&2
     exit 1
 fi
-if [ -L "$app" ] || [ ! -d "$app" ] ||
-   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist" 2>/dev/null)" != com.chris.openforticlient.oftc ]; then
-    echo 'Expected OFTC.app with the exact release bundle ID is missing; nothing removed.' >&2
+# The app installs as "Open Forticlient.app"; releases before 1.2 used OFTC.app.
+# Each copy present must be exactly our bundle, or nothing is removed.
+found=0
+for candidate in "$app" "$old_app"; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    if [ -L "$candidate" ] || [ ! -d "$candidate" ] ||
+       [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$candidate/Contents/Info.plist" 2>/dev/null)" != com.chris.openforticlient.oftc ]; then
+        echo "Unexpected item at $candidate (not the release bundle); nothing removed." >&2
+        exit 1
+    fi
+    found=1
+done
+if [ "$found" != 1 ]; then
+    echo 'The OFTC app with the exact release bundle ID is missing; nothing removed.' >&2
     exit 1
 fi
-if /usr/bin/pgrep -f '^/Applications/OFTC.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
+if /usr/bin/pgrep -f '^/Applications/(OFTC|Open Forticlient)\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)' >/dev/null 2>&1; then
     echo 'OFTC agent is running; stop it before uninstalling.' >&2
     exit 1
 fi
@@ -45,7 +57,7 @@ if printf '%s\n' "$extension_list" | /usr/bin/awk -v id="$provider_id" \
     exit 1
 fi
 
-/bin/rm -rf "$app"
+/bin/rm -rf "$app" "$old_app"
 /bin/rm -f "$cli" "$self" "$manpage"
 /bin/rmdir /usr/local/libexec/oftc 2>/dev/null || true
 /usr/sbin/pkgutil --forget com.chris.openforticlient.oftc.pkg >/dev/null

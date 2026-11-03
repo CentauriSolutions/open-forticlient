@@ -24,7 +24,7 @@
           'Disconnect OFTC from its controls or System Settings > VPN, then reopen this installer. Installer will ask to close the app. Your saved VPN settings will be kept.');
       }
       var app = system.run('/usr/bin/pgrep', '-f',
-        '^/Applications/OFTC\\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)');
+        '^/Applications/(OFTC|Open Forticlient)\\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)');
       // A running idle app is handled by must-close at the installation
       // stage. Rejecting it here makes that native closing step unreachable.
       if (app !== 0 && app !== 1) {
@@ -38,7 +38,7 @@
   <choice id="oftc" title="OFTC" description="Menu bar VPN client" visible="false">
     <pkg-ref id="com.chris.openforticlient.oftc.pkg"/>
   </choice>
-  <pkg-ref id="com.chris.openforticlient.oftc.pkg" version="1.1.7">OFTC-component.pkg</pkg-ref>
+  <pkg-ref id="com.chris.openforticlient.oftc.pkg" version="1.2.0">OFTC-component.pkg</pkg-ref>
   <pkg-ref id="com.chris.openforticlient.oftc.pkg">
     <must-close><app id="com.chris.openforticlient.oftc"/></must-close>
   </pkg-ref>

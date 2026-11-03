@@ -7,7 +7,7 @@ if [[ "$build" != "$root/build" && ! "$build" =~ '^/private/tmp/oftc-build-[A-Za
     print -u2 'OFTC_BUILD_DIR must be app/build or a /private/tmp/oftc-build-* path'
     exit 2
 fi
-package="$build/OFTC-1.1.7.pkg"
+package="$build/OFTC-1.2.0.pkg"
 : "${NOTARY_PROFILE:?Set NOTARY_PROFILE to a notarytool keychain profile name}"
 [[ -f "$package" ]] || { print -u2 'Signed package missing'; exit 2; }
 pkgutil --check-signature "$package"
