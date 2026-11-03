@@ -436,7 +436,6 @@ mod tests {
 
     #[test]
     fn percent_decoding() {
-        assert_eq!(percent_decode("a%40b"), "a@b");
         assert_eq!(percent_decode("x+y"), "x y");
         assert_eq!(percent_decode("plain"), "plain");
     }

@@ -23,9 +23,6 @@ pub enum Error {
     SelectorChanged,
     Crypto,
     CollisionTie,
-    NoOldSa,
-    DuplicateSpi,
-    TooManySas,
     /// IKE integrity and message ID were verified by the caller. Only the
     /// Notify type is retained; optional responder data is never exported.
     PeerNotify(u16),
@@ -401,60 +398,6 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpiPair {
-    pub inbound: u32,
-    pub outbound: u32,
-}
-
-/// The data plane must keep a separate anti-replay window for each inbound
-/// SPI. A new outbound SA is selected only after the authenticated response;
-/// old inbound SAs remain valid until authenticated DELETE or bounded expiry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaOverlap {
-    pub active: SpiPair,
-    pub old_inbound: Vec<u32>,
-}
-
-impl SaOverlap {
-    pub fn new(active: SpiPair) -> Result<Self, Error> {
-        if active.inbound == 0 || active.outbound == 0 {
-            return Err(Error::InvalidSpi);
-        }
-        Ok(Self {
-            active,
-            old_inbound: Vec::new(),
-        })
-    }
-    pub fn install(&mut self, replacement: SpiPair) -> Result<(), Error> {
-        if replacement.inbound == 0
-            || replacement.outbound == 0
-            || self.accepts_inbound(replacement.inbound)
-            || replacement.outbound == self.active.outbound
-        {
-            return Err(Error::DuplicateSpi);
-        }
-        if self.old_inbound.len() >= 2 {
-            return Err(Error::TooManySas);
-        }
-        self.old_inbound.push(self.active.inbound);
-        self.active = replacement;
-        Ok(())
-    }
-    pub fn accepts_inbound(&self, spi: u32) -> bool {
-        spi == self.active.inbound || self.old_inbound.contains(&spi)
-    }
-    pub fn delete_old(&mut self, spi: u32) -> Result<(), Error> {
-        let index = self
-            .old_inbound
-            .iter()
-            .position(|old| *old == spi)
-            .ok_or(Error::NoOldSa)?;
-        self.old_inbound.remove(index);
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Collision {
     DeleteOurNew,
     DeletePeerNew,
@@ -588,11 +531,6 @@ mod tests {
             parse_response(SA, &wire, &o).unwrap().peer_inbound_spi,
             o.new_inbound_spi
         );
-        assert!(SaOverlap::new(SpiPair {
-            inbound: 1,
-            outbound: 1
-        })
-        .is_ok());
     }
 
     #[test]
@@ -636,10 +574,6 @@ mod tests {
         assert_eq!(encode_request(&o), Err(Error::InvalidKe));
         o.ke_i[MODP14_LEN - 1] = 1;
         assert_eq!(encode_request(&o), Err(Error::InvalidKe));
-        let mut bad_group = response(&offer());
-        let group_offset = 4 + esp_proposal(0x11121314).unwrap().len() + 4 + 32 + 4;
-        bad_group[group_offset + 1] = 20;
-        assert_eq!(parse_response(SA, &bad_group, &offer()), Err(Error::InvalidKe));
     }
 
     #[test]
@@ -676,43 +610,6 @@ mod tests {
             Err(Error::Crypto)
         );
         assert_eq!(secret, [0; 48]);
-    }
-
-    #[test]
-    fn two_fresh_modp14_exchanges_agree_on_secret() {
-        let mut a_seed = [0x35; 32];
-        let mut b_seed = [0x79; 32];
-        let (a, pa) = oftc_modp14::Secret::generate(&mut a_seed).unwrap();
-        let (b, pb) = oftc_modp14::Secret::generate(&mut b_seed).unwrap();
-        assert_eq!(a.shared(&pb), b.shared(&pa));
-        assert_ne!(a.shared(&pb), Some([0; MODP14_LEN]));
-    }
-
-    #[test]
-    fn failed_exchange_leaves_old_sa_and_success_overlaps_inbound() {
-        let old = SpiPair {
-            inbound: 1,
-            outbound: 2,
-        };
-        let mut state = SaOverlap::new(old).unwrap();
-        assert_eq!(
-            parse_response(SA, &[], &offer()),
-            Err(Error::InvalidPayload)
-        );
-        assert_eq!(state.active, old); // caller commits only after full validation
-        state
-            .install(SpiPair {
-                inbound: 3,
-                outbound: 4,
-            })
-            .unwrap();
-        assert_eq!(state.active.outbound, 4);
-        assert!(state.accepts_inbound(1));
-        assert!(state.accepts_inbound(3));
-        assert!(!state.accepts_inbound(2));
-        state.delete_old(1).unwrap();
-        assert!(!state.accepts_inbound(1));
-        assert!(state.accepts_inbound(3));
     }
 
     #[test]

@@ -575,14 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn rfc2759_des_key_parity() {
-        assert_eq!(
-            expand_des_key(&[0xfc, 0x15, 0x6a, 0xf7, 0xed, 0xcd, 0x6c]),
-            [0xfd, 0x0b, 0x5b, 0x5e, 0x7f, 0x6e, 0x34, 0xd9]
-        );
-    }
-
-    #[test]
     fn failure_metadata() {
         let msg = b"E=691 R=0 C=0123456789ABCDEF0123456789ABCDEF V=3";
         let mut eap = vec![

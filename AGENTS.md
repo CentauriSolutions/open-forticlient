@@ -46,6 +46,15 @@ commit messages that say "Issue 13" mean GitHub issue #13.
   `scripts/require-check.sh --apply "<job name>"` and say so in the PR or issue.
   Do not add the check before its PR merges, or the merge queue waits on a check
   that never reports.
+- **Every test earns its place.** A unit test is added or kept only if it pins a
+  behaviour, branch or boundary that no other test already pins. Do not add a test to
+  raise a count, to re-assert a constant, or to re-test a dependency beyond the
+  known-answer vectors the code relies on. Two tests that exercise the same function
+  with the same class of input are one test: delete one, or fold them into a
+  table-driven test whose rows are distinct cases. A test that could not fail if the
+  code were broken is vacuous; fix it or delete it. When a change ports or moves code,
+  its tests move with it, and any that now duplicate another are dropped in the same
+  change with a note saying what covers the behaviour instead. Reviewers check this.
 - **Release dev assets when a test is done.** Every `OFTC.app` a build leaves
   under `/private/tmp` gets registered with Launch Services under the shipping
   bundle id, and stale copies keep old file-type declarations, icons and names

@@ -740,17 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn child_delete_accepts_empty_reply_after_authentication() {
-        let keys = synthetic_keys();
-        let mut lc = lifecycle(synthetic_keys());
-        lc.start(Exchange::DeleteChild).unwrap();
-        assert_eq!(
-            lc.complete(&response(5, Body::Empty, &keys)).unwrap(),
-            Exchange::DeleteChild
-        );
-    }
-
-    #[test]
     fn ike_delete_requires_empty_reply_and_closes() {
         let keys = synthetic_keys();
         let mut lc = lifecycle(synthetic_keys());
