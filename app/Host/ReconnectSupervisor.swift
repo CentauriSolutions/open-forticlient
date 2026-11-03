@@ -13,9 +13,7 @@ final class SupervisorLease {
     let identifier = UUID().uuidString
     private var descriptor: Int32 = -1
 
-    init(bundleID: String, directory: URL? = nil) throws {
-        let parent = directory ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/\(bundleID)", isDirectory: true)
+    init(directory parent: URL) throws {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         stateURL = parent.appendingPathComponent("supervisor.lock")
@@ -35,9 +33,7 @@ final class SupervisorLease {
         try? FileManager.default.removeItem(at: stopURL)
     }
 
-    @discardableResult static func requestStop(bundleID: String, directory: URL? = nil) -> Bool {
-        let parent = directory ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/\(bundleID)", isDirectory: true)
+    @discardableResult static func requestStop(directory parent: URL) -> Bool {
         let state = parent.appendingPathComponent("supervisor.lock")
         guard FileManager.default.fileExists(atPath: state.path) else { return true }
         guard let bytes = try? Data(contentsOf: state),
@@ -68,6 +64,32 @@ final class SupervisorLease {
     }
 
     deinit { close() }
+}
+
+// Serializes SAML browser sign-ins across all profiles and processes.
+final class SAMLAcquisitionLock {
+    private var descriptor: Int32
+
+    init?(root: URL, cancelled: () -> Bool, pollInterval: TimeInterval = 0.25) {
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        descriptor = open(root.appendingPathComponent("saml.lock").path,
+                          O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { return nil }
+        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            if cancelled() { Darwin.close(descriptor); descriptor = -1; return nil }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+    }
+
+    func release() {
+        guard descriptor >= 0 else { return }
+        flock(descriptor, LOCK_UN)
+        Darwin.close(descriptor)
+        descriptor = -1
+    }
+
+    deinit { release() }
 }
 
 struct ReconnectPolicy {
@@ -114,7 +136,10 @@ final class ReconnectSupervisor {
     private let mode: ProviderStartEnvelope.ConnectMode
     private let insecure: Bool
     private let lease: SupervisorLease
+    private let entry: OFTCProfileEntry
     private let loadPSK: () throws -> Data
+    // Reviews an untrusted gateway certificate with the user; nil disables it.
+    var reviewCertificate: ((String, UInt32) -> GatewayTrust.Outcome)?
     private var policy = ReconnectPolicy()
     private var observer: NSObjectProtocol?
     private var timer: DispatchSourceTimer?
@@ -153,7 +178,9 @@ final class ReconnectSupervisor {
     init(manager: NETunnelProviderManager, providerID: String,
          gateway: String, samlPort: UInt32,
          mode: ProviderStartEnvelope.ConnectMode, insecure: Bool,
-         lease: SupervisorLease, loadPSK: @escaping () throws -> Data) {
+         lease: SupervisorLease, entry: OFTCProfileEntry,
+         loadPSK: @escaping () throws -> Data) {
+        self.entry = entry
         self.manager = manager
         self.providerID = providerID
         self.gateway = gateway
@@ -162,8 +189,7 @@ final class ReconnectSupervisor {
         self.insecure = insecure
         self.lease = lease
         self.loadPSK = loadPSK
-        self.statusStore = SupervisorStatusStore(bundleID:
-            String(providerID.dropLast(".provider".count)))
+        self.statusStore = SupervisorStatusStore(directory: entry.directory)
     }
 
     func run() {
@@ -231,8 +257,7 @@ final class ReconnectSupervisor {
                     return
                 }
                 let matching = (managers ?? []).filter {
-                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?
-                        .providerBundleIdentifier == self.providerID
+                    OFTCProfileScope.matches($0, providerID: self.providerID, entry: self.entry)
                 }
                 guard matching.count == 1, let fresh = matching.first else {
                     self.stop("OFTC configuration changed during supervision", code: 1)
@@ -278,9 +303,14 @@ final class ReconnectSupervisor {
             var psk = Data()
             var options: [String: NSObject]?
             var beforeBrowser = false
+            var trust = GatewayTrust.Outcome.notACertificateProblem
             do {
                 psk = try self.loadPSK()
-                if !self.lease.stopRequested {
+                // One browser sign-in at a time: each listens on a local port.
+                let samlLock = SAMLAcquisitionLock(root: self.entry.root,
+                                                   cancelled: { self.lease.stopRequested })
+                defer { samlLock?.release() }
+                if samlLock != nil, !self.lease.stopRequested {
                     options = try CandidateHostBridge.acquireOptions(
                         gateway: self.gateway, psk: psk, samlPort: self.samlPort,
                         insecure: self.insecure)
@@ -288,6 +318,9 @@ final class ReconnectSupervisor {
                 }
             } catch CandidateHostBridge.Failure.beforeBrowser {
                 beforeBrowser = true
+                if !self.insecure, !self.lease.stopRequested, let review = self.reviewCertificate {
+                    trust = review(self.gateway, self.samlPort)
+                }
             } catch { }
             psk.resetBytes(in: 0..<psk.count)
             DispatchQueue.main.async {
@@ -295,7 +328,12 @@ final class ReconnectSupervisor {
                 guard !self.lease.stopRequested else {
                     self.stop("Supervisor stopped", code: 0); return
                 }
+                if trust == .declined {
+                    self.stop("Gateway certificate not trusted; supervisor stopped", code: 1)
+                    return
+                }
                 guard let options else {
+                    if case .trusted = trust { self.unreachableBackoff = 1 }
                     if beforeBrowser, !self.lease.stopRequested,
                        self.manager.connection.status == .disconnected,
                        let deadline = self.acquisitionDeadline, Date() < deadline {
@@ -316,8 +354,8 @@ final class ReconnectSupervisor {
                 self.manager.loadFromPreferences { error in
                     guard !self.stopped else { return }
                     guard error == nil, self.manager.isEnabled,
-                          (self.manager.protocolConfiguration as? NETunnelProviderProtocol)?
-                            .providerBundleIdentifier == self.providerID,
+                          OFTCProfileScope.matches(self.manager, providerID: self.providerID,
+                                                   entry: self.entry),
                           self.manager.connection.status == .disconnected,
                           !self.lease.stopRequested else {
                         self.stop("OFTC configuration or status changed before start", code: 1)

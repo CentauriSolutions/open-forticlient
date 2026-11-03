@@ -9,16 +9,34 @@ struct OFTCProfile: Codable, Equatable {
     let gateway: String
     let samlPort: UInt32
     let transport: Transport
+    // Optional so profiles written before multi-profile support still decode.
+    let name: String?
+    // True for the profile that inherited the original unkeyed VPN entry.
+    let adoptsUnkeyedVPNEntry: Bool?
 
-    init(gateway: String, samlPort: UInt32, transport: Transport = .udp) throws {
+    init(gateway: String, samlPort: UInt32, transport: Transport = .udp,
+         name: String? = nil, adoptsUnkeyedVPNEntry: Bool? = nil) throws {
         version = 1
         self.gateway = gateway
         self.samlPort = samlPort
         self.transport = transport
+        self.name = name
+        self.adoptsUnkeyedVPNEntry = adoptsUnkeyedVPNEntry
         try validate()
     }
 
+    var displayName: String { name ?? gateway }
+
+    func with(name: String?, adoptsUnkeyedVPNEntry: Bool? = nil) throws -> OFTCProfile {
+        try OFTCProfile(gateway: gateway, samlPort: samlPort, transport: transport,
+                        name: name, adoptsUnkeyedVPNEntry: adoptsUnkeyedVPNEntry ?? self.adoptsUnkeyedVPNEntry)
+    }
+
     func validate() throws {
+        if let name, !(1...64).contains(name.utf8.count) ||
+            name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            throw OFTCProfileStore.Failure.invalid
+        }
         guard version == 1, (1...65535).contains(samlPort),
               (1...253).contains(gateway.utf8.count),
               gateway.utf8.allSatisfy({ byte in

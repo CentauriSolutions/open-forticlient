@@ -82,7 +82,10 @@ enum TrafficFormat {
     }
 }
 
-struct MenuPresentation {
+// One profile's row in the menu: its own state, stats and startup choice.
+struct TunnelPresentation {
+    var id: String
+    var name: String
     var state: MenuConnectionState = .disconnected
     var description = "Ready when you are."
     var duration = "—"
@@ -91,37 +94,73 @@ struct MenuPresentation {
     var totals = "—"
     var history: [TrafficRatePoint] = []
     var historyTime: TimeInterval = 0
+    var autoStart = false
     var busy = false
 
     var action: String {
         switch state {
         case .connected: return "Disconnect"
-        case .connecting, .signingIn, .reconnecting: return "Cancel connection"
+        case .connecting, .signingIn, .reconnecting: return "Cancel"
         case .disconnecting: return "Disconnecting…"
-        case .setup: return "Set up OFTC…"
+        case .setup: return "Set up…"
         default: return "Connect"
         }
     }
+}
+
+struct MenuPresentation {
+    var tunnels: [TunnelPresentation] = []
+    var busy = false
+    var notice: String?
+
+    var anyActive: Bool { tunnels.contains { $0.state.active } }
+    var anyConnected: Bool { tunnels.contains { $0.state == .connected } }
+    var anyAttention: Bool { tunnels.contains { $0.state == .attention } }
+    var needsSetup: Bool { tunnels.isEmpty }
+
+    // One line for the status item's tooltip and accessibility label.
+    var summary: String {
+        if tunnels.isEmpty { return MenuConnectionState.setup.title }
+        let connected = tunnels.filter { $0.state == .connected }.count
+        if tunnels.count == 1 { return tunnels[0].state.title }
+        var text = "\(connected) of \(tunnels.count) connected"
+        if anyAttention { text += ", needs attention" }
+        return text
+    }
 
     static func preview(_ state: MenuConnectionState) -> Self {
-        var result = Self(state: state, description: state.detail)
-        switch state {
-        case .connected:
-            result.description = "vpn.example.com"
-            result.duration = "42m 18s"
-            result.receiving = "1.2 MB/s"
-            result.sending = "84 KB/s"
-            result.totals = "842 MB / 96 MB"
-            result.historyTime = 60
-            let receive = [0.12, 0.15, 0.25, 0.9, 1.4, 0.85, 0.3, 0.18, 0.2, 0.55, 1.15, 0.6]
-            let send = [12.0, 22, 60, 32, 18, 16, 10, 42, 74, 30, 15, 18]
-            result.history = (0..<60).map { index in
-                TrafficRatePoint(time: Double(index + 1),
-                    receiving: index == 59 ? 1_200_000 : receive[index % receive.count] * 1_000_000,
-                    sending: index == 59 ? 84_000 : send[index % send.count] * 1000)
-            }
-        default: break
+        guard state != .setup else { return Self() }
+        var first = TunnelPresentation(id: "c2", name: "Office VPN")
+        first.state = .connected
+        first.description = "vpn.office.example"
+        first.duration = "42m 18s"
+        first.receiving = "1.2 MB/s"
+        first.sending = "84 KB/s"
+        first.totals = "842 MB / 96 MB"
+        first.autoStart = true
+        first.historyTime = 60
+        let receive = [0.12, 0.15, 0.25, 0.9, 1.4, 0.85, 0.3, 0.18, 0.2, 0.55, 1.15, 0.6]
+        let send = [12.0, 22, 60, 32, 18, 16, 10, 42, 74, 30, 15, 18]
+        first.history = (0..<60).map { index in
+            TrafficRatePoint(time: Double(index + 1),
+                receiving: index == 59 ? 1_200_000 : receive[index % receive.count] * 1_000_000,
+                sending: index == 59 ? 84_000 : send[index % send.count] * 1000)
         }
-        return result
+        var second = TunnelPresentation(id: "warehouse", name: "Warehouse")
+        second.state = state
+        second.description = state == .connected ? "vpn.lab.example.com" : state.detail
+        if state == .disconnected { second.description = "vpn.lab.example.com" }
+        if state == .connected {
+            second.duration = "6m 02s"
+            second.receiving = "210 KB/s"
+            second.sending = "32 KB/s"
+            second.totals = "58 MB / 7.2 MB"
+            second.historyTime = first.historyTime
+            second.history = first.history.map {
+                TrafficRatePoint(time: $0.time, receiving: $0.receiving.map { $0 / 6 },
+                                 sending: $0.sending.map { $0 / 3 })
+            }
+        }
+        return Self(tunnels: [first, second])
     }
 }

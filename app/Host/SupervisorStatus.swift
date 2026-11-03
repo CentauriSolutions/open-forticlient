@@ -14,10 +14,7 @@ struct SupervisorStatus: Codable {
 
 struct SupervisorStatusStore {
     let directory: URL
-    init(bundleID: String, directory: URL? = nil) {
-        self.directory = directory ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/\(bundleID)", isDirectory: true)
-    }
+    init(directory: URL) { self.directory = directory }
     private var url: URL { directory.appendingPathComponent("supervisor-status.json") }
 
     func publish(_ phase: SupervisorPhase, leaseID: String) {

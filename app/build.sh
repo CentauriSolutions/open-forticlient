@@ -36,6 +36,9 @@ cp "$root/Host/LaunchAgent.plist" "$agent_plist"
 plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent_plist"
 
 cp "$root/assets/OFTC.icns" "$app/Contents/Resources/OFTC.icns"
+cp "$root/assets/OFTCDocument.icns" "$app/Contents/Resources/OFTCDocument.icns"
+mkdir -p "$app/Contents/Resources/en.lproj"
+cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/InfoPlist.strings"
 
 xcrun swiftc -swift-version 5 -target "$target" -O -emit-library \
     -Xlinker -install_name -Xlinker '@rpath/libcrypto_swift.dylib' \
@@ -89,7 +92,7 @@ rustc --edition=2021 --test "$root/Host/migration.rs" -o "$build/migration-tests
 "$build/migration-tests"
 xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
-    -framework ServiceManagement -framework SystemExtensions \
+    -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \
     -L "$app_frameworks" -l oftc_host_bootstrap \
     "$build/liboftc_migration.a" \
     -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
@@ -97,6 +100,10 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/CandidateHostBridge.swift" \
     "$root/Host/MigrationBridge.swift" \
     "$root/Host/OFTCProfile.swift" \
+    "$root/Host/ProfileScope.swift" \
+    "$root/Host/ProfileBundle.swift" \
+    "$root/Host/GatewayTrust.swift" \
+    "$root/Host/GatewayTrustPrompt.swift" \
     "$root/Host/Onboarding.swift" \
     "$root/Host/LaunchExperience.swift" \
     "$root/Host/ProviderReadiness.swift" \
@@ -145,6 +152,10 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Provider/BootstrapInput.swift" \
     "$root/Host/ReconnectSupervisor.swift" \
     "$root/Host/SupervisorStatus.swift" \
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" \
+    "$root/Host/AgentIntent.swift" \
+    "$root/Host/ProfileBundle.swift" \
+    "$root/Host/GatewayTrust.swift" \
     "$root/Host/check-supervisor.swift" \
     -o "$build/supervisor-check"
 "$build/supervisor-check"
@@ -156,6 +167,7 @@ xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
     "$root/Host/MenuModel.swift" "$root/Host/AgentIntent.swift" \
     "$root/Host/TrafficHistory.swift" \
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" \
     "$root/Host/SupervisorStatus.swift" "$root/support/TrafficStatistics.swift" \
     "$root/Host/check-menu.swift" -o "$build/menu-check"
 "$build/menu-check"

@@ -1,6 +1,8 @@
 # Large, regenerable reverse-engineering inputs (see tools/README.md)
 *.asm
 *.strings
+# The app's localized display name is source, not a strings dump.
+!app/Host/en.lproj/InfoPlist.strings
 *_x86
 *_x86_64
 *.thin

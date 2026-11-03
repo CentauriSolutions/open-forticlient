@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>OFTCAgent</string>
-        <string>supervise-profile</string>
+        <string>supervise-autostart</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

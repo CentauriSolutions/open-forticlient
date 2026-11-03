@@ -12,6 +12,8 @@ import NetworkExtension
         // explicit preference exists, it governs every unrequested launch.
         precondition(intent.shouldStart(now: now))
         precondition(!intent.connectAtLogin(legacyEnabled: false))
+        let fresh = AgentIntent(bundleID: "test.oftc", directory: directory.appendingPathComponent("fresh"))
+        precondition(!fresh.shouldStart(now: now, legacyEnabled: false)) // new profiles start off
         try intent.setConnectAtLogin(false)
         precondition(!intent.shouldStart(now: now))
         try intent.request(connect: true, now: now)
@@ -153,6 +155,22 @@ import NetworkExtension
         precondition(history.points.count == 1)
         let clockStart = TrafficHistoryClock.now
         precondition(TrafficHistoryClock.now >= clockStart)
+        var first = TunnelPresentation(id: "c2", name: "Office VPN")
+        var second = TunnelPresentation(id: "warehouse", name: "Warehouse")
+        precondition(MenuPresentation().needsSetup && MenuPresentation().summary == "Set up your VPN")
+        var menu = MenuPresentation(tunnels: [first, second])
+        precondition(!menu.anyActive && !menu.anyConnected && menu.summary == "0 of 2 connected")
+        first.state = .connected
+        second.state = .signingIn
+        menu = MenuPresentation(tunnels: [first, second])
+        precondition(menu.anyActive && menu.anyConnected && !menu.anyAttention)
+        precondition(menu.summary == "1 of 2 connected")
+        second.state = .attention
+        menu = MenuPresentation(tunnels: [first, second])
+        precondition(menu.anyAttention && menu.summary == "1 of 2 connected, needs attention")
+        precondition(first.action == "Disconnect" && TunnelPresentation(id: "x", name: "X").action == "Connect")
+        precondition(MenuPresentation.preview(.setup).needsSetup)
+        precondition(MenuPresentation.preview(.reconnecting).tunnels.count == 2)
         print("menu state, startup intent, traffic rates, bounded history and sparkline gap checks passed")
     }
 }

@@ -46,7 +46,7 @@ struct AgentIntent {
 
     func cancelRequest() { try? FileManager.default.removeItem(at: requestURL) }
 
-    func shouldStart(now: Date = Date()) -> Bool {
+    func shouldStart(now: Date = Date(), legacyEnabled: Bool = true) -> Bool {
         if let data = try? Data(contentsOf: requestURL), data.count <= 4096,
            let request = try? JSONDecoder().decode(Request.self, from: data) {
             cancelRequest()
@@ -55,6 +55,6 @@ struct AgentIntent {
         }
         // Preserve an already registered pre-menu-bar agent on upgrade. New
         // connections initialize the preference explicitly before registration.
-        return connectAtLogin(legacyEnabled: true)
+        return connectAtLogin(legacyEnabled: legacyEnabled)
     }
 }

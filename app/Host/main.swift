@@ -10,6 +10,29 @@ private let appID = Bundle.main.bundleIdentifier ?? ""
 private let providerID = appID + ".provider"
 private let keychainService = appID + ".psk"
 private var activeSupervisor: ReconnectSupervisor?
+// Set from a leading `--profile <id>`. Without it, the only configured
+// profile is used; several profiles require an explicit choice.
+private var selectedProfile: String?
+private let profileRoot = OFTCProfileScope.defaultRoot(bundleID: appID)
+
+private func allEntries() -> [OFTCProfileEntry] { OFTCProfileScope.entries(root: profileRoot) }
+
+private func requireEntry() -> OFTCProfileEntry {
+    let entries = allEntries()
+    if let id = selectedProfile {
+        guard let entry = entries.first(where: { $0.id == id }) else {
+            finish("OFTC profile unavailable: no profile named \(id); run oftc setup", code: 1)
+        }
+        return entry
+    }
+    if entries.count == 1 { return entries[0] }
+    if entries.isEmpty { finish("OFTC profile unavailable; run oftc setup", code: 1) }
+    finish("Several OFTC profiles are configured; choose one with --profile <id> (\(entries.map(\.id).joined(separator: ", ")))", code: 1)
+}
+
+private func belongs(_ manager: NETunnelProviderManager) -> Bool {
+    OFTCProfileScope.matches(manager, providerID: providerID, entry: requireEntry())
+}
 
 private func finish(_ message: String, code: Int32 = 0) -> Never {
     print(message)
@@ -18,11 +41,10 @@ private func finish(_ message: String, code: Int32 = 0) -> Never {
 }
 
 private func loadManager(_ completion: @escaping (NETunnelProviderManager?) -> Void) {
+    let entry = requireEntry()
     NETunnelProviderManager.loadAllFromPreferences { managers, error in
         if error != nil { finish("Could not load VPN configuration", code: 1) }
-        let matching = (managers ?? []).filter {
-            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerID
-        }
+        let matching = OFTCProfileScope.manager(for: entry, in: managers ?? [], providerID: providerID)
         if matching.count > 1 { finish("Multiple OFTC configurations; refusing to guess", code: 1) }
         completion(matching.first)
     }
@@ -132,8 +154,7 @@ private func startWithManager(_ manager: NETunnelProviderManager,
     // configuration or connection while the browser flow was in progress.
     manager.loadFromPreferences { error in
         guard error == nil, manager.isEnabled,
-              (manager.protocolConfiguration as? NETunnelProviderProtocol)?
-                  .providerBundleIdentifier == providerID,
+              belongs(manager),
               manager.connection.status == .disconnected else {
             finish("OFTC configuration or status changed before start", code: 1)
         }
@@ -165,8 +186,7 @@ private func rekeyOnce(ike: Bool = false) {
         guard let manager else { finish("No OFTC configuration", code: 1) }
         manager.loadFromPreferences { error in
             guard error == nil, manager.isEnabled,
-                  (manager.protocolConfiguration as? NETunnelProviderProtocol)?
-                    .providerBundleIdentifier == providerID,
+                  belongs(manager),
                   manager.connection.status == .connected,
                   let session = manager.connection as? NETunnelProviderSession else {
                 finish("OFTC VPN is not connected", code: 1)
@@ -294,18 +314,26 @@ private func startMode(_ flags: [String]) -> (ProviderStartEnvelope.ConnectMode,
     return (mode, insecure)
 }
 
-private func profileStore() -> OFTCProfileStore {
-    guard let store = try? OFTCProfileStore(bundleID: appID) else {
-        finish("Invalid OFTC app identity", code: 1)
+private func storedProfile() -> OFTCProfile { requireEntry().profile }
+
+// Looks up the FortiClient name of a profile with this gateway, used to name
+// the profile migrated from the original single-profile layout.
+private func fortiClientName(forGateway gateway: String) -> String? {
+    let plist = URL(fileURLWithPath: "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist")
+    guard let data = try? Data(contentsOf: plist), data.count <= 4_000_000,
+          let root = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+          let profiles = root["Profiles"] as? [String: Any] else { return nil }
+    return profiles.keys.sorted().first {
+        (profiles[$0] as? [String: Any])?["Server"] as? String == gateway
     }
-    return store
 }
 
-private func storedProfile() -> OFTCProfile {
-    guard let profile = try? profileStore().load() else {
-        finish("OFTC profile unavailable; run oftc setup", code: 1)
+private func newProfile(_ profile: OFTCProfile) -> OFTCProfileEntry {
+    if allEntries().contains(where: { $0.profile.gateway == profile.gateway }) {
+        finish("OFTC already has a profile for \(profile.gateway)", code: 1)
     }
-    return profile
+    do { return try OFTCProfileScope.add(profile, root: profileRoot, id: selectedProfile) }
+    catch { finish("Could not save OFTC profile (a profile with that id may already exist)", code: 1) }
 }
 
 private func runLive(gateway: String, port: UInt32,
@@ -315,19 +343,27 @@ private func runLive(gateway: String, port: UInt32,
         guard let manager else { finish("No OFTC configuration; run install-config", code: 1) }
         manager.loadFromPreferences { error in
             guard error == nil, manager.isEnabled,
-                  (manager.protocolConfiguration as? NETunnelProviderProtocol)?
-                    .providerBundleIdentifier == providerID,
+                  belongs(manager),
                   manager.connection.status == .disconnected else {
                 finish("OFTC configuration unavailable or VPN already active", code: 1)
             }
             if supervised {
                 let lease: SupervisorLease
-                do { lease = try SupervisorLease(bundleID: appID) }
+                let entry = requireEntry()
+                // Named on the browser's sign-in confirmation page.
+                setenv("OFTC_PROFILE_NAME", entry.name, 1)
+                setenv("OFTC_PROFILE_GATEWAY", gateway, 1)
+                do { lease = try SupervisorLease(directory: entry.directory) }
                 catch { finish("Another OFTC supervisor is active", code: 1) }
                 let supervisor = ReconnectSupervisor(
                     manager: manager, providerID: providerID, gateway: gateway,
                     samlPort: port, mode: mode, insecure: insecure, lease: lease,
+                    entry: entry,
                     loadPSK: { try lookupPSK(for: gateway) })
+                supervisor.reviewCertificate = { host, port in
+                    GatewayTrust.review(host: host, port: port, profileName: entry.name,
+                                        prompt: GatewayTrustPrompt.present)
+                }
                 activeSupervisor = supervisor
                 supervisor.run()
                 return
@@ -347,8 +383,56 @@ private func runLive(gateway: String, port: UInt32,
     dispatchMain()
 }
 
-private let usage = "Usage: OFTCAgent activate|deactivate|agent-status|register-agent|unregister-agent|install-config|save-profile <gateway> <saml-port> [--tcp]|import-profile <FortiClient-profile>|import-development-profile|show-profile|erase-profile|has-psk|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
-let args = Array(CommandLine.arguments.dropFirst())
+// Runs as the login agent: starts a supervisor process for every profile whose
+// connect-at-login choice (or a one-use request) says to connect. Supervisors
+// serialize their own SAML sign-ins, so they can all start at once.
+private func superviseAutostart() -> Never {
+    do { try OFTCAgentService.redirectSupervisorOutput() }
+    catch { finish(error.localizedDescription, code: 1) }
+    var children: [Process] = []
+    for entry in allEntries() where OFTCAgentService.intent(for: entry).shouldStart(
+        legacyEnabled: entry.profile.adoptsUnkeyedVPNEntry == true) {
+        guard let executable = Bundle.main.executableURL else { continue }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--profile", entry.id, "supervise-profile"]
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "OFTC_BUNDLED_AGENT")
+        process.environment = environment
+        let logs = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/OFTC", isDirectory: true)
+        let logURL = logs.appendingPathComponent(entry.id + ".log")
+        if let descriptor = Optional(open(logURL.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)),
+           descriptor >= 0 {
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            process.standardOutput = handle
+            process.standardError = handle
+        }
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run(); children.append(process) }
+        catch { print("Could not start supervisor for \(entry.id)") }
+    }
+    if children.isEmpty { finish("OFTC automatic VPN connection is disabled for every profile") }
+    for process in children { process.waitUntilExit() }
+    finish("OFTC supervisors exited")
+}
+
+private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+var args = Array(CommandLine.arguments.dropFirst())
+if args.first == "--profile" {
+    guard args.count >= 3, OFTCProfileScope.isValidID(args[1]) else {
+        finish("--profile needs a name of 1-32 lowercase letters, digits or hyphens", code: 2)
+    }
+    selectedProfile = args[1]
+    args.removeFirst(2)
+}
+if args.first == "review-certificate" {
+    GatewayTrustPrompt.runChild()
+}
+// Previews must not touch real profiles.
+if !["preview-menu", "render-menu-previews"].contains(args.first ?? "") {
+    OFTCProfileScope.migrateLegacy(root: profileRoot, nameForGateway: fortiClientName(forGateway:))
+}
 if args.isEmpty {
     OFTCMenuBar.run(appID: appID)
 }
@@ -366,15 +450,6 @@ case "render-menu-previews" where args.count == 2:
     do { try OFTCMenuBar.renderPreviews(to: URL(fileURLWithPath: args[1], isDirectory: true)) }
     catch { finish("Could not render menu previews: \(error)", code: 1) }
 
-case "prepare-connect" where args.count == 1:
-    do { try OFTCAgentService.prepareConnect() }
-    catch { finish("Could not prepare an OFTC connection", code: 1) }
-    finish("OFTC connection requested")
-
-case "cancel-connect-request" where args.count == 1:
-    AgentIntent(bundleID: appID).cancelRequest()
-    finish("OFTC connection request cancelled")
-
 case "unregister-menu-login" where args.count == 1:
     if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
         do { try SMAppService.mainApp.unregister() }
@@ -391,7 +466,20 @@ case "agent-status" where args.count == 1:
     finish(OFTCAgentService.status)
 
 case "login-settings" where args.count == 1:
-    finish("Menu launch at login: \(SMAppService.mainApp.status == .enabled ? "enabled" : "disabled")\nVPN connect at login: \(OFTCAgentService.connectAtLogin ? "enabled" : "disabled")")
+    var lines = ["Menu launch at login: \(SMAppService.mainApp.status == .enabled ? "enabled" : "disabled")"]
+    for entry in allEntries() {
+        lines.append("VPN connect at login (\(entry.id)): \(OFTCAgentService.connectAtLogin(entry) ? "enabled" : "disabled")")
+    }
+    finish(lines.joined(separator: "\n"))
+
+case "set-autostart" where args.count == 2 && ["on", "off"].contains(args[1]):
+    let entry = requireEntry()
+    do { try OFTCAgentService.setConnectAtLogin(args[1] == "on", for: entry) }
+    catch { finish("Could not change automatic connection: \(error.localizedDescription)", code: 1) }
+    finish("Connect at login for \(entry.id): \(args[1])")
+
+case "supervise-autostart" where args.count == 1:
+    superviseAutostart()
 
 case "register-agent" where args.count == 1:
     do { try OFTCAgentService.register() }
@@ -413,14 +501,16 @@ case "activate" where args.count == 1, "deactivate" where args.count == 1:
     withExtendedLifetime(delegate) { dispatchMain() }
 
 case "install-config" where args.count == 1:
+    let entry = requireEntry()
     loadManager { existing in
         if existing != nil { finish("OFTC configuration already exists") }
         let manager = NETunnelProviderManager()
         let configuration = NETunnelProviderProtocol()
         configuration.providerBundleIdentifier = providerID
         configuration.serverAddress = "OFTC" // Display label only, never a secret.
+        configuration.providerConfiguration = [OFTCProfileScope.configurationKey: entry.id]
         manager.protocolConfiguration = configuration
-        manager.localizedDescription = "OFTC VPN"
+        manager.localizedDescription = "OFTC VPN (\(entry.name))"
         manager.isEnabled = true
         manager.saveToPreferences { error in
             if error != nil { finish("Could not save OFTC configuration", code: 1) }
@@ -459,13 +549,20 @@ case "migrate-psk" where args.count == 3:
     psk.resetBytes(in: 0..<psk.count)
     finish("Existing local profile PSK migrated into OFTC Keychain")
 
-case "save-profile" where args.count == 3 || (args.count == 4 && args[3] == "--tcp"):
+case "save-profile" where args.count >= 3:
+    var transport = OFTCProfile.Transport.udp
+    var name: String?
+    var rest = Array(args.dropFirst(3))
+    while let flag = rest.first {
+        if flag == "--tcp" { transport = .tcp; rest.removeFirst() }
+        else if flag == "--name", rest.count >= 2 { name = rest[1]; rest.removeFirst(2) }
+        else { finish(usage, code: 2) }
+    }
     guard let port = UInt32(args[2]),
           let profile = try? OFTCProfile(gateway: args[1], samlPort: port,
-              transport: args.count == 4 ? .tcp : .udp) else { finish(usage, code: 2) }
-    do { try profileStore().save(profile) }
-    catch { finish("Could not save OFTC profile", code: 1) }
-    finish("OFTC profile saved")
+              transport: transport, name: name) else { finish(usage, code: 2) }
+    let entry = newProfile(profile)
+    finish("OFTC profile saved: id=\(entry.id)")
 
 case "import-profile" where args.count == 2:
     // Only this explicit command loads FortiClient configuration. Normal
@@ -475,57 +572,130 @@ case "import-profile" where args.count == 2:
     catch { finish("Could not import FortiClient profile", code: 1) }
     defer { imported.psk.resetBytes(in: 0..<imported.psk.count) }
     let profile: OFTCProfile
-    do { profile = try OFTCProfile(gateway: imported.gateway, samlPort: imported.samlPort) }
+    do { profile = try OFTCProfile(gateway: imported.gateway, samlPort: imported.samlPort,
+                                   name: args[1]) }
     catch { finish("Imported profile has invalid connection settings", code: 1) }
     savePSK(imported.psk, for: profile.gateway)
-    do { try profileStore().save(profile) }
-    catch { finish("PSK saved but OFTC profile could not be saved", code: 1) }
-    finish("FortiClient profile imported into OFTC configuration and Keychain")
+    let entry = newProfile(profile)
+    finish("FortiClient profile imported into OFTC configuration and Keychain: id=\(entry.id)")
 
 case "import-development-profile" where args.count == 1:
     // The old profile is nonsecret. Its Keychain PSK needs separate explicit
     // provisioning under the new signed identity.
-    let destination = profileStore()
-    guard (try? destination.load()) == nil else {
-        finish("OFTC profile already exists; migration did not overwrite it", code: 1)
-    }
     let profile: OFTCProfile
     do {
         profile = try OFTCProfileStore(bundleID: "com.chris.openforticlient.gate0").load()
-        try destination.save(profile)
+            .with(name: "Development")
     } catch { finish("Could not import development profile", code: 1) }
-    finish("Development profile copied; provision its PSK before connecting")
+    let entry = newProfile(profile)
+    finish("Development profile copied; provision its PSK before connecting: id=\(entry.id)")
+
+case "export-profiles":
+    // Writes a shareable bundle of the named profile ids (all when none) to
+    // stdout, including each PSK from the Keychain.
+    let wanted = Array(args.dropFirst())
+    let chosen = wanted.isEmpty ? allEntries() : wanted.map { id in
+        guard let entry = allEntries().first(where: { $0.id == id }) else {
+            finish("OFTC profile unavailable: no profile named \(id)", code: 1)
+        }
+        return entry
+    }
+    if chosen.isEmpty { finish("No OFTC profiles to export", code: 1) }
+    let items: [OFTCProfileBundle.Item] = chosen.map { entry in
+        guard var psk = try? lookupPSK(for: entry.profile.gateway),
+              let text = String(data: psk, encoding: .utf8) else {
+            finish("PSK unavailable for \(entry.name); nothing exported", code: 1)
+        }
+        psk.resetBytes(in: 0..<psk.count)
+        return OFTCProfileBundle.Item(
+            name: entry.name, gateway: entry.profile.gateway, samlPort: entry.profile.samlPort,
+            transport: entry.profile.transport, psk: text)
+    }
+    guard let data = try? OFTCProfileBundle(profiles: items).encoded() else {
+        finish("Could not write the profile file", code: 1)
+    }
+    FileHandle.standardOutput.write(data)
+    exit(0)
+
+case "import-profiles" where args.count == 1:
+    // Reads a bundle from stdin. A gateway that already has a profile is
+    // skipped, so importing never changes an existing profile or its PSK.
+    let input = (try? FileHandle.standardInput.read(upToCount: OFTCProfileBundle.maxBytes + 1)) ?? Data()
+    let incoming: [(profile: OFTCProfile, psk: Data)]
+    do { incoming = try OFTCProfileBundle.decode(input) }
+    catch let failure as OFTCProfileBundle.Failure { finish(failure.message, code: 1) }
+    catch { finish("Could not read that profile file", code: 1) }
+    var lines: [String] = []
+    for var item in incoming {
+        defer { item.psk.resetBytes(in: 0..<item.psk.count) }
+        if allEntries().contains(where: { $0.profile.gateway == item.profile.gateway }) {
+            lines.append("Skipped \(item.profile.displayName): already configured")
+            continue
+        }
+        savePSK(item.psk, for: item.profile.gateway)
+        guard let entry = try? OFTCProfileScope.add(item.profile, root: profileRoot) else {
+            finish("Could not save the profile \"\(item.profile.displayName)\"", code: 1)
+        }
+        lines.append("Imported \(entry.name): id=\(entry.id)")
+    }
+    finish(lines.joined(separator: "\n"))
+
+case "list-profiles" where args.count == 1:
+    // id, display name, gateway, SAML port, transport; tab separated.
+    let lines = allEntries().map {
+        [$0.id, $0.name, $0.profile.gateway, String($0.profile.samlPort),
+         $0.profile.transport.rawValue].joined(separator: "\t")
+    }
+    finish(lines.joined(separator: "\n"))
 
 case "show-profile" where args.count == 1:
-    let profile = storedProfile()
-    finish("OFTC profile: gateway=\(profile.gateway) saml-port=\(profile.samlPort) transport=\(profile.transport.rawValue)")
+    let entry = requireEntry()
+    let profile = entry.profile
+    finish("OFTC profile \(entry.id) (\(entry.name)): gateway=\(profile.gateway) saml-port=\(profile.samlPort) transport=\(profile.transport.rawValue)")
 
 case "erase-profile" where args.count == 1:
-    loadManager { manager in
-        if let manager, manager.connection.status != .disconnected,
-           manager.connection.status != .invalid {
-            finish("Disconnect OFTC before erasing its profile", code: 1)
-        }
-        let store = profileStore()
-        guard let profile = try? store.load() else {
-            if !FileManager.default.fileExists(atPath: store.url.path),
-               (try? FileManager.default.destinationOfSymbolicLink(atPath: store.url.path)) == nil {
-                finish("OFTC profile absent; nothing erased")
+    // Without --profile this erases every profile, so uninstall can clean up.
+    let targets = selectedProfile == nil ? allEntries() : [requireEntry()]
+    if targets.isEmpty { finish("OFTC profile absent; nothing erased") }
+    NETunnelProviderManager.loadAllFromPreferences { managers, error in
+        if error != nil { finish("Could not load VPN configuration", code: 1) }
+        for entry in targets {
+            for manager in OFTCProfileScope.manager(for: entry, in: managers ?? [], providerID: providerID)
+            where manager.connection.status != .disconnected && manager.connection.status != .invalid {
+                finish("Disconnect \(entry.name) before erasing its profile", code: 1)
             }
-            finish("OFTC profile invalid; nothing erased", code: 1)
         }
-        let selector: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: profile.gateway,
-        ]
-        let status = SecItemDelete(selector as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            finish("Could not erase OFTC Keychain PSK; profile left in place", code: 1)
+        func eraseData() {
+            for entry in targets {
+                let selector: [CFString: Any] = [
+                    kSecClass: kSecClassGenericPassword,
+                    kSecAttrService: keychainService,
+                    kSecAttrAccount: entry.profile.gateway,
+                ]
+                let status = SecItemDelete(selector as CFDictionary)
+                guard status == errSecSuccess || status == errSecItemNotFound else {
+                    finish("Could not erase OFTC Keychain PSK for \(entry.name); profile left in place", code: 1)
+                }
+                // Its trusted gateway certificate goes too; a re-added VPN asks again.
+                try? FileManager.default.removeItem(at: GatewayTrust.pinURL(
+                    host: entry.profile.gateway, port: entry.profile.samlPort,
+                    directory: GatewayTrust.pinDirectory()))
+                do { try FileManager.default.removeItem(at: entry.directory) }
+                catch { finish("Keychain PSK erased, but profile \(entry.name) could not be removed", code: 1) }
+            }
+            finish("OFTC profile, VPN entry and Keychain PSK erased")
         }
-        do { try store.remove() }
-        catch { finish("Keychain PSK erased, but profile file could not be removed", code: 1) }
-        finish("OFTC profile and Keychain PSK erased")
+        // Each profile's macOS VPN entry goes with it, so none is left orphaned.
+        func removeNext(_ remaining: [NETunnelProviderManager]) {
+            guard let manager = remaining.first else { eraseData(); return }
+            manager.removeFromPreferences { error in
+                if error != nil { finish("Could not remove an OFTC VPN entry; profile left in place", code: 1) }
+                removeNext(Array(remaining.dropFirst()))
+            }
+        }
+        removeNext(targets.flatMap {
+            OFTCProfileScope.manager(for: $0, in: managers ?? [], providerID: providerID)
+        })
     }
     dispatchMain()
 
@@ -570,12 +740,14 @@ case "supervise-live" where args.count >= 3:
 
 case "start-profile", "supervise-profile":
     if command == "supervise-profile" {
+        // An agent plist from before multi-profile support runs this
+        // command without a profile; it now means "start the autostart set".
+        if selectedProfile == nil,
+           ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" {
+            superviseAutostart()
+        }
         do { try OFTCAgentService.redirectSupervisorOutput() }
         catch { finish(error.localizedDescription, code: 1) }
-        if ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1",
-           !AgentIntent(bundleID: appID).shouldStart() {
-            finish("OFTC automatic VPN connection is disabled")
-        }
     }
     let profile = storedProfile()
     var flags = Array(args.dropFirst())
@@ -612,13 +784,11 @@ case "rekey-counts" where args.count == 1:
     rekeyCounts()
 
 case "stop" where args.count == 1:
-    guard SupervisorLease.requestStop(bundleID: appID) else {
+    // Stopping a tunnel leaves its connect-at-login choice alone; that is a
+    // separate per-profile setting.
+    guard SupervisorLease.requestStop(directory: requireEntry().directory) else {
         finish("Could not signal OFTC supervisor; VPN left running", code: 1)
     }
-    let intent = AgentIntent(bundleID: appID)
-    do { try intent.setConnectAtLogin(false) }
-    catch { finish("Could not disable automatic VPN connection", code: 1) }
-    intent.cancelRequest()
     loadManager { manager in
         guard let manager else { finish("OFTC configuration absent") }
         manager.connection.stopVPNTunnel()
@@ -627,11 +797,20 @@ case "stop" where args.count == 1:
     dispatchMain()
 
 case "remove-config" where args.count == 1:
-    loadManager { manager in
-        guard let manager else { finish("OFTC configuration absent") }
-        manager.removeFromPreferences { error in
-            if error != nil { finish("Could not remove OFTC configuration", code: 1) }
-            finish("OFTC configuration removed")
+    // Removes every OFTC VPN entry, with or without a profile key.
+    NETunnelProviderManager.loadAllFromPreferences { managers, error in
+        if error != nil { finish("Could not load VPN configuration", code: 1) }
+        let ours = (managers ?? []).filter {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerID
+        }
+        if ours.isEmpty { finish("OFTC configuration absent") }
+        var remaining = ours.count
+        for manager in ours {
+            manager.removeFromPreferences { error in
+                if error != nil { finish("Could not remove OFTC configuration", code: 1) }
+                remaining -= 1
+                if remaining == 0 { finish("OFTC configuration removed") }
+            }
         }
     }
     dispatchMain()

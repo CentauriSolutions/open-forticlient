@@ -1,0 +1,4 @@
+/* Shown by Finder, Spotlight, Launchpad and System Settings. The file stays OFTC.app. */
+"CFBundleDisplayName" = "Open Forticlient";
+"CFBundleName" = "OFTC";
+"NSHumanReadableCopyright" = "OFTC (Open Forticlient): a FortiGate IPsec VPN client for macOS";

@@ -54,22 +54,20 @@ enum OFTCAgentService {
         }
     }
 
-    static var connectAtLogin: Bool {
-        AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
-            .connectAtLogin(legacyEnabled: status == "enabled")
+    static func intent(for entry: OFTCProfileEntry) -> AgentIntent {
+        AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "", directory: entry.directory)
     }
 
-    static func prepareConnect() throws {
-        let intent = AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
-        if intent.preferences() == nil {
-            try intent.setConnectAtLogin(connectAtLogin)
-        }
-        try intent.request(connect: true)
+    // The migrated original profile inherits an already registered agent's
+    // intent; every other profile starts off.
+    static func connectAtLogin(_ entry: OFTCProfileEntry) -> Bool {
+        intent(for: entry).connectAtLogin(
+            legacyEnabled: entry.profile.adoptsUnkeyedVPNEntry == true && status == "enabled")
     }
 
-    static func setConnectAtLogin(_ enabled: Bool) throws {
-        let intent = AgentIntent(bundleID: Bundle.main.bundleIdentifier ?? "")
-        let previous = connectAtLogin
+    static func setConnectAtLogin(_ enabled: Bool, for entry: OFTCProfileEntry) throws {
+        let intent = intent(for: entry)
+        let previous = connectAtLogin(entry)
         try intent.setConnectAtLogin(enabled)
         if enabled && status != "enabled" {
             // Register for future logins without starting SSO right now.
@@ -88,14 +86,14 @@ enum OFTCAgentService {
     // An app-bundled plist cannot contain a per-user absolute log path.
     // Redirect only the launchd-started supervisor; direct host commands keep
     // their terminal output.
-    static func redirectSupervisorOutput() throws {
+    static func redirectSupervisorOutput(logName: String = "agent") throws {
         guard ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" else { return }
         let logDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/OFTC", isDirectory: true)
         try FileManager.default.createDirectory(at: logDirectory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        let log = logDirectory.appendingPathComponent("agent.log")
+        let log = logDirectory.appendingPathComponent(logName + ".log")
         let descriptor = open(log.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw AgentError.logUnavailable }
         defer { close(descriptor) }
