@@ -140,13 +140,16 @@ struct MenuPresentation {
         first.totals = "842 MB / 96 MB"
         first.autoStart = true
         first.historyTime = 60
-        let receive = [0.12, 0.15, 0.25, 0.9, 1.4, 0.85, 0.3, 0.18, 0.2, 0.55, 1.15, 0.6]
-        let send = [12.0, 22, 60, 32, 18, 16, 10, 42, 74, 30, 15, 18]
-        first.history = (0..<60).map { index in
-            TrafficRatePoint(time: Double(index + 1),
-                receiving: index == 59 ? 1_200_000 : receive[index % receive.count] * 1_000_000,
-                sending: index == 59 ? 84_000 : send[index % send.count] * 1000)
+        let receive: [Double] = [0.12, 0.15, 0.25, 0.9, 1.4, 0.85, 0.3, 0.18, 0.2, 0.55, 1.15, 0.6]
+        let send: [Double] = [12, 22, 60, 32, 18, 16, 10, 42, 74, 30, 15, 18]
+        var points: [TrafficRatePoint] = []
+        for index in 0..<60 {
+            let last = index == 59
+            let rx: Double = last ? 1_200_000 : receive[index % receive.count] * 1_000_000
+            let tx: Double = last ? 84_000 : send[index % send.count] * 1000
+            points.append(TrafficRatePoint(time: Double(index + 1), receiving: rx, sending: tx))
         }
+        first.history = points
         var second = TunnelPresentation(id: "warehouse", name: "Warehouse")
         second.state = state
         second.description = state == .connected ? "vpn.lab.example.com" : state.detail
