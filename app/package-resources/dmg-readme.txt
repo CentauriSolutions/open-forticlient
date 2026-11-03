@@ -13,5 +13,8 @@ OFTC connects your Mac to FortiGate IPsec VPNs that use SAML sign-in.
    Click the OFTC icon in the menu bar and press Connect on a VPN. You sign in
    in your browser with your own account.
 
+Updating: run the installer for the new version over the old one. Your VPNs and
+settings are kept.
+
 The first time, macOS asks you to allow OFTC's system extension in System
 Settings > General > Login Items & Extensions.
