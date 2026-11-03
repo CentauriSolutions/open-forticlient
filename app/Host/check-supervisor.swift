@@ -53,6 +53,7 @@ import NetworkExtension
         try checkGatewayTrust()
         try checkProfileBundle()
         try checkLauncherAlias()
+        try checkUpdates()
         print("supervisor policy, stop lease, profile registry and SAML lock checks passed")
     }
 
@@ -259,5 +260,73 @@ JiXTJWiM0eCck27dAiBuHoTMMNAFsN+B5BHaiH7ZDKeDambYjrfbW17VzyobcQ==
         LauncherAlias.remove(alias: alias)
         let kept = try String(data: Data(contentsOf: alias), encoding: .utf8)
         precondition(kept == "mine")
+    }
+
+    static func checkUpdates() throws {
+        // Versions: numeric, padded, never a prerelease.
+        precondition(AppVersion("v1.2.1")?.parts == [1, 2, 1] && AppVersion("1.2")?.parts == [1, 2])
+        for bad in ["", "v", "abc", "1..2", "1.2.3.4.5", "1.3.0-beta1", "1.2.x", "-1.2", "1.2 beta"] {
+            precondition(AppVersion(bad) == nil, "accepted \(bad)")
+        }
+        precondition(AppVersion("1.2.0")! < AppVersion("1.2.1")!)
+        precondition(AppVersion("1.9")! < AppVersion("1.10")!)
+        precondition(AppVersion("1.2")! == AppVersion("1.2.0")!)
+        precondition(AppVersion("2.0")! > AppVersion("1.99.99")!)
+
+        func feed(_ tag: String, url: String = "https://github.com/o/r/releases/tag/v1.2.1",
+                  draft: Bool = false, prerelease: Bool = false) -> Data {
+            Data("""
+            {"id": 7, "tag_name": "\(tag)", "html_url": "\(url)", "name": "x", "draft": \(draft),
+             "prerelease": \(prerelease), "assets": [], "body": "notes"}
+            """.utf8)
+        }
+        let offer = UpdateFeed.offer(from: feed("v1.2.1"), current: "1.2.0")
+        precondition(offer == UpdateOffer(version: "1.2.1", page: URL(string: "https://github.com/o/r/releases/tag/v1.2.1")!))
+        precondition(UpdateFeed.offer(from: feed("1.2.1"), current: "1.2.0")?.version == "1.2.1")
+        precondition(UpdateFeed.offer(from: feed("v1.2.1"), current: "1.2.1") == nil)   // same
+        precondition(UpdateFeed.offer(from: feed("v1.2.1"), current: "1.3.0") == nil)   // older
+        precondition(UpdateFeed.offer(from: feed("v1.3.0"), current: "1.2.0", ) != nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0", prerelease: true), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0", draft: true), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0-rc1"), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0", url: "http://example.com/r"), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0", url: "file:///etc/passwd"), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: Data("not json".utf8), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: Data(count: UpdateFeed.maxBytes + 1), current: "1.2.0") == nil)
+        precondition(UpdateFeed.offer(from: feed("v1.3.0"), current: "junk") == nil)
+
+        // Feed configuration: https only; a per-user default overrides the bundle.
+        let suite = "oftc-update-check-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        precondition(UpdateFeed.configuredURL(defaults: defaults) == nil)
+        defaults.set("http://example.com/latest", forKey: "updateFeedURL")
+        precondition(UpdateFeed.configuredURL(defaults: defaults) == nil)
+        defaults.set("https://api.github.com/repos/o/r/releases/latest", forKey: "updateFeedURL")
+        precondition(UpdateFeed.configuredURL(defaults: defaults)?.host == "api.github.com")
+
+        // Store: on by default, at most a check a day, skipping one version only.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oftc-update-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = UpdateStore(directory: directory)
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        precondition(store.automatic && store.isDue(now: now))
+        store.markChecked(at: now)
+        precondition(!store.isDue(now: now.addingTimeInterval(3600)))
+        precondition(store.isDue(now: now.addingTimeInterval(UpdateStore.interval + 1)))
+        precondition(store.isDue(now: now.addingTimeInterval(-60))) // clock went backwards
+        store.automatic = false
+        precondition(!store.automatic && !store.isDue(now: now.addingTimeInterval(10 * UpdateStore.interval)))
+        store.automatic = true
+        precondition(store.shouldShow(offer!))
+        store.skip("1.2.1")
+        precondition(!store.shouldShow(offer!))
+        precondition(store.shouldShow(UpdateOffer(version: "1.2.2", page: offer!.page)))
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: directory.appendingPathComponent("update.json").path)[.posixPermissions] as? Int
+        precondition(mode == 0o600)
+        try Data("garbage".utf8).write(to: directory.appendingPathComponent("update.json"))
+        precondition(store.automatic && store.skippedVersion == nil)
     }
 }

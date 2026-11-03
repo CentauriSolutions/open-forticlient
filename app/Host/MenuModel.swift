@@ -112,6 +112,7 @@ struct MenuPresentation {
     var tunnels: [TunnelPresentation] = []
     var busy = false
     var notice: String?
+    var update: String?   // version of an available update, if one should be shown
 
     var anyActive: Bool { tunnels.contains { $0.state.active } }
     var anyConnected: Bool { tunnels.contains { $0.state == .connected } }

@@ -217,11 +217,15 @@ final class OFTCMenuViewController: NSViewController {
     var onAction: ((String) -> Void)?
     var onAutoStart: ((String, Bool) -> Void)?
     var onRemove: ((String) -> Void)?
+    var onUpdateDownload: (() -> Void)?
+    var onUpdateSkip: (() -> Void)?
     var onAll: ((Bool) -> Void)?
     var onAddVPN: (() -> Void)?
     var onSettings: ((NSButton) -> Void)?
     var onQuit: (() -> Void)?
     private let noticeLabel = NSTextField(wrappingLabelWithString: "")
+    private let updateBanner = NSStackView()
+    private let updateLabel = NSTextField(labelWithString: "")
     private let rowsStack = NSStackView()
     private let emptyLabel = NSTextField(wrappingLabelWithString: "Add your VPN gateways, then connect any of them at the same time.")
     private let allControls = NSStackView()
@@ -275,6 +279,21 @@ final class OFTCMenuViewController: NSViewController {
         header.spacing = 9
         add(header)
 
+        updateLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        let download = NSButton(title: "Download", target: self, action: #selector(updateDownloadTapped))
+        download.bezelStyle = .rounded
+        download.controlSize = .small
+        let skip = link("Skip this version", action: #selector(updateSkipTapped))
+        skip.contentTintColor = .secondaryLabelColor
+        let updateButtons = NSStackView(views: [download, skip, NSView()])
+        updateButtons.spacing = 10
+        updateBanner.orientation = .vertical
+        updateBanner.alignment = .leading
+        updateBanner.spacing = 6
+        updateBanner.setViews([updateLabel, updateButtons], in: .leading)
+        updateBanner.isHidden = true
+        add(updateBanner)
+
         noticeLabel.font = .systemFont(ofSize: 12)
         noticeLabel.textColor = .systemRed
         noticeLabel.maximumNumberOfLines = 3
@@ -321,6 +340,8 @@ final class OFTCMenuViewController: NSViewController {
 
     func update(_ presentation: MenuPresentation) {
         _ = view
+        updateLabel.stringValue = presentation.update.map { "Version \($0) is available" } ?? ""
+        updateBanner.isHidden = presentation.update == nil
         noticeLabel.stringValue = presentation.notice ?? ""
         noticeLabel.isHidden = presentation.notice == nil
         emptyLabel.isHidden = !presentation.tunnels.isEmpty
@@ -357,6 +378,8 @@ final class OFTCMenuViewController: NSViewController {
         view.layoutSubtreeIfNeeded()
     }
 
+    @objc private func updateDownloadTapped() { onUpdateDownload?() }
+    @objc private func updateSkipTapped() { onUpdateSkip?() }
     @objc private func connectAllTapped() { onAll?(true) }
     @objc private func disconnectAllTapped() { onAll?(false) }
     @objc private func addTapped() { onAddVPN?() }
@@ -429,6 +452,9 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var globalError: String?
     private var bulkCommand: MenuCommand?
     private var onboarding: OFTCOnboarding?
+    private var updateOffer: UpdateOffer?
+    private var updateTimer: Timer?
+    private var updateInFlight = false
     private var quitAfterStop = false
     private let afterInstall: Bool
     private var automaticLaunch = false
@@ -441,6 +467,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var componentState = VPNComponentState.checking
     private var componentCheckPending = false
     private var root: URL { OFTCProfileScope.defaultRoot(bundleID: appID) }
+    private var updateStore: UpdateStore { UpdateStore(directory: experienceStore.directory) }
     private var experienceStore: LaunchExperienceStore {
         LaunchExperienceStore(directory: AgentIntent(bundleID: appID).directory)
     }
@@ -480,7 +507,11 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         captureLaunchReason()
-        if preview == nil { DispatchQueue.global(qos: .utility).async { LauncherAlias.ensure() } }
+        if preview == nil {
+            DispatchQueue.global(qos: .utility).async { LauncherAlias.ensure() }
+            applyMenuLoginDefault()
+            scheduleUpdateChecks()
+        }
         if preview == nil, !acquireMenuLock() {
             if !automaticLaunch {
                 DistributedNotificationCenter.default().postNotificationName(
@@ -560,6 +591,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.onAction = { [weak self] id in self?.performAction(id) }
         controller.onAutoStart = { [weak self] id, enabled in self?.setAutoStart(id, enabled) }
         controller.onRemove = { [weak self] id in self?.removeProfile(id) }
+        controller.onUpdateDownload = { [weak self] in self?.downloadUpdate() }
+        controller.onUpdateSkip = { [weak self] in self?.skipUpdate() }
         controller.onAll = { [weak self] connect in self?.performAll(connect: connect) }
         controller.onAddVPN = { [weak self] in self?.showSetup() }
         controller.onSettings = { [weak self] button in self?.showSettings(button) }
@@ -729,6 +762,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         next.tunnels = orderedRuntimes.map(tunnelPresentation)
         next.busy = bulkCommand != nil || onboarding != nil
         next.notice = globalError
+        next.update = updateOffer.flatMap { updateStore.shouldShow($0) ? $0.version : nil }
         presentation = next
         if quitAfterStop, !presentation.anyActive, runtimes.values.allSatisfy({ $0.stoppingSince == nil }) {
             NSApp.terminate(nil)
@@ -1016,6 +1050,9 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         menu.autoenablesItems = false
         add("Launch OFTC at login", action: #selector(toggleMenuLogin),
             checked: preview == nil && SMAppService.mainApp.status == .enabled)
+        add("Check for Updates Automatically", action: #selector(toggleAutoUpdates),
+            checked: preview == nil && updateStore.automatic)
+        add("Check for Updates Now…", action: #selector(checkUpdatesNow))
         menu.addItem(.separator())
         add("Add VPN…", action: #selector(openSetup))
         add("Export VPNs…", action: #selector(exportVPNs))
@@ -1034,6 +1071,99 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         reconcile()
     }
     @objc private func openSetup() { showSetup() }
+
+    // MARK: First-run login item
+
+    // A fresh install turns "Launch OFTC at login" on so the tray icon is there
+    // after every login; an upgrade keeps whatever the user had. Decided once.
+    private func applyMenuLoginDefault() {
+        guard Bundle.main.bundleURL.standardizedFileURL.path == LauncherAlias.installedApp.path else { return }
+        let store = MenuLoginDefaultStore(directory: experienceStore.directory)
+        guard !store.decided else { return }
+        if experienceStore.acknowledgedBuild == nil, SMAppService.mainApp.status == .notRegistered {
+            try? SMAppService.mainApp.register()
+        }
+        try? store.markDecided()
+    }
+
+    // MARK: Updates
+
+    private var installedCopy: Bool {
+        Bundle.main.bundleURL.standardizedFileURL.path == LauncherAlias.installedApp.path
+    }
+
+    private func scheduleUpdateChecks() {
+        guard installedCopy, UpdateFeed.configuredURL() != nil else { return }
+        // Not at the instant of login; then hourly, but at most once a day.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.checkIfDue() }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            self?.checkIfDue()
+        }
+    }
+
+    private func checkIfDue() {
+        guard preview == nil, updateStore.isDue() else { return }
+        checkForUpdates(manual: false)
+    }
+
+    private func checkForUpdates(manual: Bool) {
+        guard preview == nil, !updateInFlight else { return }
+        guard let feed = UpdateFeed.configuredURL() else {
+            if manual { present("Updates aren’t set up", "This build has no update feed configured.") }
+            return
+        }
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        updateInFlight = true
+        UpdateFeed.fetch(feed, current: current) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateInFlight = false
+                switch result {
+                case .success(let offer):
+                    self.updateStore.markChecked()
+                    self.updateOffer = offer
+                    self.reconcile()
+                    if manual { self.reportManualCheck(offer, current: current) }
+                case .failure:
+                    if manual { self.present("Couldn’t check for updates", "Check your connection and try again.") }
+                }
+            }
+        }
+    }
+
+    private func reportManualCheck(_ offer: UpdateOffer?, current: String) {
+        guard let offer else {
+            present("You’re up to date", "Open Forticlient \(current) is the latest version.")
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Version \(offer.version) is available"
+        alert.informativeText = "You have \(current). Download opens the release page; install it like the first time. "
+            + "Disconnect your VPNs first, because an update briefly stops them."
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(offer.page) }
+    }
+
+    private func downloadUpdate() {
+        guard let offer = updateOffer else { return }
+        popover.performClose(nil)
+        NSWorkspace.shared.open(offer.page)
+    }
+
+    private func skipUpdate() {
+        guard let offer = updateOffer else { return }
+        updateStore.skip(offer.version)
+        reconcile()
+    }
+
+    @objc private func toggleAutoUpdates() {
+        let store = updateStore
+        store.automatic = !store.automatic
+    }
+
+    @objc private func checkUpdatesNow() { checkForUpdates(manual: true) }
 
     // MARK: Sharing profiles (.oftc files)
 

@@ -417,7 +417,7 @@ private func superviseAutostart() -> Never {
     finish("OFTC supervisors exited")
 }
 
-private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|check-update [url]|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 var args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--profile" {
     guard args.count >= 3, OFTCProfileScope.isValidID(args[1]) else {
@@ -643,6 +643,21 @@ case "import-profiles" where args.count == 1:
 case "launcher-alias" where args.count == 2 && ["ensure", "remove"].contains(args[1]):
     if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }
     finish("Launcher alias \(args[1] == "ensure" ? "checked" : "removed")")
+
+case "check-update" where args.count <= 2:
+    // Fetches the update feed (the configured one, or the URL given) and says
+    // what it would offer. Nothing is downloaded or installed.
+    let feed = args.count == 2 ? URL(string: args[1]) : UpdateFeed.configuredURL()
+    guard let feed else { finish("No update feed is configured", code: 1) }
+    let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    UpdateFeed.fetch(feed, current: installed) { result in
+        switch result {
+        case .success(let offer?): finish("Update available: \(offer.version) (\(offer.page.absoluteString)); installed \(installed)")
+        case .success(nil): finish("Up to date: installed \(installed) is the latest")
+        case .failure(let failure): finish("Could not check for updates (\(failure))", code: 1)
+        }
+    }
+    dispatchMain()
 
 case "list-profiles" where args.count == 1:
     // id, display name, gateway, SAML port, transport; tab separated.

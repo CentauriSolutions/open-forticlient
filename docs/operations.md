@@ -62,6 +62,28 @@ sign-in, so the PSK is not treated as a secret, but it is still configuration
 for a private gateway: share it only with the people who need it. Export
 creates the file with owner-only permissions and will not overwrite one.
 
+### Tray icon and updates
+
+- **After install:** an interactive install opens the app, so the tray icon
+  appears straight away. On a fresh install the app also turns on
+  **Settings → Launch OFTC at login**, so the icon is there after every login.
+  An upgrade keeps whatever you had, and turning it off stays off. Managed and
+  headless installs (no Installer window) finish without opening a GUI.
+- **Update notice:** the app checks a release feed at most once a day and shows
+  "Version X is available" in the popover with **Download** (opens the release
+  page; you install the new package the same way as the first time) and **Skip
+  this version**. **Settings** has **Check for Updates Automatically** and
+  **Check for Updates Now…**. It never downloads or installs anything itself:
+  an update briefly stops the VPNs and may need system extension approval, so it
+  stays a deliberate step.
+- **Feed:** a GitHub "latest release" document (`tag_name`, `html_url`,
+  `draft`, `prerelease`), https only; prereleases and drafts are never offered.
+  Set it at build time with `OFTCUpdateFeedURL` in `app/Host/Info.plist`, or per
+  user with `defaults write com.chris.openforticlient.oftc updateFeedURL <url>`.
+  Empty means no checks. For a GitHub repository it is
+  `https://api.github.com/repos/OWNER/REPO/releases/latest`. Check a feed with
+  `"/Applications/Open Forticlient.app/Contents/MacOS/OFTCAgent" check-update <url>`.
+
 ### Remove a VPN
 
 Click the **…** on a VPN's row and choose **Remove…**, or run
