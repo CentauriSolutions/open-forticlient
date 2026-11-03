@@ -20,6 +20,31 @@ const WRITE_DEADLINE: Duration = Duration::from_secs(45);
 // FortiClient sends every ~20 s; a bare 00 03 ff (no marker) draws a gateway RST.
 const TCP_KEEPALIVE_RECORD: [u8; 7] = [0, 7, 0, 0, 0, 0, 0xff];
 
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+unsafe extern "C" {
+    fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: i32) -> i32;
+}
+
+/// Block until `fd` is readable, in error, or `timeout` passes. It only waits
+/// and never reads, so a descriptor closed or reused meanwhile can at worst end
+/// the wait early; the caller re-checks under the session lock. This lets a
+/// provider wait for inbound data without holding the session, so sends and
+/// liveness ticks are not stuck behind a receive.
+pub fn wait_readable(fd: i32, timeout: Duration) -> bool {
+    const POLLIN: i16 = 0x1;
+    let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
+    // Round up: a sub-millisecond wait must not become a zero-length poll.
+    let millis = i32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+    // SAFETY: `pfd` is one valid, exclusively borrowed entry and nfds is 1.
+    unsafe { poll(&mut pfd, 1, millis) > 0 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wire {
     Udp4500,

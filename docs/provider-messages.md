@@ -39,7 +39,9 @@ whether or not a tunnel is running.
 - `receivedBytes` and `sentBytes` count inner IP bytes accepted by the engine or the
   packet flow, saturating at the maximum. ESP, IKE, dropped packets and traffic
   outside OFTC are not counted. They survive rekeys.
-- `uptime` is the provider's monotonic system uptime in seconds. The host derives
+- `uptime` is the provider's monotonic time in seconds: system uptime for the Swift
+  provider, time since the provider was created for the Rust one. Only differences
+  within one session matter. The host derives
   rates from consecutive samples of one session and ignores gaps over five seconds.
 
 ## Rekey probes and preflight

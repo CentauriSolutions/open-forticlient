@@ -7,7 +7,7 @@ publish = false
 [lib]
 name = "oftc_preflight"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 oftc-crypto = { path = "../crypto" }

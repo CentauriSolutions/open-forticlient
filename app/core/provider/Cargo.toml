@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 oftc-crypto = { path = "../crypto" }
 oftc-engine = { path = "../engine" }
+oftc-preflight = { path = "../preflight" }
 zeroize = "=1.9.0"
 
 [lints]
