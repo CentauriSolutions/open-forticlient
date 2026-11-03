@@ -8,16 +8,33 @@ oftc \- standalone macOS FortiGate IPsec VPN client
 \fB\-\-import\fR \fINAME\fR
 .br
 .B oftc setup
-\fB\-\-gateway\fR \fIHOST\fR \fB\-\-saml\-port\fR \fIPORT\fR [\fB\-\-tcp\fR]
+\fB\-\-gateway\fR \fIHOST\fR \fB\-\-saml\-port\fR \fIPORT\fR [\fB\-\-tcp\fR] [\fB\-\-name\fR \fINAME\fR]
+.br
+.B oftc setup
+\fB\-\-from\fR \fIFILE\fR
 .br
 .B oftc setup
 \fB\-\-from\-development\fR
 .br
+.B oftc profiles
+.br
+.B oftc export
+[\fIPROFILE\fR...] [\fB\-o\fR \fIFILE\fR]
+.br
 .B oftc connect
+[\fIPROFILE\fR...]
 .br
 .B oftc disconnect
+[\fIPROFILE\fR...]
+.br
+.B oftc remove
+\fIPROFILE\fR...
 .br
 .B oftc status
+[\fIPROFILE\fR...]
+.br
+.B oftc autostart
+\fIPROFILE\fR \fBon\fR|\fBoff\fR
 .br
 .B oftc uninstall
 [\fB\-\-erase\-profile\fR]
@@ -27,19 +44,26 @@ oftc \- standalone macOS FortiGate IPsec VPN client
 OFTC uses the signed macOS app to own the VPN configuration, Keychain PSK,
 system extension, SAML sign-in, and supervised reconnection.
 The package installs the app and this command at their standard paths.
+Every configured VPN is a profile with its own macOS VPN entry, Keychain PSK,
+supervisor and connect-at-login setting. Profiles are peers and may be
+connected at the same time. A
+.I PROFILE
+argument is a profile id or its name; commands that take one act on every
+profile when none is named.
 .SH COMMANDS
 .TP
 .B setup
-Prepare a profile, activate OFTC's system extension, and add its macOS VPN
-configuration. It does not connect. With no options and no existing profile,
-ask which local settings to use. The OFTC development profile and FortiClient
+Add a profile, activate OFTC's system extension, and add the profile's macOS
+VPN configuration. It does not connect. Run it again to add another VPN. With no
+options, ask which local settings to use; if profiles already exist and
+standard input is not a terminal, resume setup for all of them. The OFTC development profile and FortiClient
 profiles, when present, provide editable gateway and SAML port defaults. A
 matching FortiClient credential is tried before asking for a PSK in the
-terminal. With an existing OFTC profile, resume setup.
+terminal.
 .TP
 .BI "setup \-\-import " NAME
-Import a local FortiClient profile and its PSK. Existing OFTC profiles are not
-overwritten. If the saved PSK is unavailable, use interactive
+Import a local FortiClient profile and its PSK as a new profile named after it.
+A gateway that already has a profile is refused. If the saved PSK is unavailable, use interactive
 .B setup
 to keep its connection settings and enter the PSK at the terminal prompt.
 .TP
@@ -49,27 +73,68 @@ default outer transport. Add
 .B \-\-tcp
 to select TCP.
 .TP
+.BI "setup \-\-from " FILE
+Add the profiles in a file made by
+.BR "oftc export" ,
+then activate the system extension and add their macOS VPN configurations.
+Use
+.B \-
+to read standard input. A gateway that already has a profile is skipped, so
+importing never changes an existing profile or its PSK. The file carries each
+profile's PSK, so no PSK prompt follows.
+.TP
 .B setup \-\-from\-development
 Copy the nonsecret OFTC development profile and prompt for its PSK under the
 release app's Keychain identity if no matching saved FortiClient PSK is
 available. This is only for migration from the OFTC
 development build. Stop the old VPN and its login agent first.
 .TP
+.B profiles
+List configured profiles.
+.TP
+.B export
+Write the named profiles, or all, with their PSKs, as one file for a colleague
+to import with
+.BR "oftc setup \-\-from" .
+Without
+.B \-o
+the file goes to standard output; with it, the file is created with owner-only
+permissions and an existing file is never overwritten. The PSK is not the
+sign-in secret (SAML is), but the file is configuration for a private gateway,
+so share it only with the people who need it.
+.TP
 .B connect
-Start a supervised VPN connection. The app-bundled login agent is registered
-if needed. Automatic VPN connection at login follows the separate setting in
-the menu bar app; new installations leave it off. A legacy per-user agent from an
-earlier OFTC version is removed during the first connection. A browser sign-in may be required.
-Recoverable connection failures are retried by the supervisor.
+Start a supervised VPN connection for each named profile, or all profiles.
+Supervisors run independently and log to
+.IR ~/Library/Logs/OFTC/ID.log .
+Browser sign-ins happen one at a time. A legacy per-user agent from an earlier
+OFTC version is removed during the first connection. Recoverable connection
+failures are retried by each supervisor.
 .TP
 .B disconnect
-Stop the VPN and disable automatic login starts. A deliberate disconnect stays
-down until the next
+Stop the named profiles, or all. A deliberate disconnect stays down until the
+next
 .BR "oftc connect" .
+It does not change a profile's connect-at-login setting.
+.TP
+.B remove
+Delete the named profiles: stop each, then remove its macOS VPN entry, Keychain
+PSK, settings, connect-at-login choice and saved gateway certificate. Other
+profiles keep running. At least one profile must be named, and it cannot be
+undone; use
+.B oftc export
+first to keep a copy. To add one again, import a
+.B .oftc
+file or run
+.BR "oftc setup" .
+.TP
+.BI "autostart " "PROFILE " on|off
+Connect that profile when you log in. The bundled login agent starts one
+supervisor for every profile with this setting. New profiles start off.
 .TP
 .B status
-Show VPN state, nonsecret profile settings, login agent state, and CHILD SA
-rekey counts while connected.
+Show each profile's VPN state, nonsecret settings and CHILD SA rekey counts
+while connected, then login agent state and connect-at-login settings.
 .TP
 .B uninstall
 Disconnect OFTC, close the menu app, unregister both login services, remove any legacy agent and VPN configuration,
@@ -78,7 +143,7 @@ administrator access. Profile, Keychain PSK, and logs are retained by default.
 The helper refuses to remove the app while the extension remains active.
 .TP
 .B uninstall \-\-erase\-profile
-Also erase the OFTC profile and its exact Keychain PSK after disconnecting.
+Also erase every OFTC profile and its exact Keychain PSK after disconnecting.
 .TP
 .B help
 Show a short command summary.
@@ -101,7 +166,10 @@ Installed app and system extension.
 .I /usr/local/bin/oftc
 Command-line tool.
 .TP
-.I ~/Library/Logs/OFTC/agent.log
-Per-user supervised connection log.
+.I ~/Library/Logs/OFTC/ID.log
+Per-profile supervised connection log.
+.TP
+.I ~/Library/Application Support/com.chris.openforticlient.oftc/profiles/ID/
+Per-profile nonsecret settings and supervisor state.
 .SH SEE ALSO
 .B systemextensionsctl(8)

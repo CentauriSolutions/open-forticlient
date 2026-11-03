@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,32 +17,99 @@ const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
 const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
 const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
 
+/// One configured VPN, as reported by the host's `list-profiles`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Profile {
+    id: String,
+    name: String,
+    gateway: String,
+    port: u16,
+    transport: String,
+}
+
+fn valid_profile_name(name: &str) -> bool {
+    (1..=64).contains(&name.len()) && !name.chars().any(char::is_control)
+}
+
+/// Parses `list-profiles` output: id, name, gateway, port, transport per line.
+fn parse_profiles(text: &str) -> Vec<Profile> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let profile = Profile {
+                id: fields.next()?.to_string(),
+                name: fields.next()?.to_string(),
+                gateway: fields.next()?.to_string(),
+                port: fields.next()?.parse().ok()?,
+                transport: fields.next()?.to_string(),
+            };
+            (fields.next().is_none() && !profile.id.is_empty()).then_some(profile)
+        })
+        .collect()
+}
+
+/// Picks profiles by id or display name; no names selects every profile.
+fn select_profiles(all: Vec<Profile>, names: &[String]) -> Result<Vec<Profile>, String> {
+    if all.is_empty() {
+        return Err("no OFTC profile is configured; run `oftc setup`".into());
+    }
+    if names.is_empty() {
+        return Ok(all);
+    }
+    let mut chosen: Vec<Profile> = Vec::new();
+    for name in names {
+        let found = all
+            .iter()
+            .find(|p| p.id == *name)
+            .or_else(|| all.iter().find(|p| p.name.eq_ignore_ascii_case(name)))
+            .ok_or_else(|| {
+                let known: Vec<_> = all.iter().map(|p| p.id.as_str()).collect();
+                format!("no profile named {name}; configured: {}", known.join(", "))
+            })?;
+        if !chosen.iter().any(|p| p.id == found.id) {
+            chosen.push(found.clone());
+        }
+    }
+    Ok(chosen)
+}
+
 const HELP: &str = "oftc — OFTC macOS VPN client
 
 USAGE:
-    oftc setup --import NAME
-    oftc setup --gateway HOST --saml-port PORT [--tcp]
+    oftc setup --import NAME           Add a profile from a FortiClient profile.
+    oftc setup --gateway HOST --saml-port PORT [--tcp] [--name NAME]
+    oftc setup --from FILE             Import profiles from a file made by `oftc export` (- is stdin).
     oftc setup --from-development
-    oftc setup                         Choose a profile and answer setup prompts.
-    oftc connect                       Connect using the saved login preference.
-    oftc disconnect                    Stop and disable automatic starts.
-    oftc status                        Show VPN, profile, agent, and rekey state.
+    oftc setup                         Add a profile interactively, or repair setup.
+    oftc profiles                      List configured profiles.
+    oftc export [PROFILE...] [-o FILE] Write profiles, with their PSKs, to a file to share.
+    oftc connect [PROFILE...]          Connect profiles; none named connects all.
+    oftc disconnect [PROFILE...]       Stop profiles; none named stops all.
+    oftc remove PROFILE...             Delete profiles, their VPN entries and PSKs.
+    oftc status [PROFILE...]           Show VPN, profile, agent, and rekey state.
+    oftc autostart PROFILE on|off      Connect that profile at login.
     oftc uninstall [--erase-profile]  Remove OFTC; keep credentials by default.
     oftc help
 
-Setup uses local OFTC development or FortiClient settings as defaults when
-available, then activates the extension and installs its macOS VPN entry. It
-does not connect. A missing PSK is read securely from the terminal.
-Connect runs a supervised session that can recover from unexpected drops.
+Every profile is its own VPN and can be connected at the same time as the
+others. PROFILE is a profile id or its name. Setup uses local FortiClient
+settings as defaults when available, then activates the extension and installs
+the profile's macOS VPN entry. It does not connect. A missing PSK is read
+securely from the terminal. Connect runs a supervised session per profile that
+recovers from unexpected drops; browser sign-ins happen one at a time.
 Uninstall may prompt for administrator access. For a development build, prefix
-setup, connect, disconnect, or status with --app /absolute/path/OFTC.app.";
+any command with --app /absolute/path/OFTC.app.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Setup(PathBuf, SetupSource),
-    Connect(PathBuf),
-    Disconnect(PathBuf),
-    Status(PathBuf),
+    Profiles(PathBuf),
+    Export(PathBuf, Vec<String>, Option<PathBuf>),
+    Connect(PathBuf, Vec<String>),
+    Disconnect(PathBuf, Vec<String>),
+    Remove(PathBuf, Vec<String>),
+    Status(PathBuf, Vec<String>),
+    Autostart(PathBuf, String, bool),
     Uninstall { erase_profile: bool },
 }
 
@@ -50,6 +117,7 @@ enum Action {
 enum SetupSource {
     Existing,
     Import(String),
+    File(String),
     ImportWithDefaults {
         name: String,
         gateway: String,
@@ -60,6 +128,7 @@ enum SetupSource {
         gateway: String,
         port: u16,
         tcp: bool,
+        name: Option<String>,
     },
 }
 
@@ -198,12 +267,13 @@ fn prompt(label: &str, default: &str) -> Result<String, Box<dyn Error>> {
     })
 }
 
-fn interactive_source() -> Result<SetupSource, Box<dyn Error>> {
+fn interactive_source(existing: &[Profile]) -> Result<SetupSource, Box<dyn Error>> {
     let mut candidates = Vec::new();
     if let Some(candidate) = development_candidate() {
         candidates.push(candidate);
     }
     candidates.extend(forticlient_candidates());
+    candidates.retain(|c| !existing.iter().any(|p| p.gateway == c.gateway));
     println!("OFTC setup sources:");
     for (index, candidate) in candidates.iter().enumerate() {
         println!(
@@ -265,7 +335,18 @@ fn interactive_source() -> Result<SetupSource, Box<dyn Error>> {
         {
             candidate.source
         }
-        _ => SetupSource::Manual { gateway, port, tcp },
+        _ => {
+            let name = prompt("Name", &gateway)?;
+            if !valid_profile_name(&name) {
+                return Err("name must be 1-64 printable characters".into());
+            }
+            SetupSource::Manual {
+                gateway,
+                port,
+                tcp,
+                name: Some(name),
+            }
+        }
     };
     Ok(source)
 }
@@ -298,12 +379,14 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
                 [flag, name] if flag == "--import" && !name.is_empty() => {
                     SetupSource::Import(name.clone())
                 }
+                [flag, path] if flag == "--from" && !path.is_empty() => {
+                    SetupSource::File(path.clone())
+                }
                 [flag] if flag == "--from-development" => SetupSource::Development,
                 [gateway_flag, gateway, port_flag, port, rest @ ..]
                     if gateway_flag == "--gateway"
                         && port_flag == "--saml-port"
-                        && !gateway.is_empty()
-                        && (rest.is_empty() || rest == ["--tcp"]) =>
+                        && !gateway.is_empty() =>
                 {
                     let port = port
                         .parse::<u16>()
@@ -311,19 +394,71 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
                     if port == 0 {
                         return Err("--saml-port must be in 1..65535".into());
                     }
+                    let (tcp, name) = match rest {
+                        [] => (false, None),
+                        [tcp] if tcp == "--tcp" => (true, None),
+                        [flag, name] if flag == "--name" => (false, Some(name.clone())),
+                        [tcp, flag, name] if tcp == "--tcp" && flag == "--name" => {
+                            (true, Some(name.clone()))
+                        }
+                        _ => return Err("invalid setup options; run `oftc help`".into()),
+                    };
+                    if name.as_deref().is_some_and(|n| !valid_profile_name(n)) {
+                        return Err("--name must be 1-64 printable characters".into());
+                    }
                     SetupSource::Manual {
                         gateway: gateway.clone(),
                         port,
-                        tcp: !rest.is_empty(),
+                        tcp,
+                        name,
                     }
                 }
                 _ => return Err("invalid setup options; run `oftc help`".into()),
             };
             Ok(Some(Action::Setup(app, source)))
         }
-        "connect" if extra.is_empty() => Ok(Some(Action::Connect(app))),
-        "disconnect" if extra.is_empty() => Ok(Some(Action::Disconnect(app))),
-        "status" if extra.is_empty() => Ok(Some(Action::Status(app))),
+        "profiles" if extra.is_empty() => Ok(Some(Action::Profiles(app))),
+        "export" => {
+            let mut names = Vec::new();
+            let mut output = None;
+            let mut rest = extra.iter();
+            while let Some(arg) = rest.next() {
+                if arg == "-o" || arg == "--output" {
+                    let path = rest.next().ok_or("--output needs a file path")?;
+                    if path.is_empty() || output.replace(PathBuf::from(path)).is_some() {
+                        return Err("give --output once, with a file path".into());
+                    }
+                } else if arg.is_empty() || arg.starts_with('-') {
+                    return Err("usage: oftc export [PROFILE...] [-o FILE]".into());
+                } else {
+                    names.push(arg.clone());
+                }
+            }
+            Ok(Some(Action::Export(app, names, output)))
+        }
+        "connect" | "disconnect" | "status" => {
+            if extra.iter().any(|name| name.is_empty() || name.starts_with('-')) {
+                return Err(format!("{command} takes profile names only; run `oftc help`"));
+            }
+            let names = extra.to_vec();
+            Ok(Some(match command {
+                "connect" => Action::Connect(app, names),
+                "disconnect" => Action::Disconnect(app, names),
+                _ => Action::Status(app, names),
+            }))
+        }
+        "remove" => {
+            if extra.is_empty() || extra.iter().any(|name| name.is_empty() || name.starts_with('-')) {
+                return Err("usage: oftc remove PROFILE...".into());
+            }
+            Ok(Some(Action::Remove(app, extra.to_vec())))
+        }
+        "autostart" => match extra {
+            [name, setting] if !name.starts_with('-') && (setting == "on" || setting == "off") => {
+                Ok(Some(Action::Autostart(app, name.clone(), setting == "on")))
+            }
+            _ => Err("usage: oftc autostart PROFILE on|off".into()),
+        },
         "uninstall" if !explicit_app && (extra.is_empty() || extra == ["--erase-profile"]) => {
             Ok(Some(Action::Uninstall {
                 erase_profile: !extra.is_empty(),
@@ -347,8 +482,29 @@ fn host_executable(app: &Path) -> Result<PathBuf, Box<dyn Error>> {
     Ok(executable)
 }
 
+fn host_command(executable: &Path, profile: Option<&str>, args: &[&str]) -> Command {
+    let mut command = Command::new(executable);
+    if let Some(profile) = profile {
+        command.args(["--profile", profile]);
+    }
+    command.args(args);
+    command
+}
+
 fn run_host(executable: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
-    let status = Command::new(executable).args(args).status()?;
+    run_host_as(executable, None, args)
+}
+
+fn run_host_for(executable: &Path, profile: &str, args: &[&str]) -> Result<(), Box<dyn Error>> {
+    run_host_as(executable, Some(profile), args)
+}
+
+fn run_host_as(
+    executable: &Path,
+    profile: Option<&str>,
+    args: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let status = host_command(executable, profile, args).status()?;
     if !status.success() {
         return Err(format!("OFTC host exited with {status}").into());
     }
@@ -356,14 +512,32 @@ fn run_host(executable: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
 }
 
 fn host_output(executable: &Path, command: &str) -> Result<std::process::Output, Box<dyn Error>> {
-    Ok(Command::new(executable).arg(command).output()?)
+    Ok(host_command(executable, None, &[command]).output()?)
 }
 
-fn has_psk(executable: &Path) -> Result<bool, Box<dyn Error>> {
-    Ok(host_output(executable, "has-psk")?.status.success())
+fn host_output_for(
+    executable: &Path,
+    profile: &str,
+    args: &[&str],
+) -> Result<std::process::Output, Box<dyn Error>> {
+    Ok(host_command(executable, Some(profile), args).output()?)
 }
 
-fn try_development_psk(executable: &Path) {
+fn list_profiles(executable: &Path) -> Result<Vec<Profile>, Box<dyn Error>> {
+    let output = host_output(executable, "list-profiles")?;
+    if !output.status.success() {
+        return Err("could not read OFTC profiles".into());
+    }
+    Ok(parse_profiles(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn has_psk(executable: &Path, profile: &str) -> Result<bool, Box<dyn Error>> {
+    Ok(host_output_for(executable, profile, &["has-psk"])?
+        .status
+        .success())
+}
+
+fn try_development_psk(executable: &Path, profile: &str) {
     let Some(development) = development_candidate() else {
         return;
     };
@@ -374,9 +548,11 @@ fn try_development_psk(executable: &Path) {
         let SetupSource::ImportWithDefaults { name, .. } = candidate.source else {
             continue;
         };
-        let migrated = Command::new(executable)
-            .args(["migrate-psk", &name, &development.gateway])
-            .output();
+        let migrated = host_output_for(
+            executable,
+            profile,
+            &["migrate-psk", &name, &development.gateway],
+        );
         if migrated.is_ok_and(|result| result.status.success()) {
             println!("Saved FortiClient PSK copied into the OFTC Keychain item.");
             return;
@@ -384,122 +560,305 @@ fn try_development_psk(executable: &Path) {
     }
 }
 
+/// Imports a profile file (a path, or `-` for stdin) through the host and
+/// returns the ids of the profiles it created.
+fn import_bundle(host: &Path, source: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    use std::io::Read;
+    let mut content = Vec::new();
+    if source == "-" {
+        io::stdin().take(70_000).read_to_end(&mut content)?;
+    } else {
+        fs::File::open(source)
+            .map_err(|error| format!("could not open {source}: {error}"))?
+            .take(70_000)
+            .read_to_end(&mut content)?;
+    }
+    let mut child = host_command(host, None, &["import-profiles"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().ok_or("host stdin unavailable")?.write_all(&content)?;
+    let output = child.wait_with_output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    println!("{}", text.trim_end());
+    if !output.status.success() {
+        return Err("profile import failed".into());
+    }
+    Ok(text
+        .lines()
+        .filter_map(|line| line.rsplit_once("id="))
+        .map(|(_, id)| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect())
+}
+
+/// Writes the named profiles (all when none) and their PSKs for sharing.
+fn run_export(app: &Path, names: &[String], output: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    let chosen = select_profiles(list_profiles(&host)?, names)?;
+    let mut args = vec!["export-profiles"];
+    args.extend(chosen.iter().map(|profile| profile.id.as_str()));
+    let result = host_command(&host, None, &args).output()?;
+    if !result.status.success() {
+        return Err(String::from_utf8_lossy(&result.stdout).trim().to_string().into());
+    }
+    match output {
+        None => io::stdout().write_all(&result.stdout)?,
+        Some(path) => {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options
+                .open(path)
+                .map_err(|error| format!("could not create {}: {error}", path.display()))?
+                .write_all(&result.stdout)?;
+            eprintln!(
+                "Wrote {} profile(s) to {}. It includes each VPN PSK; share it only with the people who need it.",
+                chosen.len(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Runs a host command that creates a profile and returns the new profile id.
+fn add_profile(host: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
+    let output = host_command(host, None, args).output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    print!("{text}");
+    if !output.status.success() {
+        return Err(format!("OFTC host exited with {}", output.status).into());
+    }
+    text.lines()
+        .filter_map(|line| line.rsplit_once("id="))
+        .map(|(_, id)| id.trim().to_string())
+        .next_back()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "OFTC host did not report the new profile".into())
+}
+
 fn run_setup(app: &Path, source: SetupSource) -> Result<(), Box<dyn Error>> {
     let host = host_executable(app)?;
-    match source {
-        SetupSource::Existing => {
-            if host_output(&host, "show-profile")?.status.success() {
-                run_host(&host, &["show-profile"])?;
-            } else if io::stdin().is_terminal() {
-                return run_setup(app, interactive_source()?);
-            } else {
+    let existing = list_profiles(&host)?;
+    let mut source = source;
+    if source == SetupSource::Existing {
+        let interactive = io::stdin().is_terminal();
+        let add_another = if existing.is_empty() {
+            if !interactive {
                 return Err("no OFTC profile is configured; run `oftc setup` in a terminal or pass setup options".into());
             }
-        }
-        SetupSource::Import(name) => {
-            if host_output(&host, "show-profile")?.status.success() {
-                return Err("OFTC already has a profile; setup will not overwrite it".into());
+            true
+        } else {
+            for profile in &existing {
+                println!("Configured: {} ({}) — {}", profile.name, profile.id, profile.gateway);
             }
-            run_host(&host, &["import-profile", &name])?;
+            interactive
+                && prompt("Add another VPN? (y/n)", "n")?
+                    .to_lowercase()
+                    .starts_with('y')
+        };
+        if add_another {
+            source = interactive_source(&existing)?;
         }
+    }
+    let ids: Vec<String> = match source {
+        SetupSource::Existing => existing.iter().map(|p| p.id.clone()).collect(),
+        SetupSource::Import(name) => vec![add_profile(&host, &["import-profile", &name])?],
+        SetupSource::File(path) => import_bundle(&host, &path)?,
         SetupSource::ImportWithDefaults {
             name,
             gateway,
             port,
-        } => {
-            if host_output(&host, "show-profile")?.status.success() {
-                return Err("OFTC already has a profile; setup will not overwrite it".into());
-            }
-            if run_host(&host, &["import-profile", &name]).is_err() {
-                if host_output(&host, "show-profile")?.status.success() {
-                    return Err("FortiClient import partly completed; inspect `oftc status` before retrying".into());
+        } => match add_profile(&host, &["import-profile", &name]) {
+            Ok(id) => vec![id],
+            Err(_) => {
+                if list_profiles(&host)?.len() > existing.len() {
+                    return Err("FortiClient import partly completed; inspect `oftc profiles` before retrying".into());
                 }
                 println!("FortiClient credentials were unavailable. Using its connection settings; enter the PSK when prompted.");
-                run_host(&host, &["save-profile", &gateway, &port.to_string()])?;
+                vec![add_profile(
+                    &host,
+                    &["save-profile", &gateway, &port.to_string(), "--name", &name],
+                )?]
             }
-        }
+        },
         SetupSource::Development => {
-            run_host(&host, &["import-development-profile"])?;
-            if !has_psk(&host)? {
-                try_development_psk(&host);
+            let id = add_profile(&host, &["import-development-profile"])?;
+            if !has_psk(&host, &id)? {
+                try_development_psk(&host, &id);
             }
+            vec![id]
         }
-        SetupSource::Manual { gateway, port, tcp } => {
-            if host_output(&host, "show-profile")?.status.success() {
-                return Err("OFTC already has a profile; setup will not overwrite it".into());
-            }
+        SetupSource::Manual {
+            gateway,
+            port,
+            tcp,
+            name,
+        } => {
             let port = port.to_string();
+            let mut args = vec!["save-profile", gateway.as_str(), port.as_str()];
             if tcp {
-                run_host(&host, &["save-profile", &gateway, &port, "--tcp"])?;
-            } else {
-                run_host(&host, &["save-profile", &gateway, &port])?;
+                args.push("--tcp");
             }
+            if let Some(name) = &name {
+                args.extend(["--name", name.as_str()]);
+            }
+            vec![add_profile(&host, &args)?]
         }
-    }
-    if !has_psk(&host)? {
-        println!("Enter the VPN PSK; it will be saved in your OFTC Keychain item.");
-        run_host(&host, &["provision-psk"])?;
+    };
+    for id in &ids {
+        if !has_psk(&host, id)? {
+            println!("Enter the VPN PSK for {id}; it will be saved in your OFTC Keychain item.");
+            run_host_for(&host, id, &["provision-psk"])?;
+        }
     }
     run_host(&host, &["activate"])?;
-    run_host(&host, &["install-config"])?;
+    for id in &ids {
+        run_host_for(&host, id, &["install-config"])?;
+    }
     println!("OFTC setup complete. Run `oftc connect` when ready.");
     Ok(())
 }
 
-fn run_connect(app: &Path) -> Result<(), Box<dyn Error>> {
-    host_executable(app)?;
-    let requested = app.canonicalize()?;
-    let host = host_executable(&requested)?;
-    run_host(&host, &["show-profile"])?;
-    if !has_psk(&host)? {
-        return Err("OFTC PSK is unavailable; run `oftc setup`".into());
-    }
-    let vpn = host_output(&host, "status")?;
-    if !vpn.status.success() || String::from_utf8_lossy(&vpn.stdout).contains("absent") {
-        return Err("OFTC VPN configuration is unavailable; run `oftc setup`".into());
-    }
-    let (home, _, target) = user_home_and_target()?;
-    let legacy = agent_plist(&home);
-    if legacy.symlink_metadata().is_ok() {
-        let installed = installed_host(&legacy)?;
-        if installed != host {
-            return Err(
-                "OFTC login agent points to a different app; remove it before changing apps".into(),
-            );
+/// Stops every profile's supervisor and tunnel.
+fn stop_all_profiles(host: &Path) -> Result<(), Box<dyn Error>> {
+    let mut failed = false;
+    for profile in list_profiles(host)? {
+        if let Err(error) = run_host_for(host, &profile.id, &["stop"]) {
+            eprintln!("could not stop {}: {error}", profile.name);
+            failed = true;
         }
-        if !vpn.stdout.is_empty()
-            && !String::from_utf8_lossy(&vpn.stdout).contains("status: disconnected")
-        {
-            return Err("disconnect OFTC before migrating its legacy login agent".into());
-        }
-        uninstall_legacy_agent()?;
-    } else if bundled_agent_status(&host)? == "not-registered" && loaded(&target) {
-        return Err(
-            "an OFTC agent is loaded without a known registration; stop it before connecting"
-                .into(),
-        );
     }
-    run_host(&host, &["prepare-connect"])?;
-    if let Err(error) = start_bundled_agent(&host, &home, &target) {
-        let _ = run_host(&host, &["cancel-connect-request"]);
-        return Err(error);
+    if failed {
+        return Err("one or more profiles could not be stopped".into());
     }
     Ok(())
 }
 
-fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
-    let host = host_executable(app)?;
-    let vpn = host_output(&host, "status")?;
-    if !vpn.status.success() {
-        return Err("could not read OFTC VPN status".into());
+fn profile_state(host: &Path, profile: &Profile) -> Result<String, Box<dyn Error>> {
+    let output = host_output_for(host, &profile.id, &["status"])?;
+    if !output.status.success() {
+        return Err(format!("could not read status of {}", profile.name).into());
     }
-    let vpn_text = String::from_utf8_lossy(&vpn.stdout);
-    print!("{vpn_text}");
-    let profile = host_output(&host, "show-profile")?;
-    if profile.status.success() {
-        print!("{}", String::from_utf8_lossy(&profile.stdout));
-    } else {
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Starts a supervised session for each selected profile. Profiles are
+/// independent processes, so they connect concurrently; their browser sign-ins
+/// queue behind each other. A supervisor outlives this command and logs to
+/// ~/Library/Logs/OFTC/<id>.log.
+fn run_connect(app: &Path, names: &[String]) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::CommandExt;
+    let requested = app.canonicalize()?;
+    let host = host_executable(&requested)?;
+    let profiles = select_profiles(list_profiles(&host)?, names)?;
+    let (home, _, _) = user_home_and_target()?;
+    let legacy = agent_plist(&home);
+    if legacy.symlink_metadata().is_ok() {
+        if installed_host(&legacy)? != host {
+            return Err(
+                "OFTC login agent points to a different app; remove it before changing apps".into(),
+            );
+        }
+        for profile in &profiles {
+            if !profile_state(&host, profile)?.contains("status: disconnected") {
+                return Err("disconnect OFTC before migrating its legacy login agent".into());
+            }
+        }
+        uninstall_legacy_agent()?;
+    }
+    let logs = home.join("Library/Logs/OFTC");
+    fs::create_dir_all(&logs)?;
+    let mut failures = Vec::new();
+    for profile in &profiles {
+        let outcome = (|| -> Result<Option<u32>, Box<dyn Error>> {
+            if !has_psk(&host, &profile.id)? {
+                return Err("PSK is unavailable; run `oftc setup`".into());
+            }
+            let state = profile_state(&host, profile)?;
+            if state.contains("absent") {
+                return Err("VPN configuration is unavailable; run `oftc setup`".into());
+            }
+            if !state.contains("status: disconnected") {
+                return Ok(None); // already active
+            }
+            let log_path = logs.join(format!("{}.log", profile.id));
+            let log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .custom_flags(0x100) // O_NOFOLLOW on macOS
+                .open(&log_path)?;
+            let child = host_command(&host, Some(&profile.id), &["supervise-profile"])
+                .stdin(Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .process_group(0)
+                .spawn()?;
+            Ok(Some(child.id()))
+        })();
+        match outcome {
+            Ok(Some(pid)) => println!(
+                "Connecting {} (supervisor pid {pid}); log: {}",
+                profile.name,
+                logs.join(format!("{}.log", profile.id)).display()
+            ),
+            Ok(None) => println!("{} is already active.", profile.name),
+            Err(error) => {
+                eprintln!("{}: {error}", profile.name);
+                failures.push(profile.name.clone());
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!("could not connect: {}", failures.join(", ")).into());
+    }
+    println!("Complete browser sign-in when prompted; profiles sign in one at a time.");
+    Ok(())
+}
+
+fn run_profiles(app: &Path) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    let profiles = list_profiles(&host)?;
+    if profiles.is_empty() {
+        println!("No OFTC profiles are configured; run `oftc setup`.");
+    }
+    for profile in profiles {
+        println!(
+            "{} ({}) — {} port {} {}",
+            profile.name,
+            profile.id,
+            profile.gateway,
+            profile.port,
+            profile.transport.to_uppercase()
+        );
+    }
+    Ok(())
+}
+
+fn run_status(app: &Path, names: &[String]) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    let all = list_profiles(&host)?;
+    if all.is_empty() {
         println!("OFTC profile: not configured");
+    }
+    for profile in select_profiles(all, names).unwrap_or_default() {
+        let state = profile_state(&host, &profile)?;
+        println!("{} ({}): {state}", profile.name, profile.id);
+        let shown = host_output_for(&host, &profile.id, &["show-profile"])?;
+        if shown.status.success() {
+            print!("  {}", String::from_utf8_lossy(&shown.stdout));
+        }
+        if state.contains("status: connected") {
+            let rekeys = host_output_for(&host, &profile.id, &["rekey-counts"])?;
+            if rekeys.status.success() {
+                print!("  {}", String::from_utf8_lossy(&rekeys.stdout));
+            } else {
+                println!("  CHILD_SA rekey counts unavailable");
+            }
+        }
     }
     let (home, _, target) = user_home_and_target()?;
     let legacy = agent_plist(&home);
@@ -523,13 +882,31 @@ fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
     if login.status.success() {
         print!("{}", String::from_utf8_lossy(&login.stdout));
     }
-    if vpn_text.contains("status: connected") {
-        let rekeys = host_output(&host, "rekey-counts")?;
-        if rekeys.status.success() {
-            print!("{}", String::from_utf8_lossy(&rekeys.stdout));
-        } else {
-            println!("CHILD_SA rekey counts unavailable");
+    Ok(())
+}
+
+/// Stops each named profile, waits for it alone, then deletes it: its VPN
+/// entry, Keychain PSK, settings and saved certificate pin. Others keep running.
+fn run_remove(app: &Path, names: &[String]) -> Result<(), Box<dyn Error>> {
+    let host = host_executable(app)?;
+    for profile in select_profiles(list_profiles(&host)?, names)? {
+        run_host_for(&host, &profile.id, &["stop"])?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let text = profile_state(&host, &profile)?;
+            if text.contains("status: disconnected")
+                || text.contains("status: invalid")
+                || text.contains("absent")
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{} did not disconnect; nothing was removed", profile.name).into());
+            }
+            thread::sleep(Duration::from_millis(250));
         }
+        run_host_for(&host, &profile.id, &["erase-profile"])?;
+        println!("Removed {}.", profile.name);
     }
     Ok(())
 }
@@ -537,13 +914,14 @@ fn run_status(app: &Path) -> Result<(), Box<dyn Error>> {
 fn wait_disconnected(host: &Path) -> Result<(), Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let status = host_output(host, "status")?;
-        let text = String::from_utf8_lossy(&status.stdout);
-        if status.status.success()
-            && (text.contains("status: disconnected")
+        let mut idle = true;
+        for profile in list_profiles(host)? {
+            let text = profile_state(host, &profile)?;
+            idle &= text.contains("status: disconnected")
                 || text.contains("status: invalid")
-                || text.contains("absent"))
-        {
+                || text.contains("absent");
+        }
+        if idle {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -582,15 +960,7 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
     if agent_plist(&home).is_file() {
         uninstall_legacy_agent()?;
     } else {
-        let status = host_output(&host, "status")?;
-        let text = String::from_utf8_lossy(&status.stdout);
-        if status.status.success()
-            && !text.contains("status: disconnected")
-            && !text.contains("status: invalid")
-            && !text.contains("absent")
-        {
-            run_host(&host, &["stop"])?;
-        }
+        stop_all_profiles(&host)?;
     }
     run_host(&host, &["unregister-agent"])?;
     if !wait_unloaded(&target) {
@@ -616,10 +986,6 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
 fn agent_plist(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{AGENT_LABEL}.plist"))
-}
-
-fn agent_log(home: &Path) -> PathBuf {
-    home.join("Library/Logs/OFTC/agent.log")
 }
 
 fn bundled_agent_status(host: &Path) -> Result<String, Box<dyn Error>> {
@@ -704,40 +1070,6 @@ fn installed_host(plist: &Path) -> Result<PathBuf, Box<dyn Error>> {
     Ok(path)
 }
 
-fn start_bundled_agent(host: &Path, home: &Path, target: &str) -> Result<(), Box<dyn Error>> {
-    let registration = bundled_agent_status(host)?;
-    if registration == "unknown" {
-        return Err("OFTC bundled login agent is unavailable; reinstall the app".into());
-    }
-    if registration == "requires-approval" {
-        return Err("allow OFTC in System Settings → General → Login Items & Extensions, then rerun `oftc connect`".into());
-    }
-    // The old external plist uses the same launchd label. ServiceManagement
-    // may report it as enabled even after its file and job are removed. Clear
-    // that stale registration before installing the app-bundled service.
-    if registration == "enabled" && !loaded(target) {
-        run_host(host, &["unregister-agent"])?;
-    }
-    run_host(host, &["register-agent"])?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !loaded(target) {
-        if Instant::now() >= deadline {
-            return Err(
-                "OFTC login agent registered but did not load; check System Settings and retry"
-                    .into(),
-            );
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    // register() bootstraps RunAtLoad. Kickstart also covers a previously
-    // registered job that exited after a deliberate macOS VPN stop.
-    launchctl(&["kickstart", target])?;
-    println!("OFTC agent launch requested; automatic connection at login follows OFTC settings.");
-    println!("VPN: oftc status");
-    println!("Logs: {}", agent_log(home).display());
-    Ok(())
-}
-
 fn stop_legacy_agent() -> Result<(), Box<dyn Error>> {
     let (home, _domain, target) = user_home_and_target()?;
     let host = installed_host(&agent_plist(&home))?;
@@ -745,7 +1077,7 @@ fn stop_legacy_agent() -> Result<(), Box<dyn Error>> {
     // The host's stop command first signals its supervisor lease, preventing a
     // fresh SAML attempt, then asks NetworkExtension to stop the VPN.
     let stop_result = if host.is_file() {
-        run_host(&host, &["stop"])
+        stop_all_profiles(&host)
     } else {
         Err(format!("installed app host is missing at {}", host.display()).into())
     };
@@ -790,31 +1122,48 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     };
     match action {
         Action::Setup(app, source) => run_setup(&app, source),
-        Action::Connect(app) => run_connect(&app),
-        Action::Disconnect(app) => {
-            let (home, _, target) = user_home_and_target()?;
+        Action::Profiles(app) => run_profiles(&app),
+        Action::Export(app, names, output) => run_export(&app, &names, output.as_deref()),
+        Action::Connect(app, names) => run_connect(&app, &names),
+        Action::Remove(app, names) => run_remove(&app.canonicalize()?, &names),
+        Action::Disconnect(app, names) => {
             let host = host_executable(&app.canonicalize()?)?;
-            let stop_result = if agent_plist(&home).is_file() {
+            let (home, _, _) = user_home_and_target()?;
+            if agent_plist(&home).is_file() {
                 if installed_host(&agent_plist(&home))? != host {
                     return Err(
                         "OFTC login agent points to a different app; disconnect using that app"
                             .into(),
                     );
                 }
-                stop_legacy_agent()
-            } else {
-                run_host(&host, &["stop"])
-            };
-            let unregister_result = run_host(&host, &["unregister-agent"]);
-            stop_result?;
-            unregister_result?;
-            if !wait_unloaded(&target) {
-                return Err("OFTC login agent is still loaded after disconnect".into());
+                stop_legacy_agent()?;
             }
-            println!("OFTC agent disabled for future GUI logins.");
+            let profiles = select_profiles(list_profiles(&host)?, &names)?;
+            let mut failed = Vec::new();
+            for profile in profiles {
+                match run_host_for(&host, &profile.id, &["stop"]) {
+                    Ok(()) => println!("Stop requested for {}.", profile.name),
+                    Err(error) => {
+                        eprintln!("{}: {error}", profile.name);
+                        failed.push(profile.name);
+                    }
+                }
+            }
+            if !failed.is_empty() {
+                return Err(format!("could not stop: {}", failed.join(", ")).into());
+            }
             Ok(())
         }
-        Action::Status(app) => run_status(&app),
+        Action::Status(app, names) => run_status(&app, &names),
+        Action::Autostart(app, name, enabled) => {
+            let host = host_executable(&app)?;
+            let profile = select_profiles(list_profiles(&host)?, &[name])?.remove(0);
+            run_host_for(
+                &host,
+                &profile.id,
+                &["set-autostart", if enabled { "on" } else { "off" }],
+            )
+        }
         Action::Uninstall { erase_profile } => run_uninstall(erase_profile),
     }
 }
@@ -827,19 +1176,90 @@ mod tests {
         s.split_whitespace().map(str::to_string).collect()
     }
 
+    fn sample_profiles() -> Vec<Profile> {
+        parse_profiles(
+            "office-vpn\tOffice VPN\tvpn.office.example\t9443\tudp\nwarehouse\tWarehouse\tvpn.warehouse.example\t9444\ttcp\nbroken line\n",
+        )
+    }
+
+    #[test]
+    fn profiles_parse_and_select_by_id_or_name() {
+        let all = sample_profiles();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].port, 9444);
+        assert_eq!(select_profiles(all.clone(), &[]).unwrap().len(), 2);
+        let picked = select_profiles(all.clone(), &words("warehouse")).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].id, "warehouse");
+        let by_name = select_profiles(all.clone(), &["office vpn".to_string()]).unwrap();
+        assert_eq!(by_name[0].id, "office-vpn");
+        assert_eq!(
+            select_profiles(all.clone(), &words("warehouse warehouse")).unwrap().len(),
+            1
+        );
+        assert!(select_profiles(all, &words("nope")).is_err());
+        assert!(select_profiles(Vec::new(), &[]).is_err());
+    }
+
+    #[test]
+    fn remove_needs_named_profiles() {
+        assert_eq!(
+            parse(&words("remove warehouse")).unwrap(),
+            Some(Action::Remove(DEFAULT_APP.into(), words("warehouse")))
+        );
+        assert!(parse(&words("remove")).is_err());
+        assert!(parse(&words("remove --all")).is_err());
+    }
+
+    #[test]
+    fn export_and_file_import_parse() {
+        assert_eq!(
+            parse(&words("export")).unwrap(),
+            Some(Action::Export(DEFAULT_APP.into(), Vec::new(), None))
+        );
+        assert_eq!(
+            parse(&words("export office-vpn Warehouse -o /tmp/vpns.oftc")).unwrap(),
+            Some(Action::Export(
+                DEFAULT_APP.into(),
+                words("office-vpn Warehouse"),
+                Some("/tmp/vpns.oftc".into())
+            ))
+        );
+        assert!(parse(&words("export -o")).is_err());
+        assert!(parse(&words("export -o a -o b")).is_err());
+        assert!(parse(&words("export --bogus")).is_err());
+        assert_eq!(
+            parse(&words("setup --from vpns.oftc")).unwrap(),
+            Some(Action::Setup(
+                DEFAULT_APP.into(),
+                SetupSource::File("vpns.oftc".into())
+            ))
+        );
+        assert!(parse(&words("setup --from")).is_err());
+    }
+
     #[test]
     fn public_lifecycle_is_small_and_exact() {
         assert_eq!(
             parse(&words("connect")).unwrap(),
-            Some(Action::Connect(DEFAULT_APP.into()))
+            Some(Action::Connect(DEFAULT_APP.into(), Vec::new()))
         );
         assert_eq!(
-            parse(&words("disconnect")).unwrap(),
-            Some(Action::Disconnect(DEFAULT_APP.into()))
+            parse(&words("disconnect warehouse office-vpn")).unwrap(),
+            Some(Action::Disconnect(DEFAULT_APP.into(), words("warehouse office-vpn")))
         );
         assert_eq!(
             parse(&words("status")).unwrap(),
-            Some(Action::Status(DEFAULT_APP.into()))
+            Some(Action::Status(DEFAULT_APP.into(), Vec::new()))
+        );
+        assert_eq!(
+            parse(&words("autostart warehouse on")).unwrap(),
+            Some(Action::Autostart(DEFAULT_APP.into(), "warehouse".into(), true))
+        );
+        assert!(parse(&words("autostart warehouse maybe")).is_err());
+        assert_eq!(
+            parse(&words("profiles")).unwrap(),
+            Some(Action::Profiles(DEFAULT_APP.into()))
         );
         assert_eq!(
             parse(&words("uninstall")).unwrap(),
@@ -864,7 +1284,7 @@ mod tests {
         assert!(parse(&words("connect --insecure-saml")).is_err());
         assert_eq!(
             parse(&words("--app /tmp/OFTC.app disconnect")).unwrap(),
-            Some(Action::Disconnect("/tmp/OFTC.app".into()))
+            Some(Action::Disconnect("/tmp/OFTC.app".into(), Vec::new()))
         );
         assert!(parse(&words("--app /tmp/OFTC.app uninstall")).is_err());
     }
@@ -892,7 +1312,23 @@ mod tests {
                 SetupSource::Manual {
                     gateway: "vpn.example.test".into(),
                     port: 9443,
-                    tcp: true
+                    tcp: true,
+                    name: None
+                }
+            ))
+        );
+        assert_eq!(
+            parse(&words(
+                "setup --gateway vpn.example.test --saml-port 9443 --name Lab"
+            ))
+            .unwrap(),
+            Some(Action::Setup(
+                DEFAULT_APP.into(),
+                SetupSource::Manual {
+                    gateway: "vpn.example.test".into(),
+                    port: 9443,
+                    tcp: false,
+                    name: Some("Lab".into())
                 }
             ))
         );
@@ -915,7 +1351,7 @@ mod tests {
         assert_eq!(parse(&[]).unwrap(), None);
         assert_eq!(
             parse(&words("--app /tmp/OFTC.app connect")).unwrap(),
-            Some(Action::Connect("/tmp/OFTC.app".into()))
+            Some(Action::Connect("/tmp/OFTC.app".into(), Vec::new()))
         );
         assert!(parse(&words("--app /tmp/OFTC.app help")).is_err());
     }
