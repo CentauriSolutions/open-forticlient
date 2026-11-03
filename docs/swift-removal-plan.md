@@ -31,13 +31,30 @@ documented edge. Tracked as Issues 41 to 50.
 | `oftc` CLI | Rust | unchanged role |
 | UI (menu bar, popover, welcome, onboarding, trust prompt, sparkline) | Swift unless Issue 47 says otherwise | thin main executable plus UI only |
 
-Process model (default, from Issue 45): `OFTCAgent` remains the bundle's main
-executable, so restricted entitlements stay where they are today. It becomes a
-~30-line Swift `main` that links a Rust host static library, the pattern
-`liboftc_migration.a` already uses. With arguments it calls
-`oftc_host_main(argc, argv)`. With none it starts the Swift UI. The alternative
-(a Rust main executable that loads the Swift UI) is chosen only if the Issue 45
-entitlement test favours it.
+Process model (decided in Issue 45: Option A): `OFTCAgent` remains the bundle's
+main executable, so the restricted entitlements, which are bound to
+`Contents/MacOS/OFTCAgent` when the bundle is signed, stay where they are today.
+It becomes a ~30-line Swift `main` that links one Rust host static library, the
+pattern `liboftc_migration.a` already uses. With arguments it calls
+`oftc_host_main(argc, argv)`. With none it starts the Swift UI. In-process
+libraries inherit the process's entitlements, so this needs no signing change.
+
+Consequences:
+
+- Rust owns every write to the NetworkExtension preferences (create, enable,
+  remove); the Swift UI only reads them. UI-side enable and create paths move
+  behind an idempotent `install-config` verb.
+- The host libraries (migration, host, later engine) go into a single staticlib
+  crate: one panic and allocator state and a smaller binary. The Issue 46 change
+  that introduces it owns the `build.sh` and signing-script edits.
+- The alternatives were not chosen: a Rust `main` loading a Swift UI dylib (adds a
+  signed artifact; revisit only if Issue 47 chooses a Rust UI) and Rust host logic
+  in an entitled nested helper (a second entitled binary to sign and notarize).
+
+The entitlement-placement test (does a nested Mach-O under `Contents/Helpers`
+inherit the app's entitlements?) has not been run. It is not needed for Option A;
+it would only matter for the nested-helper alternative, and no result is recorded
+here.
 
 ## The UI edge
 
@@ -129,8 +146,9 @@ offline build plus tests. Only Issue 48 claims activation and live traffic.
   `objc2` class must be registered under a plain Objective-C name before
   `startSystemExtensionMode`. Issue 44 answers this first.
 - **Entitlement placement.** Which executable may call `NETunnelProviderManager`
-  and `OSSystemExtensionManager` under its provisioning profile. Issue 45 tests
-  this; it decides the process model.
+  and `OSSystemExtensionManager` under its provisioning profile. Option A keeps
+  both in the entitled main executable, so it does not depend on the answer; the
+  untested placement question only affects the nested-helper alternative.
 - **Missing crates.** `objc2-network-extension`, `objc2-system-extensions`,
   `objc2-service-management` and `p384` are not in the offline cargo cache.
   Hand-write the small binding slice or vendor the crates; Issue 41 decides once.
