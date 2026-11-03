@@ -14,12 +14,14 @@ while (( $# )); do
 done
 
 for volume in /Volumes/Open\ Forticlient*(N); do
-    hdiutil detach "$volume" >/dev/null 2>&1 && print "ejected $volume"
+    hdiutil detach "$volume" >/dev/null 2>&1 && print "ejected $volume" || true
 done
 for dir in /private/tmp/oftc-build-*(N/) /private/tmp/oftctest-*(N/); do
     name=${dir:t}; name=${name#oftc-build-}
     (( ${keep[(Ie)$name]} )) && { print "kept $dir"; continue; }
-    [[ -d "$dir/OFTC.app" ]] && "$lsregister" -u "$dir/OFTC.app" >/dev/null 2>&1
+    # lsregister -u exits nonzero for a bundle that was never registered; under set -e
+    # that would stop the cleanup at the first such build directory.
+    [[ -d "$dir/OFTC.app" ]] && { "$lsregister" -u "$dir/OFTC.app" >/dev/null 2>&1 || true; }
     rm -rf -- "$dir" && print "removed $dir"
 done
 for data in "$HOME"/Library/Application\ Support/com.example.oftctest(N/); do
