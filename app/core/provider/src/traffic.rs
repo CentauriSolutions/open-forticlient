@@ -31,17 +31,25 @@ impl TrafficCounters {
 
     /// The JSON reply Swift's default `JSONEncoder` wrote, key for key.
     /// `uptime` is monotonic seconds; the host only ever subtracts two of them.
-    pub fn snapshot_json(&self, uptime: f64) -> Vec<u8> {
+    /// `None` for a non-finite or negative uptime, which is not valid JSON (and
+    /// which the host rejects); Swift's encoder threw in the same case.
+    ///
+    /// The counters take `&mut self`: a backend that shares them across threads
+    /// must synchronise them itself.
+    pub fn snapshot_json(&self, uptime: f64) -> Option<Vec<u8>> {
+        if !uptime.is_finite() || uptime < 0.0 {
+            return None;
+        }
         let id = self.session_id;
         let hex = |range: std::ops::Range<usize>| -> String {
             id[range].iter().map(|b| format!("{b:02X}")).collect()
         };
-        format!(
+        Some(format!(
             "{{\"version\":1,\"sessionID\":\"{}-{}-{}-{}-{}\",\"receivedBytes\":{},\"sentBytes\":{},\"uptime\":{}}}",
             hex(0..4), hex(4..6), hex(6..8), hex(8..10), hex(10..16),
             self.received, self.sent, uptime
         )
-        .into_bytes()
+        .into_bytes())
     }
 }
 
@@ -55,7 +63,7 @@ mod tests {
     use super::*;
 
     fn json(counters: &TrafficCounters, uptime: f64) -> String {
-        String::from_utf8(counters.snapshot_json(uptime)).unwrap()
+        String::from_utf8(counters.snapshot_json(uptime).unwrap()).unwrap()
     }
 
     #[test]
@@ -91,6 +99,15 @@ mod tests {
             )
         );
         assert!(text.len() <= 4096, "the host rejects a reply over 4096 bytes");
+    }
+
+    #[test]
+    fn a_non_finite_or_negative_uptime_has_no_snapshot() {
+        let counters = TrafficCounters::new().unwrap();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            assert_eq!(counters.snapshot_json(bad), None);
+        }
+        assert!(counters.snapshot_json(0.0).is_some());
     }
 
     #[test]
