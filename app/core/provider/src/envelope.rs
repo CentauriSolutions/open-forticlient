@@ -5,10 +5,12 @@
 //! adds an expiry and a single-use session id. Secrets are wiped when dropped
 //! (best effort, in safe code) and never printed.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
+use std::sync::{Mutex, PoisonError};
 
 use oftc_engine::transport::{ConnectOptions, OuterFamily, Wire};
+use zeroize::Zeroize;
 
 pub const LIVE_KEY: &str = "oftc.ephemeral-bootstrap.v1";
 pub const PREFLIGHT_KEY: &str = "oftc.ephemeral-preflight.v1";
@@ -32,6 +34,10 @@ pub enum EnvelopeError {
 pub struct Secret(Vec<u8>);
 
 impl Secret {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -48,11 +54,8 @@ impl Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        for byte in self.0.iter_mut() {
-            *byte = 0;
-        }
-        // Keep the stores above from being optimised out as dead.
-        std::hint::black_box(&mut self.0);
+        // Volatile, so the compiler cannot drop the stores as dead.
+        self.0.zeroize();
     }
 }
 
@@ -116,15 +119,17 @@ impl ConnectMode {
 }
 
 /// One option value as the backend received it. A value that is present but
-/// not binary data is rejected, so the backend must not drop it.
-#[derive(Debug, Clone)]
+/// not binary data is rejected, so the backend must not drop it. The data is
+/// the envelope that carries the PSK and token, so it is wiped on drop and
+/// never printed, and the type is deliberately not `Clone`.
+#[derive(Debug)]
 pub enum OptionValue {
-    Data(Vec<u8>),
+    Data(Secret),
     NotData,
 }
 
 /// The `startTunnel` options this provider reads.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct StartOptions {
     pub live: Option<OptionValue>,
     pub preflight: Option<OptionValue>,
@@ -192,7 +197,11 @@ impl BootstrapInput {
         let uid = take(lengths[1]);
         let psk = take(lengths[2]);
         let token = take(lengths[3]);
-        if !uid.iter().all(u8::is_ascii_hexdigit) || psk.contains(&0) || token.contains(&0) {
+        if gateway.contains(&0)
+            || !uid.iter().all(u8::is_ascii_hexdigit)
+            || psk.contains(&0)
+            || token.contains(&0)
+        {
             return Err(EnvelopeError::Invalid);
         }
         let text = |bytes: &[u8]| {
@@ -210,45 +219,55 @@ impl BootstrapInput {
     }
 }
 
-/// Remembers the session ids already used, so one envelope starts one tunnel.
+/// The session ids already used, with their expiry. One envelope starts one
+/// tunnel, so this must outlive any one [`Provider`](crate::provider::Provider):
+/// like Swift's static `usedIDs`, the real table is process-wide (see
+/// [`consume`]).
 #[derive(Default)]
-pub struct StartEnvelopes {
-    used: HashMap<[u8; 16], u64>,
+struct ReplayTable(BTreeMap<[u8; 16], u64>);
+
+static PROCESS_REPLAYS: Mutex<ReplayTable> = Mutex::new(ReplayTable(BTreeMap::new()));
+
+/// Validate and consume the start options at unix time `now`, against the
+/// process-wide replay table. Every rejection leaves the table unchanged.
+pub fn consume(options: &StartOptions, now: u64) -> Result<StartMode, EnvelopeError> {
+    let mut table = PROCESS_REPLAYS.lock().unwrap_or_else(PoisonError::into_inner);
+    consume_in(&mut table, options, now)
 }
 
-impl StartEnvelopes {
-    /// Validate and consume the start options at unix time `now`. Every
-    /// rejection leaves the replay set unchanged.
-    pub fn consume(&mut self, options: &StartOptions, now: u64) -> Result<StartMode, EnvelopeError> {
-        let preflight = options.preflight.is_some();
-        if options.live.is_some() == preflight {
-            return Err(EnvelopeError::Invalid);
-        }
-        let Some(OptionValue::Data(data)) =
-            (if preflight { &options.preflight } else { &options.live })
-        else {
-            return Err(EnvelopeError::Invalid);
-        };
-        let (id, expires_at, secret) = decode_envelope(data, now)?;
-        if id == [0; 16] {
-            return Err(EnvelopeError::Invalid);
-        }
-        let input = BootstrapInput::decode(secret.as_bytes(), !preflight)?;
-        if preflight && options.mode.is_some() {
-            return Err(EnvelopeError::Invalid);
-        }
-        let mode = match &options.mode {
-            Some(OptionValue::Data(bytes)) => ConnectMode::decode(bytes)?,
-            Some(OptionValue::NotData) => return Err(EnvelopeError::Invalid),
-            None => ConnectMode::UDP_DEFAULT,
-        };
-        self.used.retain(|_, expiry| *expiry > now);
-        if self.used.len() >= MAX_REMEMBERED_STARTS || self.used.contains_key(&id) {
-            return Err(EnvelopeError::Invalid);
-        }
-        self.used.insert(id, expires_at);
-        Ok(if preflight { StartMode::Preflight(input) } else { StartMode::Live(input, mode) })
+fn consume_in(
+    table: &mut ReplayTable,
+    options: &StartOptions,
+    now: u64,
+) -> Result<StartMode, EnvelopeError> {
+    let preflight = options.preflight.is_some();
+    if options.live.is_some() == preflight {
+        return Err(EnvelopeError::Invalid);
     }
+    let Some(OptionValue::Data(data)) =
+        (if preflight { &options.preflight } else { &options.live })
+    else {
+        return Err(EnvelopeError::Invalid);
+    };
+    let (id, expires_at, secret) = decode_envelope(data.as_bytes(), now)?;
+    if id == [0; 16] {
+        return Err(EnvelopeError::Invalid);
+    }
+    let input = BootstrapInput::decode(secret.as_bytes(), !preflight)?;
+    if preflight && options.mode.is_some() {
+        return Err(EnvelopeError::Invalid);
+    }
+    let mode = match &options.mode {
+        Some(OptionValue::Data(bytes)) => ConnectMode::decode(bytes.as_bytes())?,
+        Some(OptionValue::NotData) => return Err(EnvelopeError::Invalid),
+        None => ConnectMode::UDP_DEFAULT,
+    };
+    table.0.retain(|_, expiry| *expiry > now);
+    if table.0.len() >= MAX_REMEMBERED_STARTS || table.0.contains_key(&id) {
+        return Err(EnvelopeError::Invalid);
+    }
+    table.0.insert(id, expires_at);
+    Ok(if preflight { StartMode::Preflight(input) } else { StartMode::Live(input, mode) })
 }
 
 #[cfg(test)]
@@ -279,14 +298,24 @@ pub(crate) mod tests {
         data
     }
 
+    /// A session id no other test has used, since the real table is process-wide.
     pub fn id() -> [u8; 16] {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let mut id = [0xA5; 16];
+        id[..8].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+        id
+    }
+
+    /// A fixed id for tests that use a private table.
+    fn fixed_id() -> [u8; 16] {
         std::array::from_fn(|i| i as u8 + 1)
     }
 
     pub fn live(now: u64, id: [u8; 16]) -> StartOptions {
         let secret = hbr1("integration.invalid", UID, b"synthetic", b"synthetic-token");
         StartOptions {
-            live: Some(OptionValue::Data(envelope(now + 60, id, &secret))),
+            live: Some(OptionValue::Data(Secret::new(envelope(now + 60, id, &secret)))),
             ..StartOptions::default()
         }
     }
@@ -294,80 +323,80 @@ pub(crate) mod tests {
     fn preflight(now: u64, id: [u8; 16]) -> StartOptions {
         let secret = hbr1("integration.invalid", UID, b"synthetic", b"");
         StartOptions {
-            preflight: Some(OptionValue::Data(envelope(now + 60, id, &secret))),
+            preflight: Some(OptionValue::Data(Secret::new(envelope(now + 60, id, &secret)))),
             ..StartOptions::default()
         }
     }
 
     fn data(bytes: &[u8]) -> Option<OptionValue> {
-        Some(OptionValue::Data(bytes.to_vec()))
+        Some(OptionValue::Data(Secret::new(bytes.to_vec())))
     }
 
     #[test]
     fn preflight_has_no_token_and_a_replay_is_rejected() {
-        let mut starts = StartEnvelopes::default();
-        let options = preflight(1000, id());
-        let Ok(StartMode::Preflight(input)) = starts.consume(&options, 1000) else {
+        let mut starts = ReplayTable::default();
+        let options = preflight(1000, fixed_id());
+        let Ok(StartMode::Preflight(input)) = consume_in(&mut starts, &options, 1000) else {
             panic!("wrong mode");
         };
         assert!(input.token.is_empty());
         assert_eq!(input.uid, UID);
-        assert_eq!(starts.consume(&options, 1000).unwrap_err(), EnvelopeError::Invalid);
+        assert_eq!(consume_in(&mut starts, &options, 1000).unwrap_err(), EnvelopeError::Invalid);
     }
 
     #[test]
     fn an_id_is_reusable_once_its_entry_has_expired() {
-        let mut starts = StartEnvelopes::default();
-        starts.consume(&preflight(1000, id()), 1000).unwrap();
+        let mut starts = ReplayTable::default();
+        consume_in(&mut starts, &preflight(1000, fixed_id()), 1000).unwrap();
         assert!(matches!(
-            starts.consume(&preflight(1100, id()), 1100),
+            consume_in(&mut starts, &preflight(1100, fixed_id()), 1100),
             Ok(StartMode::Preflight(_))
         ));
     }
 
     #[test]
     fn live_and_preflight_together_are_ambiguous() {
-        let mut both = live(1000, id());
+        let mut both = live(1000, fixed_id());
         both.preflight = preflight(1000, [9; 16]).preflight;
-        let mut starts = StartEnvelopes::default();
-        assert_eq!(starts.consume(&both, 1000).unwrap_err(), EnvelopeError::Invalid);
+        let mut starts = ReplayTable::default();
+        assert_eq!(consume_in(&mut starts, &both, 1000).unwrap_err(), EnvelopeError::Invalid);
         assert_eq!(
-            starts.consume(&StartOptions::default(), 1000).unwrap_err(),
+            consume_in(&mut starts, &StartOptions::default(), 1000).unwrap_err(),
             EnvelopeError::Invalid
         );
     }
 
     #[test]
     fn a_rejected_start_does_not_burn_its_id() {
-        let mut starts = StartEnvelopes::default();
-        let mut bad_mode = live(1000, id());
+        let mut starts = ReplayTable::default();
+        let mut bad_mode = live(1000, fixed_id());
         bad_mode.mode = Some(OptionValue::NotData);
-        assert!(starts.consume(&bad_mode, 1000).is_err());
-        assert!(starts.consume(&live(1000, id()), 1000).is_ok());
+        assert!(consume_in(&mut starts, &bad_mode, 1000).is_err());
+        assert!(consume_in(&mut starts, &live(1000, fixed_id()), 1000).is_ok());
     }
 
     #[test]
     fn a_preflight_with_a_mode_is_rejected() {
-        let mut options = preflight(1000, id());
+        let mut options = preflight(1000, fixed_id());
         options.mode = data(&[1, 1, 4, 1, 0, 0, 0, 0]);
-        assert!(StartEnvelopes::default().consume(&options, 1000).is_err());
+        assert!(consume_in(&mut ReplayTable::default(), &options, 1000).is_err());
     }
 
     #[test]
     fn a_zero_session_id_and_non_data_options_are_rejected() {
-        let mut starts = StartEnvelopes::default();
-        assert!(starts.consume(&live(1000, [0; 16]), 1000).is_err());
+        let mut starts = ReplayTable::default();
+        assert!(consume_in(&mut starts, &live(1000, [0; 16]), 1000).is_err());
         let not_data = StartOptions { live: Some(OptionValue::NotData), ..Default::default() };
-        assert!(starts.consume(&not_data, 1000).is_err());
+        assert!(consume_in(&mut starts, &not_data, 1000).is_err());
     }
 
     #[test]
     fn the_replay_set_is_bounded() {
-        let mut starts = StartEnvelopes::default();
+        let mut starts = ReplayTable::default();
         for n in 1..=MAX_REMEMBERED_STARTS as u8 {
-            starts.consume(&live(1000, [n; 16]), 1000).unwrap();
+            consume_in(&mut starts, &live(1000, [n; 16]), 1000).unwrap();
         }
-        assert!(starts.consume(&live(1000, [200; 16]), 1000).is_err());
+        assert!(consume_in(&mut starts, &live(1000, [200; 16]), 1000).is_err());
     }
 
     #[test]
@@ -375,7 +404,7 @@ pub(crate) mod tests {
         // A browser flow that began at t=1000 and finished at t=1500 gets an
         // envelope built then; no SAML runs here.
         let secret = hbr1("integration.invalid", UID, b"synthetic", b"synthetic-token");
-        let late = envelope(1500 + 60, id(), &secret);
+        let late = envelope(1500 + 60, fixed_id(), &secret);
         assert!(decode_envelope(&late, 1500 + 30).is_ok());
         assert_eq!(decode_envelope(&late, 1500 + 60).unwrap_err(), EnvelopeError::Expired);
     }
@@ -384,13 +413,13 @@ pub(crate) mod tests {
     fn envelope_lifetime_and_framing_are_enforced() {
         let secret = hbr1("integration.invalid", UID, b"p", b"t");
         assert_eq!(
-            decode_envelope(&envelope(1000 + 121, id(), &secret), 1000).unwrap_err(),
+            decode_envelope(&envelope(1000 + 121, fixed_id(), &secret), 1000).unwrap_err(),
             EnvelopeError::Expired
         );
-        let mut truncated = envelope(1060, id(), &secret);
+        let mut truncated = envelope(1060, fixed_id(), &secret);
         truncated.pop();
         assert_eq!(decode_envelope(&truncated, 1000).unwrap_err(), EnvelopeError::Invalid);
-        let mut wrong_magic = envelope(1060, id(), &secret);
+        let mut wrong_magic = envelope(1060, fixed_id(), &secret);
         wrong_magic[4] = 2;
         assert_eq!(decode_envelope(&wrong_magic, 1000).unwrap_err(), EnvelopeError::Invalid);
         assert_eq!(decode_envelope(&[], 1000).unwrap_err(), EnvelopeError::Invalid);
@@ -421,10 +450,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tcp6_mode_is_carried_to_the_live_start() {
-        let mut options = live(1500, id());
+        let mut options = live(1500, fixed_id());
         options.mode = data(&[1, 2, 6, 0, 192, 0, 0, 2]);
         let Ok(StartMode::Live(_, ConnectMode(selected))) =
-            StartEnvelopes::default().consume(&options, 1530)
+            consume_in(&mut ReplayTable::default(), &options, 1530)
         else {
             panic!("live transport mode lost");
         };
@@ -436,7 +465,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_default_mode_is_udp_over_ipv4() {
-        let Ok(StartMode::Live(_, mode)) = StartEnvelopes::default().consume(&live(1000, id()), 1000)
+        let Ok(StartMode::Live(_, mode)) = consume_in(&mut ReplayTable::default(), &live(1000, fixed_id()), 1000)
         else {
             panic!("expected a live start");
         };
@@ -470,5 +499,83 @@ pub(crate) mod tests {
         let secret = Secret(b"SYNTHETIC".to_vec());
         assert_eq!(format!("{secret:?}"), "Secret(..)");
         assert_eq!(secret.into_string().unwrap(), "SYNTHETIC");
+    }
+
+    #[test]
+    fn the_process_wide_table_rejects_a_replay_across_callers() {
+        let options = live(unix_secs(), id());
+        assert!(consume(&options, unix_secs()).is_ok());
+        assert!(consume(&options, unix_secs()).is_err());
+    }
+
+    fn unix_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn a_nul_in_the_gateway_is_rejected() {
+        assert!(BootstrapInput::decode(&hbr1("gate\0way", UID, b"p", b"t"), true).is_err());
+    }
+
+    #[test]
+    fn hbr1_field_lengths_are_bounded_at_both_edges() {
+        let gateway = |n: usize| hbr1(&"a".repeat(n), UID, b"p", b"t");
+        // Gateway 253 is the DNS limit; 254 is one over. (Labels are not checked here.)
+        assert!(BootstrapInput::decode(&gateway(253), true).is_ok());
+        assert!(BootstrapInput::decode(&gateway(254), true).is_err());
+        let psk = |n: usize| hbr1("g", UID, &vec![b'p'; n], b"t");
+        assert!(BootstrapInput::decode(&psk(1024), true).is_ok());
+        assert!(BootstrapInput::decode(&psk(1025), true).is_err());
+        let token = |n: usize| hbr1("g", UID, b"p", &vec![b't'; n]);
+        assert!(BootstrapInput::decode(&token(1024), true).is_ok());
+        assert!(BootstrapInput::decode(&token(1025), true).is_err());
+    }
+
+    #[test]
+    fn the_uid_must_be_exactly_32_hex_digits_in_either_case() {
+        assert!(BootstrapInput::decode(&hbr1("g", &UID[..31], b"p", b"t"), true).is_err());
+        assert!(BootstrapInput::decode(&hbr1("g", &format!("{UID}A"), b"p", b"t"), true).is_err());
+        let mixed = "aBcDeF0123456789AbCdEf0123456789";
+        assert_eq!(mixed.len(), 32);
+        assert_eq!(BootstrapInput::decode(&hbr1("g", mixed, b"p", b"t"), true).unwrap().uid, mixed);
+    }
+
+    #[test]
+    fn a_record_over_4096_bytes_or_with_a_wrong_length_field_is_rejected() {
+        // Fields individually in range, together over the 4096 cap.
+        let big = hbr1(&"a".repeat(253), UID, &vec![b'p'; 1024], &vec![b't'; 1024]);
+        assert!(big.len() < 4096);
+        let mut over = big.clone();
+        over.extend(vec![0; 4096]);
+        assert!(BootstrapInput::decode(&over, true).is_err());
+        // A length field that disagrees with the bytes present.
+        let mut lying = hbr1("g", UID, b"p", b"t");
+        lying[5] += 1;
+        assert!(BootstrapInput::decode(&lying, true).is_err());
+        // The envelope's size field disagreeing with its payload.
+        let secret = hbr1("g", UID, b"p", b"t");
+        let mut envelope = envelope(1060, fixed_id(), &secret);
+        envelope[30] += 1;
+        assert_eq!(decode_envelope(&envelope, 1000).unwrap_err(), EnvelopeError::Invalid);
+        assert!(decode_envelope(&envelope_with_size(0), 1000).is_err());
+    }
+
+    fn envelope_with_size(size: u16) -> Vec<u8> {
+        let mut data = envelope(1060, fixed_id(), b"x");
+        data[29..31].copy_from_slice(&size.to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn option_values_never_print_their_bytes() {
+        let options = live(1000, fixed_id());
+        let printed = format!("{options:?}");
+        assert!(!printed.contains("synthetic"), "{printed}");
+        assert!(!printed.contains("79, 70"), "{printed}");
+        let input = BootstrapInput::decode(&hbr1("g", UID, b"hunter2", b"tok"), true).unwrap();
+        assert!(!format!("{input:?}").contains("hunter2"));
     }
 }

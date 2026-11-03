@@ -317,6 +317,7 @@ dependencies = [
  "oftc-crypto",
  "oftc-engine",
  "oftc-preflight",
+ "zeroize",
 ]
 
 [[package]]
