@@ -48,6 +48,8 @@ jobs:
           cargo fetch --locked --manifest-path client/Cargo.toml
 
       - name: Run Rust unit tests
+        # pipefail: without it tee's status hides a failing cargo test.
+        shell: bash -eo pipefail {0}
         run: zsh scripts/test-rust.sh 2>&1 | tee test.log
 
       - name: Test summary
@@ -74,6 +76,7 @@ jobs:
       - name: Build and run the Swift checks
         # app/build.sh refuses an existing output directory and only accepts
         # /private/tmp/oftc-build-*. It does not sign, install or connect.
+        shell: bash -eo pipefail {0}
         run: |
           echo "OFTC_BUILD_DIR=/private/tmp/oftc-build-ci" >> "$GITHUB_ENV"
           OFTC_BUILD_DIR=/private/tmp/oftc-build-ci zsh app/build.sh 2>&1 | tee build.log

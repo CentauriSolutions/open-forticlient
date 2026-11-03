@@ -313,9 +313,7 @@ impl Lifecycle {
             (Exchange::DeleteChild, Body::Empty) => (),
             (Exchange::DeleteChild, Body::DeleteChild(spi))
                 if pending.expected_child_reply_spi == Some(spi) =>
-            {
-                
-            }
+            {}
             (Exchange::DeleteOldChild, Body::Empty) => (),
             (Exchange::DeleteOldChild, Body::DeleteChild(spi))
                 if pending.expected_child_reply_spi == Some(spi) => (),
