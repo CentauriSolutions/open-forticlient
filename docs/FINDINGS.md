@@ -2,7 +2,7 @@
 
 Historical Fortinet-backed analysis; the current client is described in
 [architecture.md](architecture.md). The referenced controller source is in Git
-commit `b9ade25`.
+the `legacy-controller` tag.
 
 Captured from FortiClient `7.4.3.4323` on macOS 26 (Apple Silicon), March 2026 build.
 
@@ -188,7 +188,7 @@ or survived — you cannot rely on it. Screen *lock* (no suspend) always survive
 that is the §C win and is unaffected.
 
 So the client must reconnect itself on wake. `oftc connect --supervise`
-(`b9ade25:client/src/main.rs`) does it **in-process**: on the `STATUS 3` it re-runs the
+(`legacy-controller:client/src/main.rs`) does it **in-process**: on the `STATUS 3` it re-runs the
 whole SSO→CONNECT flow with exponential backoff (2s→20s, reset after a healthy
 session), re-establishing phase2 with a fresh single-use token. One process spans
 the entire drop→reconnect, so there is no window where nothing holds the socket.
@@ -204,7 +204,7 @@ runs `connect --supervise` with `KeepAlive=false`; launchd only loads the job
 (`oftc up` starts it, `oftc down` boots it out), and reconnection is entirely the
 process's own job.
 
-### 7b. Awake drops: a path stall plus an iked DPD bug ([Issue 11](../Issues/011-survive-path-stalls-iked-dpd-bug.md))
+### 7b. Awake drops: a path stall plus an iked DPD bug (Issue 11)
 
 The tunnel also drops while the Mac is awake, every few minutes to few hours,
 always with `racoon error report: -306`. This predates the reconnect watchdog. The

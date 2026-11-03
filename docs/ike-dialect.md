@@ -7,7 +7,7 @@ numeric tables below were dumped from the daemon's own name-map arrays
 
 This is historical protocol analysis. The standalone OFTC provider passed
 authenticated traffic without Fortinet's private license notify; see
-[Issue 3](../Issues/003-does-free-tier-require-forticlient-connect.md).
+Issue 3.
 
 ## Vendor IDs (IKE_SA_INIT)
 
@@ -65,7 +65,7 @@ Confirmed in this build: `ikev2_add_forticlient_connect` is called from **both**
 its payload is `LicGenRawLicenseInfo2(g_fct_user, g_fct_reg_status, g_fct_emssn,
 g_fct_ems_tenant_id, …)` tagged with the 2-byte `0x00f1` family word. So a stock
 strongSwan IKE_AUTH would also omit it. Gateway acceptance is recorded in
-[Issue 3](../Issues/003-does-free-tier-require-forticlient-connect.md).
+Issue 3.
 
 ### `CLIENT_RESUME` (0xF118) + `IKE_SESSION_RESUME`
 

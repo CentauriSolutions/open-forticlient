@@ -2,7 +2,7 @@
 
 Historical Fortinet-backed analysis; the current client is described in
 [architecture.md](architecture.md). The referenced controller source is in Git
-commit `b9ade25`.
+the `legacy-controller` tag.
 
 Goal: decrypt vpn.plist `AuthInfo` (and the `psk "Enc …"` in iked.conf) locally,
 so `oftc` can obtain the plaintext pre-shared key without an operator pasting it.
@@ -91,7 +91,7 @@ Addresses (thinned x86_64 iked, all resolvable by name in `otool -tV`):
 
 ## Implementation
 
-`b9ade25:client/src/fctcrypt.rs` implements SHA-1 / HMAC-SHA1 / PBKDF2-HMAC-SHA1 in pure
+`legacy-controller:client/src/fctcrypt.rs` implements SHA-1 / HMAC-SHA1 / PBKDF2-HMAC-SHA1 in pure
 Rust (RFC test vectors in-module) and shells `openssl enc -aes-192-ecb` for the
 CTR keystream (consistent with `tls.rs`). `profile.rs` calls `decrypt_enc` on the
 profile's `AuthInfo` whenever no `$FORTIGATE_PSK`/`.env`/`~/.config/oftc/psk`

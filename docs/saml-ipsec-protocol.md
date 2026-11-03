@@ -66,8 +66,8 @@ The gateway responds with an HTML page whose only content is a JS redirect to
 > raw `/saml?<id>` endpoint then drives the SAML flow in a browser.
 
 The historical loopback listener and probe recipe are available with
-`git show b9ade25:tools/saml_catch.py` and
-`git show b9ade25:tools/README.md`.
+`git show legacy-controller:tools/saml_catch.py` and
+`git show legacy-controller:tools/README.md`.
 
 ### Step 5/6 — the callback
 

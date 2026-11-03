@@ -31,5 +31,4 @@ the package. Installation, extension activation, and live traffic require
 separate validation. See the [roadmap](../docs/ROADMAP.md).
 
 [`docs/architecture.md`](../docs/architecture.md) maps each source directory.
-The previous `spikes/` builds and the Fortinet-backed CLI are in Git commit
-`b9ade25`; no active build input points there.
+The previous `spikes/` builds and the Fortinet-backed CLI are under the `legacy-controller` tag; no active build input points there.
