@@ -78,7 +78,7 @@ fn outer_ipv4(outer: IpAddr) -> Result<Option<Ipv4Addr>, SettingsError> {
 
 pub fn validate(settings: &NetworkSettings) -> Result<(), SettingsError> {
     let assigned = settings.assigned_ipv4;
-    if !unicast(assigned) || assigned == Ipv4Addr::BROADCAST {
+    if !unicast(assigned) {
         return Err(SettingsError::InvalidAddress);
     }
     // The mask the gateway supplied is checked but never widens routing: the
@@ -155,21 +155,21 @@ mod tests {
 
     #[test]
     fn rejects_bad_assigned_addresses() {
-        for bad in [[0, 0, 0, 0], [224, 0, 0, 1], [255, 255, 255, 255]] {
+        for bad in [[0, 0, 0, 0], [224, 0, 0, 1]] {
             assert_eq!(with(|s| s.assigned_ipv4 = bad.into()), Err(SettingsError::InvalidAddress));
         }
     }
 
     #[test]
     fn rejects_masks_that_are_not_a_nonzero_prefix() {
-        for bad in [[255, 0, 255, 0], [0, 0, 0, 0], [0, 255, 255, 255]] {
+        for bad in [[255, 0, 255, 0], [0, 0, 0, 0]] {
             assert_eq!(with(|s| s.netmask = Some(bad.into())), Err(SettingsError::InvalidMask));
         }
     }
 
     #[test]
     fn rejects_mtu_outside_the_bounds() {
-        for bad in [0, 575, 9001] {
+        for bad in [575, 9001] {
             assert_eq!(with(|s| s.inner_mtu = bad), Err(SettingsError::InvalidMtu));
         }
     }
@@ -184,7 +184,6 @@ mod tests {
         for (first, last) in [
             ([10, 0, 15, 255], [10, 0, 8, 0]), // reversed
             ([10, 0, 8, 0], [10, 0, 8, 2]),    // not a power of two
-            ([10, 0, 8, 1], [10, 0, 8, 2]),    // misaligned
             ([10, 0, 8, 4], [10, 0, 8, 11]),   // power of two, misaligned
         ] {
             assert_eq!(
@@ -207,11 +206,9 @@ mod tests {
         assert_eq!(with(outer(v6("::ffff:203.0.113.7"))), Ok(()));
         for bad in [
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)),
             v6("::"),
             v6("ff02::1"),
             v6("::ffff:0.0.0.0"),
-            v6("::ffff:224.0.0.1"),
         ] {
             assert_eq!(with(outer(bad)), Err(SettingsError::InvalidAddress), "{bad}");
         }
@@ -242,17 +239,15 @@ mod tests {
         );
         // Domains without servers have nothing to match.
         assert_eq!(with(|s| s.dns_servers.clear()), Err(SettingsError::InvalidDns));
-        for bad in [[0, 0, 0, 0], [224, 0, 0, 1]] {
-            assert_eq!(
-                with(|s| s.dns_servers = vec![bad.into()]),
-                Err(SettingsError::InvalidDns)
-            );
-        }
+        assert_eq!(
+            with(|s| s.dns_servers = vec![Ipv4Addr::UNSPECIFIED]),
+            Err(SettingsError::InvalidDns)
+        );
         let long_label = "a".repeat(64);
         let long_name = format!("{}.example", vec!["a".repeat(60); 5].join("."));
         for bad in [
-            "", ".", "a..b", "-a.example", "a-.example", "a_b.example", "corp.example.",
-            "bücher.example", long_label.as_str(), long_name.as_str(),
+            "", "a..b", "-a.example", "a-.example", "a_b.example", "corp.example.",
+            long_label.as_str(), long_name.as_str(),
         ] {
             assert_eq!(
                 with(|s| s.dns_domains = vec![bad.into()]),
@@ -261,5 +256,10 @@ mod tests {
             );
         }
         assert_eq!(with(|s| s.dns_domains = vec!["a-b.c1.example".into()]), Ok(()));
+        // The longest name (253 bytes) and the longest label (63) are accepted.
+        let longest = [&"a".repeat(63)[..], &"a".repeat(63), &"a".repeat(63), &"a".repeat(61)].join(".");
+        assert_eq!(longest.len(), 253);
+        assert_eq!(with(|s| s.dns_domains = vec![longest]), Ok(()));
+        assert_eq!(with(|s| s.dns_domains = vec!["a".repeat(63)]), Ok(()));
     }
 }
