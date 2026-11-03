@@ -56,9 +56,10 @@ pub trait Tunnel: Send + Sync {
     /// error; the caller treats it as fatal to the tunnel.
     fn write_packet(&self, packet: &[u8]) -> Result<(), TunnelError>;
 
-    /// Wake a blocked [`read_packets`](Tunnel::read_packets) and make it and
-    /// every later `read_packets`, `write_packet` and `apply_settings` return
-    /// [`TunnelError::Closed`]. Does not touch installed settings, so
+    /// Wake a blocked [`read_packets`](Tunnel::read_packets) and make it, and
+    /// every later `read_packets` once any already queued packets are drained,
+    /// return [`TunnelError::Closed`]; later `write_packet` and `apply_settings`
+    /// calls return it too. Does not touch installed settings, so
     /// `clear_settings` still works afterwards. Safe to call more than once.
     fn close(&self);
 
