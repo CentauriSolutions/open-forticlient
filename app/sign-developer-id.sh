@@ -134,7 +134,7 @@ for path in sys.argv[1:]:
     teams.add(team)
 if len(teams) != 1:
     sys.exit('Nested code has inconsistent Developer teams')
-print('App, provider, CLI, and four dylibs share one Developer ID team and timestamps')
+print(f'App, provider, CLI, and {len(sys.argv) - 5} dylibs share one Developer ID team and timestamps')
 PY
 print "Developer ID signed candidate: $app"
 print 'This script did not notarize, install, activate, or start the candidate.'
