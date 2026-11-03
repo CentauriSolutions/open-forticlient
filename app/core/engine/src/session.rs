@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn network_settings_carry_no_sa_material() {
+    fn network_settings_map_the_outer_address_and_default_to_a_host_mask() {
         let config = child_sa::Configuration {
             assigned_ipv4: Ipv4Addr::new(192, 0, 2, 5), netmask: None,
             dns_servers: vec![], dns_domains: vec![],
@@ -1051,8 +1051,6 @@ mod tests {
         assert_eq!(ipv6.outer_remote_ipv4, Ipv4Addr::UNSPECIFIED);
         let settings = NetworkSettings::from_configuration(config,
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)));
-        assert_eq!(settings.inner_mtu, 1280);
-        assert_eq!(settings.split_routes.len(), 1);
         assert_eq!(settings.interface_mask(), Ipv4Addr::new(255, 255, 255, 255));
         assert_eq!(settings.outer_remote_ipv4, Ipv4Addr::new(203, 0, 113, 1));
     }

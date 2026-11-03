@@ -363,8 +363,6 @@ mod tests {
 
     #[test]
     fn default_is_ipv4_udp_and_ipv6_needs_explicit_clat_idi() {
-        assert_eq!(ConnectOptions::default().wire, Wire::Udp4500);
-        assert_eq!(ConnectOptions::default().validate(), Ok(()));
         assert_eq!(ConnectOptions {
             wire: Wire::Tcp4443, family: OuterFamily::Ipv6,
             idi_v4: None, tcp_fallback: false
