@@ -9,9 +9,11 @@ if [ -d "$old" ] && [ ! -L "$old" ] &&
     /bin/rm -rf "$old"
 fi
 
-# The signed app owns onboarding. A package install can only hand off to the
-# logged-in user; managed and headless installs finish without a GUI session.
-if ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
+# The signed app owns onboarding. An interactive install (the Installer app)
+# hands off to the logged-in user so the tray icon appears at once. installer(8)
+# and MDM runs set COMMAND_LINE_INSTALL and finish without a GUI session, unless
+# an Installer window is open too.
+if [ -n "${COMMAND_LINE_INSTALL:-}" ] && ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
     exit 0
 fi
 console_user=$(/usr/bin/stat -f %Su /dev/console)
@@ -24,7 +26,11 @@ case "$console_uid" in
 esac
 app="/Applications/Open Forticlient.app"
 if [ -d "$app" ]; then
-    /usr/bin/sudo -u "$console_user" /bin/launchctl asuser "$console_uid" \
-        /usr/bin/open "$app" --args --after-install >/dev/null 2>&1 || true
+    # launchctl must be root to enter the user's session (it fails with
+    # "Operation not permitted" when run as the user); sudo then drops to the user.
+    if ! /bin/launchctl asuser "$console_uid" /usr/bin/sudo -u "$console_user" \
+            /usr/bin/open "$app" --args --after-install >/dev/null 2>&1; then
+        echo "OFTC: could not open the app for $console_user; open it from Applications." >&2
+    fi
 fi
 exit 0
