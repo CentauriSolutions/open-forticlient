@@ -20,10 +20,11 @@ cli="$build/oftc"
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$extension/Contents/Info.plist") == "${bundle_id}.provider" ]] || {
     print -u2 'Provider bundle ID mismatch'; exit 2
 }
-[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist") == 41 \
-   && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$extension/Contents/Info.plist") == 28 ]] || {
-    print -u2 'Expected host build 41 and provider build 28'; exit 2
-}
+for plist in "$app/Contents/Info.plist" "$extension/Contents/Info.plist"; do
+    [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist") =~ '^[0-9]+$' ]] || {
+        print -u2 "Missing or non-numeric build number: $plist"; exit 2
+    }
+done
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") == OFTCAgent \
    && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$extension/Contents/Info.plist") == OFTCTunnel \
    && -f "$app/Contents/Resources/OFTC.icns" && -f "$cli" ]] || {

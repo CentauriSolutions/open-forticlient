@@ -30,6 +30,10 @@ commit messages that say "Issue 13" mean GitHub issue #13.
 - **Keep evidence levels distinct.** Offline build, Developer ID signing,
   notarization, installation, extension activation, and live traffic are
   separate claims; say which one a result supports.
+- **Releases are local.** CI only builds, tests and makes an unsigned package;
+  signing, notarization and the GitHub draft release run from `app/release.sh` on a
+  maintainer's Mac ([docs/releasing.md](docs/releasing.md)). Never put signing
+  identities, profiles or notary credentials in the repo or in CI.
 - **Release dev assets when a test is done.** Every `OFTC.app` a build leaves
   under `/private/tmp` gets registered with Launch Services under the shipping
   bundle id, and stale copies keep old file-type declarations, icons and names

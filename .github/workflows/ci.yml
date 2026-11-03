@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test, unsigned package
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: for f in app/*.sh scripts/*.sh app/package-scripts/*; do zsh -n "$f" 2>/dev/null || bash -n "$f"; done
+
+      - name: Fetch locked Rust dependencies
+        # build.sh builds with --offline, so fill the cargo cache first.
+        run: |
+          cargo fetch --locked --manifest-path app/core/modp14/Cargo.toml
+          cargo fetch --locked --manifest-path client/Cargo.toml
+
+      - name: Build and run all offline checks
+        # app/build.sh refuses an existing output directory and only accepts
+        # /private/tmp/oftc-build-*. It does not sign, install or connect.
+        run: |
+          echo "OFTC_BUILD_DIR=/private/tmp/oftc-build-ci" >> "$GITHUB_ENV"
+          OFTC_BUILD_DIR=/private/tmp/oftc-build-ci zsh app/build.sh
+
+      - name: Assemble unsigned package
+        run: OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh
+
+      - name: Name the artifact
+        id: name
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$OFTC_BUILD_DIR/OFTC.app/Contents/Info.plist")
+          short=$(git rev-parse --short=8 HEAD)
+          mkdir -p out
+          cp "$OFTC_BUILD_DIR/OFTC-$version-unsigned.pkg" "out/OFTC-$version-$short-unsigned.pkg"
+          (cd out && shasum -a 256 *.pkg > SHA256SUMS)
+          echo "dir=out" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oftc-unsigned-pkg
+          path: out/
+          if-no-files-found: error
+          retention-days: 14

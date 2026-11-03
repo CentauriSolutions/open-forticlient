@@ -5,6 +5,7 @@
 - [Architecture](architecture.md): active source and runtime boundaries.
 - [Operations](operations.md): setup, connection, stop, and diagnostics.
 - [Roadmap](ROADMAP.md): distribution and rollout work.
+- [Releasing](releasing.md): CI, and building, signing and publishing a release.
 
 ## Historical research
 
