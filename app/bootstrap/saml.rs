@@ -242,19 +242,22 @@ const CALLBACK_HTML: &str = include_str!("callback.html");
 /// Log lines naming the tunnel being signed in, from the supervisor's
 /// `OFTC_PROFILE_NAME` / `OFTC_PROFILE_GATEWAY`; empty when neither is set.
 fn tunnel_lines() -> String {
-    let line = |label: &str, dots: usize, value: String| {
+    // A label, a dotted leader that takes whatever width is left, and the value.
+    // On narrow screens the value drops to its own indented line instead.
+    let line = |label: &str, value: String| {
         format!(
-            "<div class=\"l\"><span class=\"d\">&gt; {label} {} </span>{}</div>\n",
-            ".".repeat(dots),
+            "<div class=\"l kv stack\"><span class=\"d\">&gt; {label}</span>\
+             <span class=\"lead d\" aria-hidden=\"true\"></span>\
+             <span class=\"val\">{}</span></div>\n",
             html_escape(&value)
         )
     };
     let mut out = String::new();
     if let Ok(name) = std::env::var("OFTC_PROFILE_NAME") {
-        if !name.is_empty() { out.push_str(&line("tunnel", 31, name)); }
+        if !name.is_empty() { out.push_str(&line("tunnel", name)); }
     }
     if let Ok(gateway) = std::env::var("OFTC_PROFILE_GATEWAY") {
-        if !gateway.is_empty() { out.push_str(&line("gateway", 30, gateway)); }
+        if !gateway.is_empty() { out.push_str(&line("gateway", gateway)); }
     }
     out
 }
@@ -390,8 +393,8 @@ mod tests {
         let page = callback_page(None);
         std::env::remove_var("OFTC_PROFILE_NAME");
         std::env::remove_var("OFTC_PROFILE_GATEWAY");
-        assert!(page.contains("&gt; tunnel ") && page.contains("Colo &lt;1&gt;"));
-        assert!(page.contains("&gt; gateway ") && page.contains("vpn.lab.example"));
+        assert!(page.contains("&gt; tunnel<") && page.contains("Colo &lt;1&gt;"));
+        assert!(page.contains("&gt; gateway<") && page.contains("vpn.lab.example"));
         assert!(!page.contains("{{"));
     }
 

@@ -21,8 +21,12 @@
   }
   main { width: 100%; max-width: 640px; }
   pre.banner { margin: 0 0 1.2em; line-height: 1.1; font-size: 13px; white-space: pre; overflow: hidden; }
-  .l { white-space: pre-wrap; word-break: break-all; min-height: 1.55em; }
+  .l { white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere; min-height: 1.55em; }
   .d { color: var(--dim); }
+  .kv { display: flex; align-items: baseline; gap: .6em; white-space: nowrap; }
+  .kv .lead { flex: 1 1 2ch; min-width: 2ch; overflow: hidden; }
+  .kv .lead::after { content: "............................................................................................................................................"; }
+  .kv .val { flex: 0 1 auto; min-width: 0; white-space: normal; word-break: normal; overflow-wrap: break-word; }
   .bad { color: var(--bad); text-shadow: 0 0 6px rgba(255, 77, 77, .45); }
   .big { margin-top: 1em; font-size: 1.15em; }
   .cur { display: inline-block; width: .6em; background: var(--fg); animation: blink 1s steps(1) infinite; }
@@ -33,7 +37,13 @@
   #rain { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none;
           opacity: 0; transition: opacity .6s; }
   #rain.on { opacity: 1; }
-  @media (max-width: 480px) { body { font-size: 13px; } pre.banner { font-size: 10px; } }
+  @media (max-width: 480px) {
+    body { font-size: 13px; } pre.banner { font-size: 10px; }
+    /* Long values (tunnel, gateway) go on their own line, lightly indented. */
+    .kv.stack { flex-wrap: wrap; gap: 0; }
+    .kv.stack .lead { display: none; }
+    .kv.stack .val { flex: 1 0 100%; padding-left: 2ch; }
+  }
   @media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
 </style>
 </head>
@@ -44,12 +54,12 @@
 | (_) | _|  | || (__
  \___/|_|   |_| \___|  open-forticlient</pre>
 <div id="log">
-{{TUNNEL}}  <div class="l ok"><span class="d">&gt; intercepting saml assertion .......... </span>[ok]</div>
-  <div class="l ok"><span class="d">&gt; tokenid captured (single-use) ........ </span>[ok]</div>
-  <div class="l ok"><span class="d">&gt; handing off to IKEv2 / EAP ........... </span>[ok]</div>
+{{TUNNEL}}  <div class="l kv ok"><span class="d">&gt; intercepting saml assertion</span><span class="lead d" aria-hidden="true"></span><span class="val">[ok]</span></div>
+  <div class="l kv ok"><span class="d">&gt; tokenid captured (single-use)</span><span class="lead d" aria-hidden="true"></span><span class="val">[ok]</span></div>
+  <div class="l kv ok"><span class="d">&gt; handing off to IKEv2 / EAP</span><span class="lead d" aria-hidden="true"></span><span class="val">[ok]</span></div>
   <div class="l ok big">ACCESS GRANTED. close this tab, operator.</div>
 
-  <div class="l fail"><span class="d">&gt; intercepting saml assertion .......... </span><span class="bad">[FAIL]</span></div>
+  <div class="l kv fail"><span class="d">&gt; intercepting saml assertion</span><span class="lead d" aria-hidden="true"></span><span class="val bad">[FAIL]</span></div>
   <div class="l fail"><span class="d">&gt; no tokenid in that request. check the terminal.</span></div>
   <div class="l fail big bad">ACCESS DENIED.</div>
 </div>
