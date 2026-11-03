@@ -3,19 +3,6 @@
 use crate::rekey::{self, Accepted, EspKeys, Offer};
 use oftc_modp14::{Secret, EXPONENT_LEN, PUBLIC_LEN};
 
-unsafe extern "C" {
-    fn oftc_swift_random(output: *mut u8, len: usize) -> i32;
-    fn oftc_swift_hmac(
-        sha256: i32,
-        key: *const u8,
-        key_len: usize,
-        input: *const u8,
-        input_len: usize,
-        digest: *mut u8,
-        digest_len: usize,
-    ) -> i32;
-}
-
 pub struct Ephemeral {
     pub offer: Offer,
     key: Secret,
@@ -33,13 +20,13 @@ impl Ephemeral {
             return Err(rekey::Error::InvalidSpi);
         }
         let mut ni = [0u8; 32];
-        if unsafe { oftc_swift_random(ni.as_mut_ptr(), ni.len()) } != 0 {
+        if oftc_crypto::fill_random(&mut ni).is_err() {
             return Err(rekey::Error::Crypto);
         }
         let mut spi = [0u8; 4];
         let mut new_spi = 0;
         for _ in 0..8 {
-            if unsafe { oftc_swift_random(spi.as_mut_ptr(), spi.len()) } != 0 {
+            if oftc_crypto::fill_random(&mut spi).is_err() {
                 ni.fill(0);
                 return Err(rekey::Error::Crypto);
             }
@@ -53,7 +40,7 @@ impl Ephemeral {
             return Err(rekey::Error::InvalidSpi);
         }
         let mut exponent_seed = [0u8; EXPONENT_LEN];
-        if unsafe { oftc_swift_random(exponent_seed.as_mut_ptr(), exponent_seed.len()) } != 0 {
+        if oftc_crypto::fill_random(&mut exponent_seed).is_err() {
             exponent_seed.fill(0);
             ni.fill(0);
             return Err(rekey::Error::Crypto);
@@ -95,25 +82,7 @@ impl Ephemeral {
             &mut secret,
             ni,
             nr,
-            |key, input| {
-                let mut digest = [0u8; 32];
-                let rc = unsafe {
-                    oftc_swift_hmac(
-                        1,
-                        key.as_ptr(),
-                        key.len(),
-                        input.as_ptr(),
-                        input.len(),
-                        digest.as_mut_ptr(),
-                        digest.len(),
-                    )
-                };
-                if rc != 0 {
-                    digest.fill(0);
-                    return Err(rekey::Error::Crypto);
-                }
-                Ok(digest)
-            },
+            |key, input| Ok(oftc_crypto::hmac_sha256(key, input)),
         )
     }
 }
@@ -157,24 +126,7 @@ mod tests {
             &mut secret,
             &first.offer.ni,
             &second.offer.ni,
-            |key, input| {
-                let mut digest = [0u8; 32];
-                if unsafe {
-                    oftc_swift_hmac(
-                        1,
-                        key.as_ptr(),
-                        key.len(),
-                        input.as_ptr(),
-                        input.len(),
-                        digest.as_mut_ptr(),
-                        digest.len(),
-                    )
-                } != 0
-                {
-                    return Err(rekey::Error::Crypto);
-                }
-                Ok(digest)
-            },
+            |key, input| Ok(oftc_crypto::hmac_sha256(key, input)),
         )
         .unwrap();
         assert_eq!(a, b);

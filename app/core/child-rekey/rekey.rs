@@ -493,35 +493,8 @@ pub fn collision(
 mod tests {
     use super::*;
 
-    unsafe extern "C" {
-        fn oftc_swift_hmac(
-            sha256: i32,
-            key: *const u8,
-            key_len: usize,
-            input: *const u8,
-            input_len: usize,
-            digest: *mut u8,
-            digest_len: usize,
-        ) -> i32;
-    }
-
     fn prf(key: &[u8], input: &[u8]) -> Result<[u8; 32], Error> {
-        let mut digest = [0u8; 32];
-        let rc = unsafe {
-            oftc_swift_hmac(
-                1,
-                key.as_ptr(),
-                key.len(),
-                input.as_ptr(),
-                input.len(),
-                digest.as_mut_ptr(),
-                digest.len(),
-            )
-        };
-        if rc != 0 {
-            return Err(Error::Crypto);
-        }
-        Ok(digest)
+        Ok(oftc_crypto::hmac_sha256(key, input))
     }
 
     fn selector() -> Vec<u8> {

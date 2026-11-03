@@ -21,14 +21,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
-unsafe extern "C" {
-    fn oftc_swift_group20_generate(key: *mut *mut std::ffi::c_void, public: *mut u8) -> i32;
-    fn oftc_swift_group20_shared(key: *mut std::ffi::c_void, peer: *const u8,
-                                 peer_len: usize, secret: *mut u8, secret_len: usize) -> i32;
-    fn oftc_swift_group20_free(key: *mut std::ffi::c_void);
-    fn oftc_swift_random(output: *mut u8, len: usize) -> i32;
-}
-
 const READ_SLICE: Duration = Duration::from_millis(250);
 const READY_SLICE: Duration = Duration::from_millis(2);
 const INNER_MTU: usize = 1280;
@@ -201,36 +193,16 @@ enum Poll {
     IkeRekeyReply(u8, Vec<u8>),
 }
 
-struct Key(*mut std::ffi::c_void);
-impl Drop for Key { fn drop(&mut self) { unsafe { oftc_swift_group20_free(self.0) }; } }
-
 fn random<const N: usize>() -> Result<[u8; N], Error> {
-    let mut bytes = [0; N];
-    if unsafe { oftc_swift_random(bytes.as_mut_ptr(), bytes.len()) } != 0 {
-        return Err(Error::SaInit);
-    }
-    Ok(bytes)
+    oftc_crypto::random_array().map_err(|_| Error::SaInit)
 }
 
-fn new_key() -> Result<(Key, [u8; 96]), Error> {
-    let mut raw = std::ptr::null_mut();
-    let mut public = [0; 96];
-    if unsafe { oftc_swift_group20_generate(&mut raw, public.as_mut_ptr()) } != 0
-        || raw.is_null() {
-        if !raw.is_null() { unsafe { oftc_swift_group20_free(raw) }; }
-        return Err(Error::SaInit);
-    }
-    Ok((Key(raw), public))
+fn new_key() -> Result<(oftc_crypto::Group20Key, [u8; 96]), Error> {
+    oftc_crypto::Group20Key::generate().map_err(|_| Error::SaInit)
 }
 
-fn shared(key: &Key, peer: &[u8; 96]) -> Result<[u8; 48], Error> {
-    let mut secret = [0; 48];
-    if unsafe { oftc_swift_group20_shared(key.0, peer.as_ptr(), peer.len(),
-                                            secret.as_mut_ptr(), secret.len()) } != 0 {
-        secret.fill(0);
-        return Err(Error::SaInit);
-    }
-    Ok(secret)
+fn shared(key: &oftc_crypto::Group20Key, peer: &[u8; 96]) -> Result<[u8; 48], Error> {
+    key.shared_secret(peer).map(|secret| *secret).map_err(|_| Error::SaInit)
 }
 
 fn matching_reply(ike: &[u8], expected_id: u32, spi_i: &[u8; 8],
@@ -1112,21 +1084,13 @@ mod tests {
 
     fn peer_packet_body(id: u32, flags: u8, exchange: u8,
                         first: u8, body: &[u8]) -> Vec<u8> {
-        unsafe extern "C" {
-            fn oftc_swift_aes256_cbc(encrypt: i32, key: *const u8, key_len: usize,
-                iv: *const u8, iv_len: usize, input: *const u8, input_len: usize,
-                output: *mut u8, output_len: usize) -> i32;
-        }
         let keys = ike_keys();
         let iv = [9u8; 16];
         let mut plain = body.to_vec();
         let pad = (16 - ((plain.len() + 1) % 16)) % 16;
         plain.resize(plain.len() + pad, 0);
         plain.push(pad as u8);
-        let mut ciphertext = vec![0u8; plain.len()];
-        assert_eq!(unsafe { oftc_swift_aes256_cbc(1, keys.sk_er.as_ptr(), 32,
-            iv.as_ptr(), 16, plain.as_ptr(), plain.len(), ciphertext.as_mut_ptr(),
-            ciphertext.len()) }, 0);
+        let ciphertext = oftc_crypto::aes256_cbc_encrypt(&keys.sk_er, &iv, &plain).unwrap();
         let mut packet = Vec::new();
         packet.extend_from_slice(&[1; 8]);
         packet.extend_from_slice(&[2; 8]);

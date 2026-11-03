@@ -45,37 +45,9 @@ pub trait Crypto {
 #[derive(Clone, Copy, Default)]
 pub struct SystemCrypto;
 
-unsafe extern "C" {
-    fn oftc_swift_aes256_cbc(
-        encrypt: i32,
-        key: *const u8,
-        key_len: usize,
-        iv: *const u8,
-        iv_len: usize,
-        input: *const u8,
-        input_len: usize,
-        output: *mut u8,
-        output_len: usize,
-    ) -> i32;
-    fn oftc_swift_hmac(
-        sha256: i32,
-        key: *const u8,
-        key_len: usize,
-        input: *const u8,
-        input_len: usize,
-        digest: *mut u8,
-        digest_len: usize,
-    ) -> i32;
-    fn oftc_swift_random(output: *mut u8, output_len: usize) -> i32;
-}
-
 impl Crypto for SystemCrypto {
     fn random_iv(&self) -> Result<[u8; BLOCK], Error> {
-        let mut iv = [0; BLOCK];
-        if unsafe { oftc_swift_random(iv.as_mut_ptr(), iv.len()) } != 0 {
-            return Err(Error::CryptoFailure);
-        }
-        Ok(iv)
+        oftc_crypto::random_array().map_err(|_| Error::CryptoFailure)
     }
 
     fn cbc(
@@ -88,44 +60,16 @@ impl Crypto for SystemCrypto {
         if input.is_empty() || !input.len().is_multiple_of(BLOCK) {
             return Err(Error::InvalidPacket);
         }
-        let mut output = vec![0; input.len()];
-        let rc = unsafe {
-            oftc_swift_aes256_cbc(
-                encrypt as i32,
-                key.as_ptr(),
-                key.len(),
-                iv.as_ptr(),
-                iv.len(),
-                input.as_ptr(),
-                input.len(),
-                output.as_mut_ptr(),
-                output.len(),
-            )
+        let output = if encrypt {
+            oftc_crypto::aes256_cbc_encrypt(key, iv, input)
+        } else {
+            oftc_crypto::aes256_cbc_decrypt(key, iv, input)
         };
-        if rc != 0 {
-            output.fill(0);
-            return Err(Error::CryptoFailure);
-        }
-        Ok(output)
+        output.map_err(|_| Error::CryptoFailure)
     }
 
     fn hmac_sha1(&self, key: &[u8; 20], input: &[u8]) -> Result<[u8; 20], Error> {
-        let mut digest = [0; 20];
-        if unsafe {
-            oftc_swift_hmac(
-                0,
-                key.as_ptr(),
-                key.len(),
-                input.as_ptr(),
-                input.len(),
-                digest.as_mut_ptr(),
-                digest.len(),
-            )
-        } != 0
-        {
-            return Err(Error::CryptoFailure);
-        }
-        Ok(digest)
+        Ok(oftc_crypto::hmac_sha1(key, input))
     }
 }
 

@@ -29,3 +29,4 @@ connect-body.bin
 local.key
 **/local.key
 *.key
+app/target/
