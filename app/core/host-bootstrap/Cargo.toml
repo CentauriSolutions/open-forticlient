@@ -1,0 +1,10 @@
+[package]
+name = "oftc-host-bootstrap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "oftc_host_bootstrap"
+path = "src/lib.rs"
+crate-type = ["cdylib"]

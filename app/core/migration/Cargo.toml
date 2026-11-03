@@ -1,0 +1,10 @@
+[package]
+name = "oftc-migration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "oftc_migration"
+path = "src/lib.rs"
+crate-type = ["staticlib"]

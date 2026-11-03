@@ -45,17 +45,10 @@ cargo test --locked --workspace --manifest-path "$root/Cargo.toml"
 cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 cp "$CARGO_TARGET_DIR/release/liboftc_provider_ffi.dylib" "$CARGO_TARGET_DIR/release/liboftc_preflight.dylib" \
     "$provider_frameworks/"
+cp "$CARGO_TARGET_DIR/release/liboftc_host_bootstrap.dylib" "$app_frameworks/"
+cp "$CARGO_TARGET_DIR/release/liboftc_migration.a" "$build/liboftc_migration.a"
 unset CARGO_TARGET_DIR
 
-rustc --edition=2021 --crate-type cdylib -C opt-level=z \
-    "$root/core/host-bootstrap/lib.rs" \
-    -C 'link-arg=-Wl,-install_name,@rpath/liboftc_host_bootstrap.dylib' \
-    -o "$app_frameworks/liboftc_host_bootstrap.dylib"
-rustc --edition=2021 --crate-type staticlib -C opt-level=z \
-    "$root/Host/migration.rs" \
-    -o "$build/liboftc_migration.a"
-rustc --edition=2021 --test "$root/Host/migration.rs" -o "$build/migration-tests"
-"$build/migration-tests"
 xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
     -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \

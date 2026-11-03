@@ -1,8 +1,8 @@
 //! One-time FortiClient profile PSK migration. The live host does not use this
 //! function during a tunnel start. It returns only an in-memory secret buffer.
 #![allow(dead_code)]
-#[path = "../migration/fctcrypt.rs"] mod fctcrypt;
-#[path = "../migration/profile.rs"] mod profile;
+mod fctcrypt;
+mod profile;
 
 use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
