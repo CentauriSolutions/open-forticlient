@@ -5,7 +5,7 @@
 //! handler is ignored, which replaces the per-call epoch counters the Swift code
 //! used.
 
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,7 +50,10 @@ pub fn await_callback<T>(
     }
     let (tx, rx) = channel();
     start(Resolver(Arc::new(Mutex::new(Some(tx)))));
-    rx.recv_timeout(timeout).map_err(|_| AppleError::TimedOut)
+    rx.recv_timeout(timeout).map_err(|e| match e {
+        RecvTimeoutError::Timeout => AppleError::TimedOut,
+        RecvTimeoutError::Disconnected => AppleError::HandlerDropped,
+    })
 }
 
 #[cfg(test)]
@@ -84,6 +87,10 @@ mod tests {
         let got = await_callback(wait, off_main, |r| kept.set(Some(r)));
         assert_eq!(got, Err(AppleError::TimedOut));
         kept.take().unwrap().resolve(3);
+
+        // Every resolver dropped unresolved: reported at once, not as a timeout.
+        let got: Result<i32, _> = await_callback(Duration::from_secs(5), off_main, drop);
+        assert_eq!(got, Err(AppleError::HandlerDropped));
 
         // On the main thread it refuses without starting the operation.
         let started = Cell::new(false);
