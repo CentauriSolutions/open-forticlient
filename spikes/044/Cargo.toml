@@ -1,0 +1,15 @@
+[package]
+name = "oftc-ne-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway proof for Issue 44: can a Rust executable be a packet tunnel
+# provider system extension? Not part of any build input.
+[workspace]
+
+[dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-network-extension = "0.3.2"

@@ -30,3 +30,4 @@ local.key
 **/local.key
 *.key
 app/target/
+spikes/*/target/
