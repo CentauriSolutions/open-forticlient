@@ -206,7 +206,7 @@ fn parse_sa(body: &[u8]) -> Result<u8, String> {
         }
         let id = u16be(&t[6..8]);
         if typ == 1 {
-            if len != 12 || &t[8..12] != [0x80, 14, 1, 0] {
+            if len != 12 || t[8..12] != [0x80, 14, 1, 0] {
                 return Err("AES-CBC key length not 256".into());
             }
         } else if len != 8 {

@@ -8,3 +8,6 @@ publish = false
 name = "oftc_host_bootstrap"
 path = "src/lib.rs"
 crate-type = ["cdylib"]
+
+[lints]
+workspace = true

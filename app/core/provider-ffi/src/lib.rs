@@ -1060,7 +1060,7 @@ mod tests {
             BAD_ARGUMENT
         );
         assert_eq!(
-            unsafe { text_arg(1usize as *const u8, 11, 10) }.unwrap_err(),
+            unsafe { text_arg(std::ptr::dangling::<u8>(), 11, 10) }.unwrap_err(),
             BAD_ARGUMENT
         );
         assert_eq!(
@@ -1068,7 +1068,7 @@ mod tests {
             BAD_ARGUMENT
         );
         assert_eq!(
-            unsafe { byte_arg(1usize as *const u8, 11, 10) }.unwrap_err(),
+            unsafe { byte_arg(std::ptr::dangling::<u8>(), 11, 10) }.unwrap_err(),
             BAD_ARGUMENT
         );
     }

@@ -106,7 +106,7 @@ type CbcEncryptor = cbc::Encryptor<aes::Aes256>;
 type CbcDecryptor = cbc::Decryptor<aes::Aes256>;
 
 fn check_blocks(input: &[u8]) -> Result<(), Error> {
-    if input.is_empty() || input.len() % BLOCK_LEN != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(BLOCK_LEN) {
         return Err(Error::InvalidInput);
     }
     Ok(())

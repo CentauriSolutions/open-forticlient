@@ -14,10 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build, test, unsigned package
+  # Cheap checks gate the expensive ones: lint, then Rust tests, then the macOS
+  # build with the Swift checks. Each job is its own required check.
+  lint:
+    name: Rust lint
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,26 +27,62 @@ jobs:
         run: for f in app/*.sh scripts/*.sh app/package-scripts/*; do zsh -n "$f" 2>/dev/null || bash -n "$f"; done
 
       - name: Fetch locked Rust dependencies
-        # build.sh builds with --offline, so fill the cargo cache first.
         run: |
           cargo fetch --locked --manifest-path app/Cargo.toml
           cargo fetch --locked --manifest-path client/Cargo.toml
 
-      - name: Build and run all offline checks
+      - name: Clippy
+        run: zsh scripts/lint-rust.sh
+
+  test:
+    name: Rust tests
+    needs: lint
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch locked Rust dependencies
+        run: |
+          cargo fetch --locked --manifest-path app/Cargo.toml
+          cargo fetch --locked --manifest-path client/Cargo.toml
+
+      - name: Run Rust unit tests
+        run: zsh scripts/test-rust.sh 2>&1 | tee test.log
+
+      - name: Test summary
+        if: always()
+        run: |
+          {
+            echo "### Rust tests"
+            grep -E '^test result:' test.log | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build, test, unsigned package
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch locked Rust dependencies
+        run: |
+          cargo fetch --locked --manifest-path app/Cargo.toml
+          cargo fetch --locked --manifest-path client/Cargo.toml
+
+      - name: Build and run the Swift checks
         # app/build.sh refuses an existing output directory and only accepts
         # /private/tmp/oftc-build-*. It does not sign, install or connect.
         run: |
           echo "OFTC_BUILD_DIR=/private/tmp/oftc-build-ci" >> "$GITHUB_ENV"
           OFTC_BUILD_DIR=/private/tmp/oftc-build-ci zsh app/build.sh 2>&1 | tee build.log
 
-      - name: Test summary
+      - name: Swift check summary
         if: always()
         run: |
           {
-            echo "### Tests"
-            echo "Rust:"
-            grep -E '^test result:' build.log | sed 's/^/- /'
-            echo "Swift checks:"
+            echo "### Swift checks"
             grep -E 'checks? passed|synthetic checks passed|isolated commands only' build.log | sed 's/^/- /'
           } >> "$GITHUB_STEP_SUMMARY"
 

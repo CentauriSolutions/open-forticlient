@@ -12,3 +12,6 @@ crate-type = ["cdylib"]
 [dependencies]
 oftc-crypto = { path = "../crypto" }
 oftc-engine = { path = "../engine" }
+
+[lints]
+workspace = true

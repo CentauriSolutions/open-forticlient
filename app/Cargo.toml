@@ -12,3 +12,10 @@ members = [
 
 [profile.release]
 opt-level = "z"
+
+# Baseline for the existing code; Issue 50 reviews each allowance.
+[workspace.lints.clippy]
+# The C ABI contracts are documented in oftc_ffi.h, not in per-function docs.
+missing_safety_doc = "allow"
+# Handshake and rekey constructors take the full set of IKE inputs.
+too_many_arguments = "allow"

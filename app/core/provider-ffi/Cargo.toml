@@ -11,3 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oftc-engine = { path = "../engine" }
+
+[lints]
+workspace = true

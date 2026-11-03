@@ -314,7 +314,7 @@ impl Lifecycle {
             (Exchange::DeleteChild, Body::DeleteChild(spi))
                 if pending.expected_child_reply_spi == Some(spi) =>
             {
-                ()
+                
             }
             (Exchange::DeleteOldChild, Body::Empty) => (),
             (Exchange::DeleteOldChild, Body::DeleteChild(spi))
@@ -477,7 +477,7 @@ fn parse_body(first: u8, plaintext: &[u8]) -> Result<Body, String> {
 }
 
 fn cbc(encrypt: bool, key: &[u8; 32], iv: &[u8; 16], input: &[u8]) -> Result<Vec<u8>, String> {
-    if input.is_empty() || input.len() % 16 != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(16) {
         return Err("invalid CBC length".into());
     }
     let out = if encrypt {
@@ -571,7 +571,7 @@ fn open_inner(
         return Err("unexpected INFORMATIONAL header".into());
     }
     let icv_at = packet.len() - ICV_LEN;
-    if (icv_at - 48) % 16 != 0 {
+    if !(icv_at - 48).is_multiple_of(16) {
         return Err("invalid INFORMATIONAL ciphertext length".into());
     }
     let expected = auth::prf_sha256(integ, &packet[..icv_at])?;

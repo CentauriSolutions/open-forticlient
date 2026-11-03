@@ -8,8 +8,10 @@ NetworkExtension provisioning profiles never leave it.
 
 `.github/workflows/ci.yml` runs on `macos-15` for each push to `main`, each pull
 request, and each merge-queue group (the repo merges through a queue, which needs the
-`merge_group` trigger). It runs `app/build.sh` (Rust and Swift unit checks, an unsigned bundle),
-then `OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh`, and uploads
+`merge_group` trigger). Three jobs run in order, each a required check: `Rust lint`
+(`scripts/lint-rust.sh`, clippy with warnings fatal, plus shell syntax), `Rust tests`
+(`scripts/test-rust.sh`), and `Build, test, unsigned package`, which runs `app/build.sh`
+(the unsigned bundle and the Swift checks) and then `OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh`, and uploads
 `OFTC-<version>-<commit>-unsigned.pkg` plus `SHA256SUMS` as the `oftc-unsigned-pkg`
 artifact (kept 14 days). The unsigned package is for inspecting the payload and
 install scripts; macOS will not activate its extension, and it is not for users.

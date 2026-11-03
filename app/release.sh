@@ -36,6 +36,7 @@ dist="$repo/dist/$version"
 [[ ! -e "$dist" ]] || { print -u2 "$dist already exists; remove it to rebuild"; exit 2; }
 
 print "== build ($tag, $OFTC_BUILD_DIR)"
+zsh "$root/../scripts/test-rust.sh"
 zsh "$root/build.sh"
 print '== sign';          zsh "$root/sign-developer-id.sh"
 print '== notarize app';  zsh "$root/notarize-app.sh"
