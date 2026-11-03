@@ -7,7 +7,7 @@ if [[ "$build" != "$root/build" && ! "$build" =~ '^/private/tmp/oftc-build-[A-Za
     print -u2 'OFTC_BUILD_DIR must be app/build or a /private/tmp/oftc-build-* path'
     exit 2
 fi
-package="$build/OFTC-1.0.9.pkg"
+package="$build/OFTC-1.1.7.pkg"
 : "${NOTARY_PROFILE:?Set NOTARY_PROFILE to a notarytool keychain profile name}"
 [[ -f "$package" ]] || { print -u2 'Signed package missing'; exit 2; }
 pkgutil --check-signature "$package"
@@ -15,5 +15,9 @@ xcrun notarytool submit "$package" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$package"
 xcrun stapler validate "$package"
 spctl --assess --type install --verbose=2 "$package"
+# Custom Finder icon: stored on the file, outside the signed package contents.
+xcrun swiftc -O "$root/set-file-icon.swift" -o "$build/set-file-icon"
+"$build/set-file-icon" "$root/assets/OFTCPackage.icns" "$package"
+pkgutil --check-signature "$package" >/dev/null
 print "Notarized and stapled package: $package"
 print 'The package was not installed.'

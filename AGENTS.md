@@ -90,6 +90,12 @@ ls Issues/ | sed -E 's/^0*([0-9]+).*/\1/' | sort -n | tail -1
   notarization, installation, extension activation, and live traffic are
   separate claims. The initial rollout gaps are in
   [docs/initial-rollout-gaps.md](docs/initial-rollout-gaps.md).
+- **Release dev assets when a test is done.** Every `OFTC.app` a build leaves
+  under `/private/tmp` gets registered with Launch Services under the shipping
+  bundle id, and stale copies keep old file-type declarations, icons and names
+  alive for the installed app. After testing, run
+  `zsh app/release-dev-assets.sh --keep <build you still need>`; also delete
+  scratch exports (`.oftc` files carry PSKs) and fake apps made for experiments.
 - **No secrets in the repo.** SAML `tokenid`s are single-use credentials; they and
   raw captures are covered by `.gitignore` and must never be committed. Large
   reverse-engineering dumps (`*.asm`, `strings`) are regenerable and also ignored.
