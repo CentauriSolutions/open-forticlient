@@ -70,7 +70,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>OFTCUpdateFeedURL</key>
-	<string>https://api.github.com/repos/ChrisMacNaughton/open-forticlient/releases/latest</string>
+	<string>https://api.github.com/repos/CentauriSolutions/open-forticlient/releases/latest</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>OFTC (Open Forticlient): a FortiGate IPsec VPN client for macOS</string>
 	<key>NSSystemExtensionUsageDescription</key>

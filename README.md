@@ -44,7 +44,7 @@ the app can import an existing FortiClient profile once, during setup.
 ## Install
 
 Download a release from the
-[Releases page](https://github.com/ChrisMacNaughton/open-forticlient/releases):
+[Releases page](https://github.com/CentauriSolutions/open-forticlient/releases):
 
 - `Open-Forticlient-<version>.dmg`: open it and double-click **1 Install OFTC.pkg**.
 - or `OFTC-<version>.pkg` directly.

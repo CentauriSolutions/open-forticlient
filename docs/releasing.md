@@ -6,8 +6,9 @@ NetworkExtension provisioning profiles never leave it.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on `macos-15` for each push to `main` and each pull
-request. It runs `app/build.sh` (Rust and Swift unit checks, an unsigned bundle),
+`.github/workflows/ci.yml` runs on `macos-15` for each push to `main`, each pull
+request, and each merge-queue group (the repo merges through a queue, which needs the
+`merge_group` trigger). It runs `app/build.sh` (Rust and Swift unit checks, an unsigned bundle),
 then `OFTC_UNSIGNED_PACKAGE=1 zsh app/package.sh`, and uploads
 `OFTC-<version>-<commit>-unsigned.pkg` plus `SHA256SUMS` as the `oftc-unsigned-pkg`
 artifact (kept 14 days). The unsigned package is for inspecting the payload and
