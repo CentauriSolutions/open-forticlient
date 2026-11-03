@@ -1,17 +1,5 @@
 //! Provider-owned IKE/EAP/ESP session. No profile, browser, or FFI access.
 //! The provider supplies a fresh SAML token in memory and owns this value.
-#![allow(dead_code)] // Imported protocol modules expose offline APIs.
-#[path = "../ike-auth/auth.rs"] mod auth;
-#[path = "../ike-sa-init/protocol.rs"] mod init;
-#[path = "../mschapv2/mschapv2.rs"] mod mschapv2;
-#[path = "../engine-integration/engine.rs"] mod engine;
-#[path = "../child-sa/child_sa.rs"] mod child_sa;
-#[path = "../ike-lifecycle/lifecycle.rs"] mod lifecycle;
-#[path = "../ike-lifecycle/liveness.rs"] mod liveness;
-#[path = "../ike-lifecycle/ike_rekey.rs"] mod ike_rekey;
-#[path = "../child-rekey/rekey.rs"] mod rekey;
-#[path = "../child-rekey/ephemeral.rs"] mod ephemeral;
-#[path = "transport.rs"] pub mod transport;
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -21,7 +9,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
-const READ_SLICE: Duration = Duration::from_millis(250);
+use crate::{auth, child_sa, engine, ephemeral, ike_rekey, init, lifecycle, liveness, mschapv2, rekey, transport};
+
+pub(crate) const READ_SLICE: Duration = Duration::from_millis(250);
 const READY_SLICE: Duration = Duration::from_millis(2);
 const INNER_MTU: usize = 1280;
 const MAX_QUEUED_INNER: usize = 32;
@@ -63,7 +53,7 @@ impl Drop for ConnectInput {
 pub struct Cancellation(Arc<AtomicBool>);
 impl Cancellation {
     pub fn cancel(&self) { self.0.store(true, Ordering::SeqCst); }
-    fn check(&self) -> Result<(), Error> {
+    pub(crate) fn check(&self) -> Result<(), Error> {
         if self.0.load(Ordering::SeqCst) { Err(Error::Cancelled) } else { Ok(()) }
     }
 }

@@ -1,10 +1,7 @@
 //! Provider-process no-token preflight. It verifies SA_INIT, responder AUTH,
 //! then the EAP-MSCHAPv2 challenge. No CHILD_SA, ESP, routes, or token.
-#![allow(dead_code)]
-#[path = "../core/ike-sa-init/protocol.rs"] mod init;
-#[path = "../core/ike-auth/auth.rs"] mod auth;
-#[path = "../core/mschapv2/mschapv2.rs"] mod mschapv2;
 
+use oftc_engine::{auth, init, mschapv2};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 

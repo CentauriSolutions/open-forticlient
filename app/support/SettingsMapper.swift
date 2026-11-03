@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import NetworkExtension
 
-// Plain, authenticated output from provider-live-engine::NetworkSettings.
+// Plain, authenticated output from oftc-engine NetworkSettings.
 // The outerEndpoint is the address of the connected transport socket, not a
 // hostname that might resolve differently after the tunnel is installed.
 struct AuthenticatedNetworkSettings {

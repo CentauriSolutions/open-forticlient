@@ -1,9 +1,7 @@
 //! Offline boundary between a verified IKE CHILD_SA, a packet tunnel, and ESP transports.
 //! This imports the engine modules without changing their implementations.
 
-#[path = "../esp/esp.rs"]
 pub mod esp;
-#[path = "../tcp-esp/lib.rs"]
 pub mod tcp_esp;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

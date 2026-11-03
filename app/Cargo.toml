@@ -1,3 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["core/modp14", "core/crypto"]
+members = [
+    "core/crypto",
+    "core/engine",
+    "core/modp14",
+    "core/preflight",
+    "core/provider-ffi",
+]
+
+[profile.release]
+opt-level = "z"
