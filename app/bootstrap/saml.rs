@@ -239,9 +239,29 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
 
 const CALLBACK_HTML: &str = include_str!("callback.html");
 
+/// Log lines naming the tunnel being signed in, from the supervisor's
+/// `OFTC_PROFILE_NAME` / `OFTC_PROFILE_GATEWAY`; empty when neither is set.
+fn tunnel_lines() -> String {
+    let line = |label: &str, dots: usize, value: String| {
+        format!(
+            "<div class=\"l\"><span class=\"d\">&gt; {label} {} </span>{}</div>\n",
+            ".".repeat(dots),
+            html_escape(&value)
+        )
+    };
+    let mut out = String::new();
+    if let Ok(name) = std::env::var("OFTC_PROFILE_NAME") {
+        if !name.is_empty() { out.push_str(&line("tunnel", 31, name)); }
+    }
+    if let Ok(gateway) = std::env::var("OFTC_PROFILE_GATEWAY") {
+        if !gateway.is_empty() { out.push_str(&line("gateway", 30, gateway)); }
+    }
+    out
+}
+
 /// The browser-tab page: success or failure, with the prompt showing the SAML
-/// username (else the local `$USER`). The username comes from the request, so
-/// it is HTML-escaped.
+/// username (else the local `$USER`). The username and tunnel names are
+/// HTML-escaped.
 fn callback_page(creds: Option<&Credentials>) -> String {
     let user = creds
         .map(|c| c.username.clone())
@@ -249,6 +269,7 @@ fn callback_page(creds: Option<&Credentials>) -> String {
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "operator".into());
     CALLBACK_HTML
+        .replace("{{TUNNEL}}", &tunnel_lines())
         .replace("{{STATE}}", if creds.is_some() { "ok" } else { "fail" })
         .replace("{{USER}}", &html_escape(&user))
 }
@@ -360,6 +381,18 @@ mod tests {
         assert!(page.contains("&lt;x&gt;@y:~$"));
         assert!(!page.contains("{{"));
         assert!(callback_page(None).contains(r#"<body class="fail">"#));
+    }
+
+    #[test]
+    fn callback_page_names_the_tunnel_when_the_supervisor_sets_it() {
+        std::env::set_var("OFTC_PROFILE_NAME", "Colo <1>");
+        std::env::set_var("OFTC_PROFILE_GATEWAY", "vpn.lab.example");
+        let page = callback_page(None);
+        std::env::remove_var("OFTC_PROFILE_NAME");
+        std::env::remove_var("OFTC_PROFILE_GATEWAY");
+        assert!(page.contains("&gt; tunnel ") && page.contains("Colo &lt;1&gt;"));
+        assert!(page.contains("&gt; gateway ") && page.contains("vpn.lab.example"));
+        assert!(!page.contains("{{"));
     }
 
     #[test]
