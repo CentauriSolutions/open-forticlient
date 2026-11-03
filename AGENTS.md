@@ -19,7 +19,8 @@ commit messages that say "Issue 13" mean GitHub issue #13.
 - Reference the issue a change belongs to in its commit message.
 - Keep an issue's task list current as work lands, and close it when its
   acceptance criteria are met.
-- One PR is one change, and PRs are squash-merged: the PR title is the commit
+- The repo lives at `CentauriSolutions/open-forticlient` and merges through a merge
+  queue; CI must keep its `merge_group` trigger. One PR is one change, and PRs are squash-merged: the PR title is the commit
   subject (Conventional Commits) and the body is the commit body, with `Refs #N` /
   `Fixes #N`. For a series, stack PRs (each based on the previous branch) rather than
   one large PR; GitHub retargets a stacked PR to `main` when its base merges.
