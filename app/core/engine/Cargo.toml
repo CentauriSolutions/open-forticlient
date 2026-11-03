@@ -11,3 +11,6 @@ path = "src/lib.rs"
 [dependencies]
 oftc-crypto = { path = "../crypto" }
 oftc-modp14 = { path = "../modp14" }
+
+[lints]
+workspace = true

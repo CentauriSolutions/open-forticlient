@@ -289,21 +289,6 @@ impl Profile {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_iked_conf_tokens() {
-        let mut p = Profile::default();
-        p.parse_iked_conf(
-            "ikev2 \"vpn\" active esp \\\nlocal 192.168.1.20 peer 203.0.113.10 \\\npsk \"deadbeef\" \\\niface en0\n",
-        );
-        assert_eq!(p.peer_ip, "203.0.113.10");
-        assert_eq!(p.psk, "deadbeef");
-    }
-}
-
 /// The address fctctld will actually dial for `server`, if it will be IPv6.
 ///
 /// fctctld's `_resolv_addr` calls getaddrinfo(name, NULL, AF_UNSPEC,
@@ -319,5 +304,20 @@ pub fn ipv6_gateway(server: &str) -> Option<std::net::Ipv6Addr> {
     match (server, 0).to_socket_addrs().ok()?.next()?.ip() {
         IpAddr::V6(a) => Some(a),
         IpAddr::V4(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_iked_conf_tokens() {
+        let mut p = Profile::default();
+        p.parse_iked_conf(
+            "ikev2 \"vpn\" active esp \\\nlocal 192.168.1.20 peer 203.0.113.10 \\\npsk \"deadbeef\" \\\niface en0\n",
+        );
+        assert_eq!(p.peer_ip, "203.0.113.10");
+        assert_eq!(p.psk, "deadbeef");
     }
 }

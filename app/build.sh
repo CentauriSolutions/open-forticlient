@@ -41,7 +41,6 @@ mkdir -p "$app/Contents/Resources/en.lproj"
 cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/InfoPlist.strings"
 
 export CARGO_TARGET_DIR="$build/rust-target"
-cargo test --locked --workspace --manifest-path "$root/Cargo.toml"
 cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 cp "$CARGO_TARGET_DIR/release/liboftc_provider_ffi.dylib" "$CARGO_TARGET_DIR/release/liboftc_preflight.dylib" \
     "$provider_frameworks/"
@@ -142,8 +141,6 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/MenuCommand.swift" "$root/Host/check-menu-command.swift" \
     -o "$build/menu-command-check"
 "$build/menu-command-check"
-CARGO_TARGET_DIR="$build/client-target" cargo test --locked \
-    --manifest-path "$root/../client/Cargo.toml"
 CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"

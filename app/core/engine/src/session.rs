@@ -27,7 +27,7 @@ fn child_soft_after(inbound_spi: u32) -> Duration {
     CHILD_REKEY_SOFT + Duration::from_secs(u64::from(inbound_spi) % CHILD_REKEY_JITTER)
 }
 
-fn wipe(value: &mut String) {
+fn wipe(value: &mut str) {
     for byte in unsafe { value.as_bytes_mut() } {
         unsafe { std::ptr::write_volatile(byte, 0) };
     }
@@ -450,21 +450,19 @@ impl Session {
         if now.duration_since(self.ike_started) >= IKE_REKEY_SOFT
             && self.lifecycle.pending_packet().is_none()
             && !self.liveness.probe_pending()
-            && self.peer_old_deadline.is_none() {
-            if self.rekey_ike_once().is_err() {
+            && self.peer_old_deadline.is_none()
+            && self.rekey_ike_once().is_err() {
                 self.engine = None;
                 return Err(Error::ReconnectNeeded);
             }
-        }
         if now.duration_since(self.child_started) >= self.child_soft_after
             && self.lifecycle.pending_packet().is_none()
             && !self.liveness.probe_pending()
-            && self.peer_old_deadline.is_none() {
-            if self.rekey_child_once().is_err() {
+            && self.peer_old_deadline.is_none()
+            && self.rekey_child_once().is_err() {
                 self.engine = None;
                 return Err(Error::ReconnectNeeded);
             }
-        }
         self.tick_liveness_at(self.liveness_now_ms())
     }
 

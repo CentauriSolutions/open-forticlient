@@ -16,3 +16,10 @@ opt-level = "z"
 # overflow checks on, so an overflow panicked (caught at the FFI boundary) rather
 # than wrapping; keep that in the optimised build.
 overflow-checks = true
+
+# Baseline for the existing code; Issue 50 reviews each allowance.
+[workspace.lints.clippy]
+# The C ABI contracts are documented in oftc_ffi.h, not in per-function docs.
+missing_safety_doc = "allow"
+# Handshake and rekey constructors take the full set of IKE inputs.
+too_many_arguments = "allow"

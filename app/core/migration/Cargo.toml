@@ -8,3 +8,6 @@ publish = false
 name = "oftc_migration"
 path = "src/lib.rs"
 crate-type = ["staticlib"]
+
+[lints]
+workspace = true

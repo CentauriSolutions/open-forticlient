@@ -22,7 +22,7 @@ pub fn prf_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
 }
 
 fn cbc(encrypt: bool, key: &[u8; 32], iv: &[u8; 16], input: &[u8]) -> Result<Vec<u8>, String> {
-    if input.is_empty() || input.len() % 16 != 0 {
+    if input.is_empty() || !input.len().is_multiple_of(16) {
         return Err("CBC input length is not block aligned".into());
     }
     let out = if encrypt {

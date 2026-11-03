@@ -108,7 +108,7 @@ fn validate_selector(body: &[u8]) -> Result<(), Error> {
     if body.len() != 4 + body[0] as usize * 16 {
         return Err(Error::InvalidPayload);
     }
-    for selector in body[4..].chunks_exact(16) {
+    for selector in body[4..].as_chunks::<16>().0 {
         if selector[..8] != [7, 0, 0, 16, 0, 0, 255, 255] || selector[8..12] > selector[12..16] {
             return Err(Error::InvalidPayload);
         }

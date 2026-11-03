@@ -34,7 +34,9 @@ fn migrate(name: &str, expected_gateway: &str) -> Result<Box<[u8]>, ()> {
     Ok(wire)
 }
 
-fn import(name: &str) -> Result<(Box<[u8]>, Box<[u8]>, u32), ()> {
+type ImportedProfile = (Box<[u8]>, Box<[u8]>, u32);
+
+fn import(name: &str) -> Result<ImportedProfile, ()> {
     let mut loaded = profile::Profile::load(name).map_err(|_| ())?;
     let mut psk = std::mem::take(&mut loaded.psk);
     let gateway = loaded.server.as_bytes();
