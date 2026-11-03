@@ -12,3 +12,4 @@
 pub mod completion;
 pub mod error;
 pub mod manager;
+pub mod settings;

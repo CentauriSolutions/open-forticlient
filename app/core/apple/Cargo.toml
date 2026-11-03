@@ -9,6 +9,8 @@ name = "oftc_apple"
 path = "src/lib.rs"
 
 [dependencies]
+oftc-engine = { path = "../engine" }
+oftc-provider = { path = "../provider" }
 zeroize = "=1.9.0"
 
 [lints]

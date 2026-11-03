@@ -268,6 +268,8 @@ dependencies = [
 name = "oftc-apple"
 version = "0.1.0"
 dependencies = [
+ "oftc-engine",
+ "oftc-provider",
  "zeroize",
 ]
 
