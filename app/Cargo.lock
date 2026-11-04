@@ -471,11 +471,16 @@ version = "0.1.0"
 dependencies = [
  "dispatch2",
  "oftc-host",
+ "oftc-migration",
+ "zeroize",
 ]
 
 [[package]]
 name = "oftc-migration"
 version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "oftc-modp14"

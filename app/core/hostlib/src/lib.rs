@@ -11,12 +11,35 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::thread;
 
-use oftc_host::commands::{run, Backends, Io};
+use oftc_host::commands::{run, Backends, FortiClientProfile, FortiClientProfiles, Io};
 use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
 use oftc_host::out::Out;
 use oftc_host::registry::{forticlient_name_for_gateway, FORTICLIENT_VPN_PLIST};
 use oftc_host::TtyPrompt;
+use zeroize::Zeroizing;
+
+// The C entry the Swift setup window still calls. Re-exported so the symbols are
+// in this one static library; `oftc-migration` is no longer linked on its own.
+pub use oftc_migration::{oftc_migrate_free, oftc_migrate_profile_psk};
+
+/// The installed FortiClient's profiles, through `oftc-migration`.
+struct InstalledFortiClient;
+
+impl FortiClientProfiles for InstalledFortiClient {
+    fn import(&self, name: &str) -> Option<FortiClientProfile> {
+        let imported = oftc_migration::import_profile(name)?;
+        Some(FortiClientProfile {
+            gateway: imported.gateway,
+            saml_port: imported.saml_port,
+            psk: imported.psk,
+        })
+    }
+
+    fn psk(&self, name: &str, gateway: &str) -> Option<Zeroizing<Vec<u8>>> {
+        oftc_migration::migrate_psk(name, gateway)
+    }
+}
 
 /// `sysexits.h` EX_SOFTWARE: a bug, as opposed to a command that failed.
 const EXIT_INTERNAL: i32 = 70;
@@ -29,6 +52,7 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
             let backends = Backends {
                 keychain: &keychain,
                 prompt: &TtyPrompt,
+                forticlient: &InstalledFortiClient,
                 legacy_name: &|gateway| {
                     forticlient_name_for_gateway(FORTICLIENT_VPN_PLIST.as_ref(), gateway)
                 },

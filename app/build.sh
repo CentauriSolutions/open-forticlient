@@ -45,7 +45,6 @@ cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 # statically links the engine, provider logic and preflight.
 cp "$CARGO_TARGET_DIR/release/OFTCTunnel" "$extension/Contents/MacOS/OFTCTunnel"
 cp "$CARGO_TARGET_DIR/release/liboftc_host_bootstrap.dylib" "$app_frameworks/"
-cp "$CARGO_TARGET_DIR/release/liboftc_migration.a" "$build/liboftc_migration.a"
 cp "$CARGO_TARGET_DIR/release/liboftc_hostlib.a" "$build/liboftc_hostlib.a"
 unset CARGO_TARGET_DIR
 
@@ -53,7 +52,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
     -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \
     -L "$app_frameworks" -l oftc_host_bootstrap \
-    "$build/liboftc_migration.a" "$build/liboftc_hostlib.a" \
+    "$build/liboftc_hostlib.a" \
     -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
     "$root/support/Bootstrap.swift" \
     "$root/Host/CandidateHostBridge.swift" \
