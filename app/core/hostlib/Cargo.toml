@@ -11,7 +11,9 @@ path = "src/lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
+oftc-apple = { path = "../apple" }
 oftc-host = { path = "../host" }
+oftc-provider = { path = "../provider" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "=0.3.1"

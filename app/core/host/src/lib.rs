@@ -11,12 +11,15 @@
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod acquire;
 pub mod commands;
 pub mod env;
 pub mod keychain;
 pub mod out;
 pub mod profile;
 pub mod registry;
+pub mod start;
+mod vpn;
 
 #[allow(unsafe_code)]
 mod os;

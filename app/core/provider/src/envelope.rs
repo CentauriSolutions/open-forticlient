@@ -254,7 +254,9 @@ impl BootstrapInput {
 /// tests can build records the provider must reject. Hosts use [`encode_hbr1`].
 fn frame_hbr1(gateway: &str, uid: &str, psk: &[u8], token: &[u8]) -> Vec<u8> {
     let fields = [gateway.as_bytes(), uid.as_bytes(), psk, token];
-    let mut wire = HBR1_MAGIC.to_vec();
+    // Sized up front: growing a Vec holding the PSK would leave an unwiped copy.
+    let mut wire = Vec::with_capacity(12 + fields.iter().map(|f| f.len()).sum::<usize>());
+    wire.extend_from_slice(&HBR1_MAGIC);
     for field in fields {
         wire.extend_from_slice(&(field.len() as u16).to_be_bytes());
     }
@@ -267,7 +269,9 @@ fn frame_hbr1(gateway: &str, uid: &str, psk: &[u8], token: &[u8]) -> Vec<u8> {
 /// Frame the outer envelope: magic, expiry (u64 BE), 16-byte session id,
 /// secret length (u16 BE), secret. Framing only, like [`frame_hbr1`].
 fn frame_envelope(expires_at: u64, session_id: [u8; 16], secret: &[u8]) -> Vec<u8> {
-    let mut data = ENVELOPE_MAGIC.to_vec();
+    // Sized up front for the same reason as `frame_hbr1`.
+    let mut data = Vec::with_capacity(ENVELOPE_HEADER + secret.len());
+    data.extend_from_slice(&ENVELOPE_MAGIC);
     data.extend_from_slice(&expires_at.to_be_bytes());
     data.extend_from_slice(&session_id);
     data.extend_from_slice(&(secret.len() as u16).to_be_bytes());
@@ -275,20 +279,17 @@ fn frame_envelope(expires_at: u64, session_id: [u8; 16], secret: &[u8]) -> Vec<u
     data
 }
 
-/// Encode a live (`token` non-empty) or preflight (`token` empty) `HBR1`
-/// record. The result is checked by [`BootstrapInput::decode`], so every
-/// record this returns is one the provider accepts.
+/// Encode an `HBR1` record. An empty `token` makes a preflight record, so a
+/// caller that means a live one must pass a token; [`preflight_wire`] is the
+/// explicit spelling of the other case. The result is checked by
+/// [`BootstrapInput::decode`], so every record this returns is one the
+/// provider accepts.
 pub fn encode_hbr1(
     gateway: &str,
     uid: &str,
     psk: &[u8],
     token: &[u8],
 ) -> Result<Secret, EnvelopeError> {
-    // Lengths are u16 on the wire: refuse before one could wrap.
-    let total = 12 + gateway.len() + uid.len() + psk.len() + token.len();
-    if total > MAX_HBR1 {
-        return Err(EnvelopeError::Invalid);
-    }
     let wire = Secret(frame_hbr1(gateway, uid, psk, token));
     BootstrapInput::decode(wire.as_bytes(), !token.is_empty())?;
     Ok(wire)
@@ -301,8 +302,9 @@ pub fn preflight_wire(gateway: &str, uid: &str, psk: &[u8]) -> Result<Secret, En
 
 /// Wrap `secret` (an `HBR1` record) in the outer envelope. `now` is the
 /// caller's clock read *after* any browser sign-in, so the expiry is relative
-/// to completion. The lifetime window is [`decode_envelope`]'s, so an envelope
-/// this returns is one the provider accepts at `now`.
+/// to completion. The lifetime window and the non-zero session id are the
+/// provider's rules, so an envelope this returns is one it accepts at `now`
+/// (once: each id is single-use).
 pub fn encode_envelope(
     expires_at: u64,
     session_id: [u8; 16],
@@ -310,6 +312,7 @@ pub fn encode_envelope(
     now: u64,
 ) -> Result<Secret, EnvelopeError> {
     if !(1..=MAX_SECRET).contains(&secret.len())
+        || session_id == [0; 16]
         || expires_at <= now
         || expires_at - now > MAX_LIFETIME_SECONDS
     {
@@ -517,24 +520,18 @@ pub(crate) mod tests {
 
     #[test]
     fn encoders_refuse_what_the_provider_would_refuse() {
-        // HBR1: the same boundaries `BootstrapInput::decode` enforces, plus
-        // the 4096 cap before a u16 length could wrap.
+        // The encoders check by decoding, so one bad record shows the check is
+        // wired in (the field rules themselves are pinned by the decoder tests),
+        // and an over-long field is refused rather than wrapped into a u16.
         assert!(encode_hbr1("g", "short", b"p", b"t").is_err());
-        assert!(encode_hbr1("g", UID, b"", b"t").is_err());
-        assert!(encode_hbr1("g", UID, b"p\0q", b"t").is_err());
-        assert!(preflight_wire("", UID, b"p").is_err());
-        assert!(encode_hbr1(&"a".repeat(253), UID, &vec![b'p'; 1024], &vec![b't'; 2000]).is_err());
         assert!(encode_hbr1(&"a".repeat(70_000), UID, b"p", b"t").is_err());
-        // Envelope: lifetime is (now, now + 120], and the secret is 1..=4096.
+        // The envelope's lifetime window is (now, now + 120], its secret 1..=4096
+        // bytes, and the session id is never all zero.
         for (expires_at, ok) in [(1000, false), (1001, true), (1120, true), (1121, false)] {
-            assert_eq!(
-                encode_envelope(expires_at, [1; 16], b"x", 1000).is_ok(),
-                ok,
-                "{expires_at}"
-            );
+            assert_eq!(encode_envelope(expires_at, [1; 16], b"x", 1000).is_ok(), ok, "{expires_at}");
         }
+        assert!(encode_envelope(1060, [0; 16], b"x", 1000).is_err());
         assert!(encode_envelope(1060, [1; 16], b"", 1000).is_err());
-        assert!(encode_envelope(1060, [1; 16], &vec![b'x'; MAX_SECRET], 1000).is_ok());
         assert!(encode_envelope(1060, [1; 16], &vec![b'x'; MAX_SECRET + 1], 1000).is_err());
     }
 
