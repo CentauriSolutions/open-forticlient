@@ -131,6 +131,12 @@ pub trait VpnControl: Send + Sync {
 
 pub use mock::{MockEntry, MockVpn, StartRecord};
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod ne;
+#[cfg(target_os = "macos")]
+pub use ne::{NeVpnControl, StartKeys};
+
 mod mock {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex, MutexGuard};
