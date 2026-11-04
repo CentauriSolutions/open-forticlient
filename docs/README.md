@@ -4,6 +4,7 @@
 
 - [Architecture](architecture.md): active source and runtime boundaries.
 - [Operations](operations.md): setup, connection, stop, and diagnostics.
+- [Host verbs](host-verbs.md): the `OFTCAgent` verbs implemented in Rust and their output and exit codes.
 - [Roadmap](ROADMAP.md): distribution and rollout work.
 - [Releasing](releasing.md): CI, and building, signing and publishing a release.
 - [Swift removal plan](swift-removal-plan.md): Issues 41 to 50, seams, lanes, and hygiene rules.
