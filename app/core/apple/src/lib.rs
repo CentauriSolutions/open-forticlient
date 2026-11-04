@@ -15,6 +15,7 @@ pub mod error;
 pub mod manager;
 #[cfg(target_os = "macos")]
 pub mod ne;
+pub mod settings;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
