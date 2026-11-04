@@ -375,6 +375,9 @@ mod tests {
 
         vpn.set_enabled(entry, true).unwrap();
         assert!(vpn.reload(entry).unwrap().enabled);
+        vpn.set_enabled(entry, false).unwrap();
+        assert!(!vpn.reload(entry).unwrap().enabled);
+        assert!(!mock.is_enabled());
 
         vpn.start(
             entry,
@@ -411,15 +414,24 @@ mod tests {
             vpn.last_disconnect_error(entry, wait),
             Ok(Some(AppleError::TimedOut))
         );
+        // Reads do not consume the error.
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Ok(Some(AppleError::TimedOut))
+        );
 
         let (tx, rx) = channel();
         let subscription = vpn.observe_status(entry, tx).unwrap();
         mock.set_status(VpnStatus::Connected);
         assert!(rx.try_recv().is_ok());
         assert_eq!(vpn.status(entry), VpnStatus::Connected);
+        let (tx2, rx2) = channel();
+        let _second = vpn.observe_status(entry, tx2).unwrap();
         drop(subscription);
         mock.set_status(VpnStatus::Disconnected);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+        // Dropping one subscription leaves the other attached.
+        assert!(rx2.try_recv().is_ok());
 
         vpn.create("p2", "k2", "n").unwrap();
         let created = vpn
