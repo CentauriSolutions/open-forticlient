@@ -225,32 +225,6 @@ private func rekeyCounts() {
     dispatchMain()
 }
 
-private final class ExtensionDelegate: NSObject, OSSystemExtensionRequestDelegate {
-    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        print("macOS approval required for \(request.identifier)")
-        print("In System Settings → General → Login Items & Extensions, click ⓘ next to OFTC under Extensions and turn on Network Extension.")
-        fflush(stdout)
-    }
-    func request(_ request: OSSystemExtensionRequest,
-                 actionForReplacingExtension existing: OSSystemExtensionProperties,
-                 withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        print("System extension replacement: \(existing.bundleShortVersion)/\(existing.bundleVersion) -> \(replacement.bundleShortVersion)/\(replacement.bundleVersion)")
-        fflush(stdout)
-        return .replace
-    }
-    func request(_ request: OSSystemExtensionRequest,
-                 didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        if result == .willCompleteAfterReboot {
-            finish("Extension replacement accepted; reboot required", code: 3)
-        }
-        finish("System extension request completed")
-    }
-    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        let nsError = error as NSError
-        finish("System extension request failed: domain=\(nsError.domain) code=\(nsError.code)", code: 1)
-    }
-}
-
 private func startMode(_ flags: [String]) -> (ProviderStartEnvelope.ConnectMode, Bool)? {
     var tcp = false
     var insecure = false
@@ -393,7 +367,7 @@ private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent
 // The verbs below are implemented in Rust (liboftc_hostlib.a) and the rest here. Keep
 // this list equal to the `rust` rows of `VERBS` in app/core/host/src/commands.rs; a
 // Rust test compares them. Rust also handles a leading `--profile <id>` for them.
-private let rustVerbs: Set<String> = ["list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile"]
+private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile"]
 
 @_silgen_name("oftc_host_main")
 private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
@@ -435,27 +409,10 @@ case "render-menu-previews" where args.count == 2:
     do { try OFTCMenuBar.renderPreviews(to: URL(fileURLWithPath: args[1], isDirectory: true)) }
     catch { finish("Could not render menu previews: \(error)", code: 1) }
 
-case "unregister-menu-login" where args.count == 1:
-    if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
-        do { try SMAppService.mainApp.unregister() }
-        catch { finish("Could not unregister the OFTC menu login item", code: 1) }
-    }
-    finish("OFTC menu login item unregistered")
-
 case "quit-menu" where args.count == 1:
     DistributedNotificationCenter.default().postNotificationName(
         Notification.Name(appID + ".quit-menu"), object: nil, deliverImmediately: true)
     finish("OFTC menu quit requested")
-
-case "agent-status" where args.count == 1:
-    finish(OFTCAgentService.status)
-
-case "login-settings" where args.count == 1:
-    var lines = ["Menu launch at login: \(SMAppService.mainApp.status == .enabled ? "enabled" : "disabled")"]
-    for entry in allEntries() {
-        lines.append("VPN connect at login (\(entry.id)): \(OFTCAgentService.connectAtLogin(entry) ? "enabled" : "disabled")")
-    }
-    finish(lines.joined(separator: "\n"))
 
 case "set-autostart" where args.count == 2 && ["on", "off"].contains(args[1]):
     let entry = requireEntry()
@@ -465,25 +422,6 @@ case "set-autostart" where args.count == 2 && ["on", "off"].contains(args[1]):
 
 case "supervise-autostart" where args.count == 1:
     superviseAutostart()
-
-case "register-agent" where args.count == 1:
-    do { try OFTCAgentService.register() }
-    catch { finish("Could not register OFTC login agent: \(error.localizedDescription)", code: 1) }
-    finish("OFTC login agent registered")
-
-case "unregister-agent" where args.count == 1:
-    do { try OFTCAgentService.unregister() }
-    catch { finish("Could not unregister OFTC login agent: \(error.localizedDescription)", code: 1) }
-    finish("OFTC login agent unregistered")
-
-case "activate" where args.count == 1, "deactivate" where args.count == 1:
-    let delegate = ExtensionDelegate()
-    let request = command == "activate"
-        ? OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: providerID, queue: .main)
-        : OSSystemExtensionRequest.deactivationRequest(forExtensionWithIdentifier: providerID, queue: .main)
-    request.delegate = delegate
-    OSSystemExtensionManager.shared.submitRequest(request)
-    withExtendedLifetime(delegate) { dispatchMain() }
 
 case "install-config" where args.count == 1:
     let entry = requireEntry()

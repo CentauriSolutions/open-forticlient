@@ -34,6 +34,11 @@ impl HostEnv {
         &self.root
     }
 
+    /// The system extension's bundle identifier: `<bundle id>.provider`.
+    pub fn provider_id(&self) -> String {
+        format!("{}.provider", self.bundle_id)
+    }
+
     /// The Keychain service that holds the PSKs: `<bundle id>.psk`.
     pub fn keychain_service(&self) -> String {
         format!("{}.psk", self.bundle_id)
@@ -52,6 +57,7 @@ mod tests {
             Path::new("/Users/test/Library/Application Support/com.example.oftc")
         );
         assert_eq!(env.keychain_service(), "com.example.oftc.psk");
+        assert_eq!(env.provider_id(), "com.example.oftc.provider");
         assert!(HostEnv::new("", Path::new("/Users/test")).is_none());
     }
 }

@@ -480,6 +480,7 @@ name = "oftc-host"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "oftc-apple",
  "security-framework",
  "serde",
  "serde_json",
@@ -495,6 +496,7 @@ name = "oftc-hostlib"
 version = "0.1.0"
 dependencies = [
  "dispatch2",
+ "oftc-apple",
  "oftc-host",
 ]
 

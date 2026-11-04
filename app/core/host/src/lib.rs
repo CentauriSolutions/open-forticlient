@@ -11,8 +11,10 @@
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod agent;
 pub mod commands;
 pub mod env;
+pub mod intent;
 pub mod keychain;
 pub mod out;
 pub mod profile;

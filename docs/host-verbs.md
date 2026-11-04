@@ -25,6 +25,12 @@ FortiClient profile for the same gateway, or the gateway itself.
 
 | Verb | Success | Failure |
 | --- | --- | --- |
+| `activate`, `deactivate` | Submits the system extension request for `<bundle id>.provider` and narrates it as it happens: `macOS approval required for <id>` plus the System Settings hint, `System extension replacement: <short>/<build> -> <short>/<build>` (always accepted); ends with `System extension request completed`, exit 0 | `Extension replacement accepted; reboot required`, exit 3; `System extension request failed: domain=<d> code=<c>`, exit 1 (a request the system never answers, or a failed callback, prints the error text instead of domain and code) |
+| `agent-status` | `not-registered`, `enabled`, `requires-approval`, `not-found` or `unknown`; exit 0 | |
+| `register-agent` | `OFTC login agent registered`; exit 0 | `Could not register OFTC login agent: <reason>`, exit 1; the reason is the system's description, or `OFTC login agent is <status>` when approval is pending, the status is unknown or registration did not leave it enabled, or `... is disabled` when `launchctl enable` failed |
+| `unregister-agent` | `OFTC login agent unregistered` (also when nothing is registered); exit 0 | `Could not unregister OFTC login agent: <reason>`, exit 1 |
+| `unregister-menu-login` | `OFTC menu login item unregistered`; exit 0 | `Could not unregister the OFTC menu login item`; exit 1 |
+| `login-settings` | `Menu launch at login: enabled\|disabled`, then `VPN connect at login (<id>): enabled\|disabled` per profile; exit 0 | |
 | `list-profiles` | one line per profile, `id`, name, gateway, port, transport separated by tabs, ordered by name; an empty line when there are none; exit 0 | |
 | `show-profile` | `OFTC profile <id> (<name>): gateway=<g> saml-port=<p> transport=<udp\|tcp>`; exit 0 | `OFTC profile unavailable; run oftc setup` (none), `OFTC profile unavailable: no profile named <id>; run oftc setup` (unknown `--profile`), `Several OFTC profiles are configured; choose one with --profile <id> (<ids>)`; exit 1 |
 | `has-psk` | `OFTC PSK available`; exit 0 | `OFTC PSK unavailable`; exit 1 (or the profile errors above) |
@@ -40,7 +46,16 @@ first line of standard input. Either way it must be 1 to 1024 bytes of UTF-8 wit
 NUL. `--stdin` lets a caller with no terminal (the setup window) supply the PSK
 without handling the Keychain itself.
 
+`login-settings` and `unregister-menu-login` are not in the usage text (they never
+were); the verb table marks them hidden so the text stays byte-for-byte.
+A profile's connect-at-login is its `connection-preferences.json`; with no such file,
+a profile that adopted the original layout inherits an enabled agent. A file that
+exists but cannot be decoded counts as off.
+
 ## Differences from the Swift verbs
+
+- Activation events print from the main queue while the verb waits; the order of the
+  lines is unchanged.
 
 - `provision-psk --stdin` is new (additive), and the usage text lists it.
 - A failed Keychain update reports `Could not save OFTC Keychain PSK`; Swift said

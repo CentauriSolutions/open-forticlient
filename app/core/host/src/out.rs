@@ -6,7 +6,7 @@
 //! lets the command run to completion, so the exit code is the command's own.
 
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 struct Stream {
     writer: Box<dyn Write + Send>,
@@ -39,12 +39,14 @@ impl Stream {
 }
 
 /// A command's output. Every host verb writes its result, errors included, to
-/// stdout (the Swift host did), so there is no second stream.
-pub struct Out(Stream);
+/// stdout (the Swift host did), so there is no second stream. Clones share the
+/// stream, so a callback on another thread can write while the verb waits.
+#[derive(Clone)]
+pub struct Out(Arc<Mutex<Stream>>);
 
 impl Out {
     pub fn new(stdout: Box<dyn Write + Send>) -> Out {
-        Out(Stream::new(stdout))
+        Out(Arc::new(Mutex::new(Stream::new(stdout))))
     }
 
     /// The process's own stdout.
@@ -53,14 +55,18 @@ impl Out {
     }
 
     /// `text` and a newline on stdout.
-    pub fn line(&mut self, text: &str) {
-        self.0.write(text.as_bytes());
-        self.0.write(b"\n");
+    pub fn line(&self, text: &str) {
+        let mut stream = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        stream.write(text.as_bytes());
+        stream.write(b"\n");
     }
 
     /// Flushes. A dead stream is not an error.
-    pub fn flush(&mut self) {
-        self.0.flush();
+    pub fn flush(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .flush();
     }
 }
 
@@ -104,7 +110,7 @@ mod tests {
     #[test]
     fn a_closed_pipe_is_swallowed() {
         let writes = Arc::new(Mutex::new(0));
-        let mut out = Out::new(Box::new(Closed(writes.clone())));
+        let out = Out::new(Box::new(Closed(writes.clone())));
         out.line("first");
         out.line("second");
         out.flush();

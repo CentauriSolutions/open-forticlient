@@ -11,6 +11,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::thread;
 
+use oftc_apple::login::ServiceLoginItems;
+use oftc_apple::sysext::SystemExtensions;
+use oftc_host::agent::SystemLaunchctl;
 use oftc_host::commands::{run, Backends, Io};
 use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
@@ -32,6 +35,9 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 legacy_name: &|gateway| {
                     forticlient_name_for_gateway(FORTICLIENT_VPN_PLIST.as_ref(), gateway)
                 },
+                extensions: &SystemExtensions,
+                login: &ServiceLoginItems,
+                launchctl: &SystemLaunchctl,
             };
             let mut input = stdin().lock();
             let mut io = Io {
