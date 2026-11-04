@@ -1,5 +1,7 @@
 //! In-memory host SAML -> provider bootstrap library. No executable entry.
-#![allow(dead_code)]
+//!
+//! Two front doors over one implementation: [`acquire`] for Rust callers, and
+//! the `oftc_host_*` C exports the Swift host still uses until it is removed.
 
 mod log;
 mod uid;
@@ -78,8 +80,37 @@ fn leak_for_swift(wire: Box<[u8]>, output: &mut WireBuffer) {
     output.len = len;
 }
 
+pub use saml::TunnelProfile;
+
+/// The `HBR1` record [`acquire`] returns. It carries the PSK and the single-use
+/// SAML token, so it is wiped when dropped and never printed.
+pub struct Wire(Box<[u8]>);
+
+impl Wire {
+    pub fn as_bytes(&self) -> &[u8] { &self.0 }
+
+    /// Hand the allocation to a caller that now owns wiping it.
+    fn into_boxed(mut self) -> Box<[u8]> { std::mem::take(&mut self.0) }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) { wipe(&mut self.0); }
+}
+
+impl std::fmt::Debug for Wire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Wire(..)") }
+}
+
+/// Why [`acquire`] failed, as far as a caller may act on it.
 #[derive(Debug, PartialEq, Eq)]
-enum AcquireFailure { BeforeBrowser, Other }
+pub enum AcquireFailure {
+    /// The gateway could not be reached before the browser opened. No SAML
+    /// token was consumed, so a bounded retry is safe.
+    BeforeBrowser,
+    /// Anything else, including invalid input. Never retried automatically:
+    /// an uncertain SSO callback may already have used the token.
+    Other,
+}
 
 fn classify_saml_error(error: &(dyn std::error::Error + 'static)) -> AcquireFailure {
     if matches!(error.downcast_ref::<saml::SamlError>(),
@@ -90,23 +121,38 @@ fn classify_saml_error(error: &(dyn std::error::Error + 'static)) -> AcquireFail
     }
 }
 
-fn acquire(gateway: String, psk: String, saml_port: u32, insecure: bool)
-    -> Result<Box<[u8]>, AcquireFailure> {
+/// Run the browser SAML sign-in for `gateway` and return the `HBR1` record the
+/// provider's start envelope carries. This blocks for the whole sign-in (up to
+/// five minutes), so read the clock for the envelope only after it returns.
+/// `profile` names the tunnel on the browser's callback page; the caller
+/// supplies it, nothing is read from the environment, a Keychain item or
+/// FortiClient's profile.
+pub fn acquire(gateway: String, psk: String, saml_port: u32, insecure: bool,
+               profile: TunnelProfile) -> Result<Wire, AcquireFailure> {
     let psk = SecretString(psk);
     if psk.0.is_empty() || !valid_gateway(&gateway) {
         return Err(AcquireFailure::Other);
     }
     let cfg = saml::SamlConfig { server: gateway.clone(),
-        saml_port, insecure, timeout: Duration::from_secs(300) };
+        saml_port, insecure, timeout: Duration::from_secs(300), profile };
     let mut creds = saml::obtain(&cfg).map_err(|error| classify_saml_error(error.as_ref()))?;
     let uid = std::mem::take(&mut creds.uid);
     let token = SecretString(std::mem::take(&mut creds.tokenid));
     encode(Input { gateway, uid, psk, token })
+        .map(Wire)
         .map_err(|_| AcquireFailure::Other)
 }
 
+/// The Swift supervisor names the tunnel for the callback page through these
+/// two variables; the C entry turns them into the parameter [`acquire`] takes.
+fn profile_from_env() -> TunnelProfile {
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    TunnelProfile { name: var("OFTC_PROFILE_NAME"), gateway: var("OFTC_PROFILE_GATEWAY") }
+}
+
 /// The caller supplies profile values already held in memory. This never reads
-/// FortiClient's profile, an environment variable, or a Keychain item.
+/// FortiClient's profile or a Keychain item; the only environment it reads is
+/// the non-secret tunnel name for the callback page (`profile_from_env`).
 /// Invoking this entry performs the browser SSO flow; offline tests never do.
 /// Status 3 means the gateway could not be reached before the browser opened;
 /// it consumed no SAML token and can be retried with a bound. Other failures
@@ -128,9 +174,11 @@ pub unsafe extern "C" fn oftc_host_acquire(
     let psk = match std::str::from_utf8(std::slice::from_raw_parts(psk, psk_len)) {
         Ok(v) if !v.contains('\0') => v.to_owned(), _ => return 1,
     };
-    let result = std::panic::catch_unwind(|| acquire(gateway, psk, saml_port, insecure != 0));
+    let result = std::panic::catch_unwind(|| {
+        acquire(gateway, psk, saml_port, insecure != 0, profile_from_env())
+    });
     match result {
-        Ok(Ok(wire)) => { leak_for_swift(wire, &mut *output); 0 },
+        Ok(Ok(wire)) => { leak_for_swift(wire.into_boxed(), &mut *output); 0 },
         Ok(Err(AcquireFailure::BeforeBrowser)) => 3,
         _ => 2,
     }
@@ -177,6 +225,14 @@ mod tests {
         let status = unsafe { oftc_host_acquire(ptr::null(), 0, ptr::null(), 0, 0, 0, &mut out) };
         assert_ne!(status, 0);
         assert!(out.ptr.is_null());
+    }
+
+    #[test]
+    fn acquire_rejects_invalid_input_before_any_network_or_browser() {
+        for (gateway, psk) in [("https://bad/", "PSK"), ("vpn.example.com", "")] {
+            let result = acquire(gateway.into(), psk.into(), 8443, false, TunnelProfile::default());
+            assert_eq!(result.unwrap_err(), AcquireFailure::Other, "{gateway:?}");
+        }
     }
 
     #[test]
