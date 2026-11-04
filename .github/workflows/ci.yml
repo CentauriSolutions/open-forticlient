@@ -50,7 +50,9 @@ jobs:
       - name: Run Rust unit tests
         # pipefail: without it tee's status hides a failing cargo test.
         shell: bash -eo pipefail {0}
-        run: zsh scripts/test-rust.sh 2>&1 | tee test.log
+        # --include-ignored runs the loopback tests that sandboxed agent
+        # environments skip; the runner allows 127.0.0.1 sockets.
+        run: zsh scripts/test-rust.sh -- --include-ignored 2>&1 | tee test.log
 
       - name: Test summary
         if: always()
