@@ -8,3 +8,4 @@
 pub mod provider;
 #[allow(unsafe_code)]
 mod sys;
+pub mod tunnel;
