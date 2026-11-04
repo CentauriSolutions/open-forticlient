@@ -19,13 +19,12 @@ app="$build/OFTC.app"
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
 app_frameworks="$app/Contents/Frameworks"
 agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.agent.plist"
-provider_frameworks="$extension/Contents/Frameworks"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources" "$app_frameworks" \
     "${agent_plist:h}" \
-    "$extension/Contents/MacOS" "$provider_frameworks" "$build/module-cache"
+    "$extension/Contents/MacOS" "$build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$build/module-cache"
 export SWIFT_MODULECACHE_PATH="$build/module-cache"
 cp "$root/Host/Info.plist" "$app/Contents/Info.plist"
@@ -42,8 +41,9 @@ cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/Inf
 
 export CARGO_TARGET_DIR="$build/rust-target"
 cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
-cp "$CARGO_TARGET_DIR/release/liboftc_provider_ffi.dylib" "$CARGO_TARGET_DIR/release/liboftc_preflight.dylib" \
-    "$provider_frameworks/"
+# The provider is the Rust OFTCTunnel executable from this workspace build; it
+# statically links the engine, provider logic and preflight.
+cp "$CARGO_TARGET_DIR/release/OFTCTunnel" "$extension/Contents/MacOS/OFTCTunnel"
 cp "$CARGO_TARGET_DIR/release/liboftc_host_bootstrap.dylib" "$app_frameworks/"
 cp "$CARGO_TARGET_DIR/release/liboftc_migration.a" "$build/liboftc_migration.a"
 unset CARGO_TARGET_DIR
@@ -81,19 +81,6 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/ReconnectSupervisor.swift" \
     "$root/Provider/BootstrapInput.swift" "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"
-xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCTunnel \
-    -framework Foundation -framework NetworkExtension \
-    -import-objc-header "$root/core/provider-ffi/oftc_ffi.h" \
-    -L "$provider_frameworks" -l oftc_provider_ffi -l oftc_preflight \
-    -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
-    "$root/support/Bootstrap.swift" \
-    "$root/support/SettingsMapper.swift" \
-    "$root/support/TrafficStatistics.swift" \
-    "$root/Provider/BootstrapInput.swift" "$root/Provider/FFISettings.swift" \
-    "$root/Provider/main.swift" \
-    "$root/Provider/PacketTunnelProvider.swift" \
-    -o "$extension/Contents/MacOS/OFTCTunnel"
-
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
     -L "$app_frameworks" -l oftc_host_bootstrap \
@@ -145,8 +132,10 @@ CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"
 cp "$build/oftc" "$app/Contents/Helpers/oftc"
-otool -L "$app/Contents/MacOS/OFTCAgent" \
-    "$extension/Contents/MacOS/OFTCTunnel" | \
-    grep -E 'liboftc_host_bootstrap|liboftc_provider_ffi|liboftc_preflight'
+otool -L "$app/Contents/MacOS/OFTCAgent" | grep -E 'liboftc_host_bootstrap'
+# The provider carries no OFTC dylib and no unresolved @rpath dependency.
+if otool -L "$extension/Contents/MacOS/OFTCTunnel" | grep -E '@rpath|liboftc'; then
+    print -u2 'The provider must not depend on an OFTC dylib or an @rpath library'; exit 1
+fi
 print "Offline unsigned bundle built: $app"
 print 'No SAML flow, VPN start, extension activation, Developer ID signing, or notarization occurred.'

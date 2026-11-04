@@ -15,6 +15,8 @@ pub mod error;
 pub mod manager;
 #[cfg(target_os = "macos")]
 pub mod ne;
+#[cfg(target_os = "macos")]
+pub use ne::provider::run;
 pub mod settings;
 
 #[cfg(target_os = "macos")]

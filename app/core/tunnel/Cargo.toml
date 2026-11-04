@@ -1,0 +1,18 @@
+[package]
+name = "oftc-tunnel"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The packet tunnel provider system extension's executable. CFBundleExecutable
+# is OFTCTunnel, so the binary keeps that name.
+[[bin]]
+name = "OFTCTunnel"
+path = "src/main.rs"
+
+[dependencies]
+oftc-apple = { path = "../apple" }
+oftc-provider = { path = "../provider" }
+
+[lints]
+workspace = true
