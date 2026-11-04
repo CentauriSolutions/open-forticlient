@@ -76,34 +76,6 @@ private func storedPSK(for gateway: String) -> Data {
     return psk
 }
 
-private enum PSKPromptError: Error { case terminal, input, invalid }
-
-private func readPSKFromTTY() throws -> Data {
-    let fd = open("/dev/tty", O_RDWR)
-    guard fd >= 0 else { throw PSKPromptError.terminal }
-    defer { close(fd) }
-    var original = termios()
-    guard tcgetattr(fd, &original) == 0 else { throw PSKPromptError.terminal }
-    var hidden = original
-    hidden.c_lflag &= ~tcflag_t(ECHO)
-    guard tcsetattr(fd, TCSANOW, &hidden) == 0 else { throw PSKPromptError.terminal }
-    defer { _ = tcsetattr(fd, TCSANOW, &original) }
-    let prompt = Array("OFTC PSK: ".utf8)
-    _ = prompt.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-    var bytes = [UInt8]()
-    defer { _ = bytes.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) } }
-    while bytes.count <= 1024 {
-        var byte: UInt8 = 0
-        guard read(fd, &byte, 1) == 1 else { throw PSKPromptError.input }
-        if byte == 10 || byte == 13 { break }
-        bytes.append(byte)
-    }
-    _ = write(fd, "\n", 1)
-    guard (1...1024).contains(bytes.count), !bytes.contains(0),
-          String(bytes: bytes, encoding: .utf8) != nil else { throw PSKPromptError.invalid }
-    return Data(bytes)
-}
-
 private func savePSK(_ psk: Data, for gateway: String) {
     let selector: [CFString: Any] = [
         kSecClass: kSecClassGenericPassword,
@@ -417,8 +389,21 @@ private func superviseAutostart() -> Never {
     finish("OFTC supervisors exited")
 }
 
-private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|check-update [url]|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|check-update [url]|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [--stdin] [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+// The verbs below are implemented in Rust (liboftc_hostlib.a) and the rest here. Keep
+// this list equal to the `rust` rows of `VERBS` in app/core/host/src/commands.rs; a
+// Rust test compares them. Rust also handles a leading `--profile <id>` for them.
+private let rustVerbs: Set<String> = ["list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile"]
+
+@_silgen_name("oftc_host_main")
+private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+                          _ bundleID: UnsafePointer<CChar>) -> Never
+
 var args = Array(CommandLine.arguments.dropFirst())
+if let verb = args.first == "--profile" && args.count >= 3 ? args[2] : args.first,
+   rustVerbs.contains(verb) {
+    appID.withCString { oftcHostMain(CommandLine.argc, CommandLine.unsafeArgv, $0) }
+}
 if args.first == "--profile" {
     guard args.count >= 3, OFTCProfileScope.isValidID(args[1]) else {
         finish("--profile needs a name of 1-32 lowercase letters, digits or hyphens", code: 2)
@@ -519,27 +504,6 @@ case "install-config" where args.count == 1:
     }
     dispatchMain()
 
-case "has-psk" where args.count == 1:
-    let gateway = storedProfile().gateway
-    guard var psk = try? lookupPSK(for: gateway) else {
-        finish("OFTC PSK unavailable", code: 1)
-    }
-    psk.resetBytes(in: 0..<psk.count)
-    finish("OFTC PSK available")
-
-case "provision-psk" where args.count == 1 || args.count == 2:
-    let gateway = args.count == 2 ? args[1] : storedProfile().gateway
-    guard !gateway.isEmpty, gateway.utf8.count <= 253,
-          !gateway.contains("/"), !gateway.contains(":") else {
-        finish("Invalid gateway name", code: 2)
-    }
-    var psk: Data
-    do { psk = try readPSKFromTTY() }
-    catch { finish("Could not read a valid PSK from the terminal", code: 1) }
-    savePSK(psk, for: gateway)
-    psk.resetBytes(in: 0..<psk.count)
-    finish("OFTC PSK stored in Keychain")
-
 case "migrate-psk" where args.count == 3:
     // Explicit one-time path. Tunnel starts never consult FortiClient files.
     var psk: Data
@@ -548,21 +512,6 @@ case "migrate-psk" where args.count == 3:
     savePSK(psk, for: args[2])
     psk.resetBytes(in: 0..<psk.count)
     finish("Existing local profile PSK migrated into OFTC Keychain")
-
-case "save-profile" where args.count >= 3:
-    var transport = OFTCProfile.Transport.udp
-    var name: String?
-    var rest = Array(args.dropFirst(3))
-    while let flag = rest.first {
-        if flag == "--tcp" { transport = .tcp; rest.removeFirst() }
-        else if flag == "--name", rest.count >= 2 { name = rest[1]; rest.removeFirst(2) }
-        else { finish(usage, code: 2) }
-    }
-    guard let port = UInt32(args[2]),
-          let profile = try? OFTCProfile(gateway: args[1], samlPort: port,
-              transport: transport, name: name) else { finish(usage, code: 2) }
-    let entry = newProfile(profile)
-    finish("OFTC profile saved: id=\(entry.id)")
 
 case "import-profile" where args.count == 2:
     // Only this explicit command loads FortiClient configuration. Normal
@@ -647,19 +596,6 @@ case "check-update" where args.count <= 2:
         }
     }
     dispatchMain()
-
-case "list-profiles" where args.count == 1:
-    // id, display name, gateway, SAML port, transport; tab separated.
-    let lines = allEntries().map {
-        [$0.id, $0.name, $0.profile.gateway, String($0.profile.samlPort),
-         $0.profile.transport.rawValue].joined(separator: "\t")
-    }
-    finish(lines.joined(separator: "\n"))
-
-case "show-profile" where args.count == 1:
-    let entry = requireEntry()
-    let profile = entry.profile
-    finish("OFTC profile \(entry.id) (\(entry.name)): gateway=\(profile.gateway) saml-port=\(profile.samlPort) transport=\(profile.transport.rawValue)")
 
 case "erase-profile" where args.count == 1:
     // Without --profile this erases every profile, so uninstall can clean up.

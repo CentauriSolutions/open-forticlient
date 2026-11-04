@@ -20,6 +20,7 @@ start and are not saved in VPN preferences, files, command arguments, or logs.
 | Source | Responsibility |
 | --- | --- |
 | [`app/Host/`](../app/Host/) | SAML orchestration, profile registry and Keychain access, per-profile VPN configuration, reconnection. |
+| [`app/core/host/`](../app/core/host/), [`app/core/hostlib/`](../app/core/hostlib/) | The host verbs moving from Swift to Rust ([list](host-verbs.md)): profiles, registry, PSK Keychain. `hostlib` is the static library `OFTCAgent` links; its `oftc_host_main` runs them. |
 | [`app/Provider/`](../app/Provider/) | Packet tunnel lifecycle and Rust FFI adapter. |
 | [`app/core/`](../app/core/) | IKEv2, EAP-MSCHAPv2, ESP, transport, lifecycle, and C ABI. |
 | [`app/bootstrap/`](../app/bootstrap/) | Host SAML, TLS, and device identity. |

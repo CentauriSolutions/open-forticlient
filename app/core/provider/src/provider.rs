@@ -105,7 +105,7 @@ struct Shared<B: Backend, T> {
     changed: Condvar,
 }
 
-/// One tunnel's worth of provider logic. Create one per provider process.
+/// One tunnel's worth of provider logic. Create one per start: after a stop it refuses to start again.
 pub struct Provider<B: Backend, T: Tunnel + 'static>(Arc<Shared<B, T>>);
 
 fn unix_now() -> u64 {
@@ -1410,11 +1410,13 @@ mod tests {
     }
 
     fn preflight_options() -> StartOptions {
-        let secret = crate::envelope::tests::hbr1(
-            "integration.invalid", crate::envelope::tests::UID, b"synthetic", b"");
+        use crate::envelope::{encode_envelope, preflight_wire, OptionValue};
+        let secret = preflight_wire(
+            "integration.invalid", crate::envelope::tests::UID, b"synthetic").unwrap();
+        let now = unix_now();
         StartOptions {
-            preflight: Some(crate::envelope::OptionValue::Data(crate::envelope::Secret::new(
-                crate::envelope::tests::envelope(unix_now() + 60, id(), &secret)))),
+            preflight: Some(OptionValue::Data(
+                encode_envelope(now + 60, id(), secret.as_bytes(), now).unwrap())),
             ..Default::default()
         }
     }

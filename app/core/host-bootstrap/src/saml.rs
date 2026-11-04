@@ -13,7 +13,6 @@
 //!
 //! The `tokenid` is a single-use IKE credential: never logged (caller masks) and
 //! never written to disk.
-#![allow(dead_code)]
 
 use std::error::Error;
 use std::fs::File;
@@ -43,6 +42,14 @@ impl Drop for Credentials {
     }
 }
 
+/// The tunnel being signed in, shown on the browser's callback page. Both
+/// fields are optional; an empty one is not shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TunnelProfile {
+    pub name: String,
+    pub gateway: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SamlConfig {
     pub server: String,
@@ -52,6 +59,8 @@ pub struct SamlConfig {
     pub insecure: bool,
     /// Overall time to wait for the browser SSO to complete.
     pub timeout: Duration,
+    /// Named on the callback page. Passed in, not read from the environment.
+    pub profile: TunnelProfile,
 }
 
 impl Default for SamlConfig {
@@ -61,6 +70,7 @@ impl Default for SamlConfig {
             saml_port: 9443,
             insecure: false,
             timeout: Duration::from_secs(300),
+            profile: TunnelProfile::default(),
         }
     }
 }
@@ -115,7 +125,7 @@ pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
         cfg.timeout.as_secs());
 
     // 4/5. catch the redirect
-    let mut creds = wait_for_callback(&listener, cfg.timeout)?;
+    let mut creds = wait_for_callback(&listener, cfg.timeout, &cfg.profile)?;
     creds.uid = uid;
     Ok(creds)
 }
@@ -187,7 +197,11 @@ fn open_browser(url: &str) -> Result<(), Box<dyn Error>> {
 }
 
 /// Accept loopback connections until one carries tokenid+username, or timeout.
-fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Credentials, Box<dyn Error>> {
+fn wait_for_callback(
+    listener: &TcpListener,
+    timeout: Duration,
+    profile: &TunnelProfile,
+) -> Result<Credentials, Box<dyn Error>> {
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + timeout;
     loop {
@@ -206,7 +220,7 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
                     .nth(1)
                     .is_some_and(|p| p == "/" || p.starts_with("/?"));
                 let (status, page) = if on_root {
-                    ("200 OK", callback_page(creds.as_ref()))
+                    ("200 OK", callback_page(creds.as_ref(), profile))
                 } else {
                     ("404 Not Found", String::new())
                 };
@@ -239,9 +253,9 @@ fn wait_for_callback(listener: &TcpListener, timeout: Duration) -> Result<Creden
 
 const CALLBACK_HTML: &str = include_str!("callback.html");
 
-/// Log lines naming the tunnel being signed in, from the supervisor's
-/// `OFTC_PROFILE_NAME` / `OFTC_PROFILE_GATEWAY`; empty when neither is set.
-fn tunnel_lines() -> String {
+/// Page lines naming the tunnel being signed in; empty when neither the name
+/// nor the gateway is set.
+fn tunnel_lines(profile: &TunnelProfile) -> String {
     // A label, a dotted leader that takes whatever width is left, and the value.
     // On narrow screens the value drops to its own indented line instead.
     let line = |label: &str, value: String| {
@@ -253,11 +267,11 @@ fn tunnel_lines() -> String {
         )
     };
     let mut out = String::new();
-    if let Ok(name) = std::env::var("OFTC_PROFILE_NAME") {
-        if !name.is_empty() { out.push_str(&line("tunnel", name)); }
+    if !profile.name.is_empty() {
+        out.push_str(&line("tunnel", profile.name.clone()));
     }
-    if let Ok(gateway) = std::env::var("OFTC_PROFILE_GATEWAY") {
-        if !gateway.is_empty() { out.push_str(&line("gateway", gateway)); }
+    if !profile.gateway.is_empty() {
+        out.push_str(&line("gateway", profile.gateway.clone()));
     }
     out
 }
@@ -265,14 +279,14 @@ fn tunnel_lines() -> String {
 /// The browser-tab page: success or failure, with the prompt showing the SAML
 /// username (else the local `$USER`). The username and tunnel names are
 /// HTML-escaped.
-fn callback_page(creds: Option<&Credentials>) -> String {
+fn callback_page(creds: Option<&Credentials>, profile: &TunnelProfile) -> String {
     let user = creds
         .map(|c| c.username.clone())
         .filter(|u| !u.is_empty())
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "operator".into());
     CALLBACK_HTML
-        .replace("{{TUNNEL}}", &tunnel_lines())
+        .replace("{{TUNNEL}}", &tunnel_lines(profile))
         .replace("{{STATE}}", if creds.is_some() { "ok" } else { "fail" })
         .replace("{{USER}}", &html_escape(&user))
 }
@@ -379,22 +393,19 @@ mod tests {
     #[test]
     fn callback_page_escapes_username_and_sets_state() {
         let c = Credentials { username: "<x>@y".into(), tokenid: "t".into(), uid: String::new() };
-        let page = callback_page(Some(&c));
+        let page = callback_page(Some(&c), &TunnelProfile::default());
         assert!(page.contains(r#"<body class="ok">"#));
         assert!(page.contains("&lt;x&gt;@y:~$"));
         assert!(!page.contains("{{"));
-        assert!(callback_page(None).contains(r#"<body class="fail">"#));
+        assert!(callback_page(None, &TunnelProfile::default()).contains(r#"<body class="fail">"#));
     }
 
     #[test]
-    fn callback_page_names_the_tunnel_when_the_supervisor_sets_it() {
-        std::env::set_var("OFTC_PROFILE_NAME", "Colo <1>");
-        std::env::set_var("OFTC_PROFILE_GATEWAY", "vpn.lab.example");
-        let page = callback_page(None);
-        std::env::remove_var("OFTC_PROFILE_NAME");
-        std::env::remove_var("OFTC_PROFILE_GATEWAY");
+    fn callback_page_names_the_tunnel_it_is_given() {
+        let profile = TunnelProfile { name: "Colo <1>".into(), gateway: "vpn.example.com".into() };
+        let page = callback_page(None, &profile);
         assert!(page.contains("&gt; tunnel<") && page.contains("Colo &lt;1&gt;"));
-        assert!(page.contains("&gt; gateway<") && page.contains("vpn.lab.example"));
+        assert!(page.contains("&gt; gateway<") && page.contains("vpn.example.com"));
         assert!(!page.contains("{{"));
     }
 

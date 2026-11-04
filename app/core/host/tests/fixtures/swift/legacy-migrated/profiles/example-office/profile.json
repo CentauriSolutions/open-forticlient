@@ -1,0 +1,1 @@
+{"name":"Example Office","version":1,"samlPort":9443,"gateway":"vpn.example.com","adoptsUnkeyedVPNEntry":true,"transport":"tcp"}

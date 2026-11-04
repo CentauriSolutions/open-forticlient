@@ -115,6 +115,7 @@ fn mapped(error: oftc_engine::Error) -> Status {
 }
 
 /// The engine's own [`Session`] behind a mutex.
+#[derive(Clone, Copy)]
 pub struct SessionBackend;
 
 impl Backend for SessionBackend {
@@ -237,12 +238,9 @@ mod tests {
     fn a_cancelled_connect_reports_the_cancelled_status() {
         let cancel = Cancellation::default();
         cancel.cancel();
-        let input = BootstrapInput::decode(
-            &crate::envelope::tests::hbr1(
-                "gateway.invalid", crate::envelope::tests::UID, b"synthetic", b"token"),
-            true,
-        )
-        .unwrap();
+        let wire = crate::envelope::encode_hbr1(
+            "gateway.invalid", crate::envelope::tests::UID, b"synthetic", b"token").unwrap();
+        let input = BootstrapInput::decode(wire.as_bytes(), true).unwrap();
         let result = SessionBackend.connect(input, ConnectOptions::default(), cancel);
         assert_eq!(result.err(), Some(CANCELLED));
     }
