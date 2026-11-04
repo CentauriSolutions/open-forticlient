@@ -31,13 +31,48 @@ documented edge. Tracked as Issues 41 to 50.
 | `oftc` CLI | Rust | unchanged role |
 | UI (menu bar, popover, welcome, onboarding, trust prompt, sparkline) | Swift unless Issue 47 says otherwise | thin main executable plus UI only |
 
-Process model (default, from Issue 45): `OFTCAgent` remains the bundle's main
-executable, so restricted entitlements stay where they are today. It becomes a
-~30-line Swift `main` that links a Rust host static library, the pattern
-`liboftc_migration.a` already uses. With arguments it calls
-`oftc_host_main(argc, argv)`. With none it starts the Swift UI. The alternative
-(a Rust main executable that loads the Swift UI) is chosen only if the Issue 45
-entitlement test favours it.
+Process model (Issue 45): the recommended and adopted choice is **Option A**: a
+thin Swift `main` plus one Rust staticlib inside the entitled `OFTCAgent`. The
+maintainer started its implementation. The alternatives, named once: **Option B**
+is a Rust `main` executable that loads the Swift UI as a dylib; **Option C** is
+Rust host logic in a nested entitled helper under `Contents/Helpers`.
+
+Under Option A, `OFTCAgent` remains the bundle's main executable, so the
+restricted entitlements, which are bound to `Contents/MacOS/OFTCAgent` when the
+bundle is signed, stay where they are today. It becomes a ~30-line Swift `main`
+that links one Rust host static library, the pattern `liboftc_migration.a`
+already uses. With arguments it calls `oftc_host_main(argc, argv)`. With none it
+starts the Swift UI. In-process libraries inherit the process's entitlements, so
+this needs no signing change.
+
+Consequences:
+
+- Rust owns every write to the NetworkExtension preferences (create, enable,
+  remove); the Swift UI only reads them. UI-side enable and create paths move
+  behind an idempotent `install-config` verb.
+- The host libraries (migration, host, later engine) go into a single staticlib
+  crate: one panic and allocator state and a smaller binary. The Issue 46 change
+  that introduces it owns the `build.sh` and signing-script edits.
+- Option B adds a signed artifact; revisit it only if Issue 47 chooses a Rust UI.
+  Option C is ruled out by the placement test below.
+
+Entitlement-placement test (run on the development Mac, signed with the existing
+Developer ID identity and host profile, not notarized, nothing installed or
+activated; full result in
+<https://github.com/CentauriSolutions/open-forticlient/issues/45#issuecomment-6618560555>).
+A probe called `NETunnelProviderManager.loadAllFromPreferences`:
+
+| Run | Placement and signing | Result |
+| --- | --- | --- |
+| T1 | Probe as `Contents/MacOS/OFTCAgent`, profile embedded | Runs; sees the app's own 2 entries. |
+| T2 | Nested helper, same entitlements, no profile of its own | Killed at launch (exit 137), reproducibly. |
+| T3 | Probe with no entitlements (today's `oftc` helper) | Runs, no error; sees 6 entries instead of 2. |
+
+- A nested entitled helper without its own profile is killed, so Option C is
+  ruled out as tested. The kill cause is inferred from T1 against T2, not read
+  from a log.
+- An unentitled binary can call `loadAllFromPreferences` but sees a different
+  scope. Issue 46 must not rely on that scoping (writes were not tested).
 
 ## The UI edge
 
@@ -128,9 +163,9 @@ offline build plus tests. Only Issue 48 claims activation and live traffic.
 - **Class registration.** `NEProviderClasses` names the principal class; a Rust
   `objc2` class must be registered under a plain Objective-C name before
   `startSystemExtensionMode`. Issue 44 answers this first.
-- **Entitlement placement.** Which executable may call `NETunnelProviderManager`
-  and `OSSystemExtensionManager` under its provisioning profile. Issue 45 tests
-  this; it decides the process model.
+- **Entitlement placement.** Answered by the Issue 45 test (above): a nested
+  helper claiming the entitlements without its own profile is killed, so the
+  entitled calls stay in the main executable (Option A).
 - **Missing crates.** `objc2-network-extension`, `objc2-system-extensions`,
   `objc2-service-management` and `p384` are not in the offline cargo cache.
   Hand-write the small binding slice or vendor the crates; Issue 41 decides once.
