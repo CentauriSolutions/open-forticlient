@@ -9,8 +9,8 @@
 set -euo pipefail
 
 root="${0:A:h:h}"
-attempts=4
-limit=240   # seconds per attempt
+attempts=3
+limit=90    # seconds per attempt; worst case 2 manifests x 3 x 90 s = 9 min, inside the 15-minute lint timeout
 
 fetch() {
     perl -e 'alarm shift; exec @ARGV' "$limit" \
