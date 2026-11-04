@@ -5,11 +5,16 @@
 //! test on every platform, and the real backend is added behind
 //! `cfg(target_os = "macos")`.
 //!
-//! Unsafe code is denied crate-wide; the backend's quarantined `objc` module is
-//! the only place that will lift that.
+//! Unsafe code is denied crate-wide. It is allowed only in the macOS backend:
+//! the shared `objc` module and `manager::ne`, which calls the generated
+//! (all-`unsafe`) NetworkExtension bindings.
 #![deny(unsafe_code)]
 
 pub mod completion;
 pub mod error;
 pub mod manager;
 pub mod settings;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod objc;
