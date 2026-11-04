@@ -73,10 +73,11 @@ mod tests {
     fn resolves_once_or_fails_closed() {
         let wait = Duration::from_millis(50);
 
-        // A handler on another thread resolves twice: the first value wins.
+        // A handler resolves through a clone, then the original: the first wins.
         let got = await_callback(Duration::from_secs(5), off_main, |r| {
+            let clone = r.clone();
             thread::spawn(move || {
-                r.resolve(1);
+                clone.resolve(1);
                 r.resolve(2);
             });
         });
