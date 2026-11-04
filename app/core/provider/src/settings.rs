@@ -63,7 +63,10 @@ fn valid_domain(domain: &str) -> bool {
 
 /// The outer gateway address: any unicast address, and for an IPv4-mapped IPv6
 /// one the embedded IPv4 address, which still needs a route exclusion.
-fn outer_ipv4(outer: IpAddr) -> Result<Option<Ipv4Addr>, SettingsError> {
+///
+/// Public so the Apple settings conversion applies the same rule when it
+/// builds the excluded-route list; `Ok(None)` means a plain IPv6 gateway.
+pub fn outer_ipv4(outer: IpAddr) -> Result<Option<Ipv4Addr>, SettingsError> {
     match outer {
         IpAddr::V4(address) if unicast(address) => Ok(Some(address)),
         IpAddr::V6(address) if !address.is_unspecified() && !address.is_multicast() => {

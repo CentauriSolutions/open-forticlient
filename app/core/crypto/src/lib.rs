@@ -61,7 +61,7 @@ impl Group20Key {
         // negligible probability (below 2^-190); retry in that case.
         loop {
             fill_random(&mut *seed)?;
-            if let Ok(secret) = SecretKey::from_bytes(&(*seed).into()) {
+            if let Ok(secret) = SecretKey::from_bytes((&*seed).into()) {
                 let key = Self(secret);
                 let public = key.public_value();
                 return Ok((key, public));
