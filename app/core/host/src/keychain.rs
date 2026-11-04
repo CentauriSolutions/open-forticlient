@@ -59,7 +59,9 @@ impl Keychain for MemoryKeychain {
 /// [`PSK_MAX`] bytes of UTF-8 with no NUL. Shared by the terminal prompt and
 /// `provision-psk --stdin`, so both accept exactly the same secrets.
 pub fn read_psk_line(reader: &mut dyn Read) -> Result<Zeroizing<Vec<u8>>, KeychainError> {
-    let mut bytes = Zeroizing::new(Vec::new());
+    // Reserve the most it can hold, so the buffer never reallocates and leaves an
+    // unwiped copy of the PSK behind.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(PSK_MAX + 1));
     let mut byte = [0u8; 1];
     while bytes.len() <= PSK_MAX {
         match reader.read(&mut byte) {
