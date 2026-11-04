@@ -1,0 +1,15 @@
+[package]
+name = "oftc-apple"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "oftc_apple"
+path = "src/lib.rs"
+
+[dependencies]
+zeroize = "=1.9.0"
+
+[lints]
+workspace = true

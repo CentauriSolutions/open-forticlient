@@ -270,6 +270,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oftc-apple"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "oftc-crypto"
 version = "0.1.0"
 dependencies = [
