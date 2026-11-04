@@ -13,9 +13,8 @@ oftc-engine = { path = "../engine" }
 oftc-provider = { path = "../provider" }
 zeroize = "=1.9.0"
 
-# The NetworkExtension provider side. Pinned like the repo's other crates;
-# the Apple crates compile only on macOS, so the pure modules still build
-# everywhere.
+# Apple frameworks are reached only from macOS builds; everything above builds
+# anywhere. Versions are pinned exactly, like the rest of the workspace.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
