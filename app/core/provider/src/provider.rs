@@ -105,7 +105,7 @@ struct Shared<B: Backend, T> {
     changed: Condvar,
 }
 
-/// One tunnel's worth of provider logic. Create one per provider process.
+/// One tunnel's worth of provider logic. Create one per start: after a stop it refuses to start again.
 pub struct Provider<B: Backend, T: Tunnel + 'static>(Arc<Shared<B, T>>);
 
 fn unix_now() -> u64 {

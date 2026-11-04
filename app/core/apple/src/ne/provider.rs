@@ -5,9 +5,11 @@
 //! entry point copies its completion block, hands the work to a thread and
 //! returns; the thread posts the completion back to the main queue.
 //!
-//! One provider per process: the engine lives in a static, is created on the
-//! first `startTunnel`, and is never dropped (its `Drop` blocks, so it must not
-//! run on the main thread, and process exit does not run it).
+//! One engine per start: NetworkExtension keeps the process across a stop and
+//! creates a new provider object for the next start, but an engine is one
+//! tunnel's worth of state and refuses to start after a stop. The latest engine
+//! lives in a static; the one it replaces is dropped on the new start's thread
+//! (its `Drop` blocks, so it must not run on the main thread).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -50,22 +52,58 @@ pub trait Engine: Send + Sync {
     fn handle_message(&self, message: &[u8]) -> Option<Vec<u8>>;
 }
 
-/// Builds the engine on the first `startTunnel`. Given a weak reference to the
-/// provider object, because the engine must not keep it alive.
-pub type Factory = Box<dyn FnOnce(Weak<NEPacketTunnelProvider>) -> Box<dyn Engine> + Send>;
+/// Builds an engine for one `startTunnel`. Given a weak reference to that
+/// start's provider object, because the engine must not keep it alive.
+///
+/// NetworkExtension creates a new provider object for every start but keeps the
+/// process, and a `Provider` is one tunnel's worth of state (once stopped it
+/// refuses to start), so every start gets a fresh engine, and a fresh latch.
+pub type Factory = Box<dyn Fn(Weak<NEPacketTunnelProvider>) -> Box<dyn Engine> + Send + Sync>;
 
-static FACTORY: Mutex<Option<Factory>> = Mutex::new(None);
-static ENGINE: OnceLock<Box<dyn Engine>> = OnceLock::new();
+type Shared = Arc<dyn Engine>;
+type Replaced = (Shared, Option<Shared>);
+type Build<A> = Box<dyn Fn(A) -> Box<dyn Engine> + Send + Sync>;
+
+/// The factory, and the engine of the latest start (what stop and messages are
+/// routed to).
+struct Engines<A> {
+    factory: OnceLock<Build<A>>,
+    current: Mutex<Option<Shared>>,
+}
+
+static ENGINES: Engines<Weak<NEPacketTunnelProvider>> =
+    Engines { factory: OnceLock::new(), current: Mutex::new(None) };
 
 /// Register how to build the engine. Hands the factory back if one is already
 /// registered.
 pub fn install_factory(factory: Factory) -> Result<(), Factory> {
-    let mut slot = FACTORY.lock().unwrap_or_else(PoisonError::into_inner);
-    if slot.is_some() || ENGINE.get().is_some() {
-        return Err(factory);
+    ENGINES.factory.set(factory)
+}
+
+fn current() -> Option<Shared> {
+    ENGINES.current()
+}
+
+impl<A> Engines<A> {
+    fn current(&self) -> Option<Shared> {
+        self.current.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
-    *slot = Some(factory);
-    Ok(())
+
+    /// Build the engine for a new start and make it the current one. Returns it
+    /// with the engine it replaced, which the caller drops off the main queue
+    /// (dropping a provider stops it). `None` if no factory was registered or
+    /// building the engine panicked; the previous engine is then left in place.
+    fn replace(&self, arg: A) -> Option<Replaced> {
+        let factory = self.factory.get()?;
+        let built: Arc<dyn Engine> =
+            catch_unwind(AssertUnwindSafe(|| factory(arg))).ok()?.into();
+        let old = self
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Arc::clone(&built));
+        Some((built, old))
+    }
 }
 
 /// Register the provider class and return its name, so the system can find it.
@@ -152,23 +190,6 @@ fn spawn_owning<T: Send + 'static>(
     }
 }
 
-/// The engine, created on first use. `None` if no factory was registered or
-/// building the engine panicked.
-fn engine(provider: Weak<NEPacketTunnelProvider>) -> Option<&'static dyn Engine> {
-    if let Some(engine) = ENGINE.get() {
-        return Some(&**engine);
-    }
-    // Held across the build so a concurrent first start sees the engine, not
-    // an empty factory.
-    let mut slot = FACTORY.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(engine) = ENGINE.get() {
-        return Some(&**engine);
-    }
-    let factory = slot.take()?;
-    let built = catch_unwind(AssertUnwindSafe(|| factory(provider))).ok()?;
-    Some(&**ENGINE.get_or_init(|| built))
-}
-
 /// The start thread's body: run the start, post its completion to the main
 /// queue, then release anything waiting for that completion to be enqueued.
 fn start_body(
@@ -190,13 +211,15 @@ pub fn fail_start(done: StartDone) {
 
 pub fn begin_start(provider: Weak<NEPacketTunnelProvider>, options: StartOptions, done: StartDone) {
     let queue = &sys::MainDispatch;
-    let Some(engine) = engine(provider) else {
+    let Some((engine, old)) = ENGINES.replace(provider) else {
         complete_start(queue, done, Err(PANICKED));
         return;
     };
-    if let Err(done) = spawn_owning("oftc-start", done, move |done| {
+    if let Err((done, _)) = spawn_owning("oftc-start", (done, old), move |(done, old)| {
         sys::pooled(|| {
-            start_body(queue, engine, &options, move |result| {
+            // The previous start's engine is already stopped; drop it here.
+            drop(old);
+            start_body(queue, &*engine, &options, move |result| {
                 complete_start_now(done, result);
             });
         });
@@ -216,7 +239,7 @@ fn complete_start_now(done: StartDone, result: Result<(), Failure>) {
 
 pub fn begin_stop(done: StopDone) {
     let queue = &sys::MainDispatch;
-    let Some(engine) = ENGINE.get() else {
+    let Some(engine) = current() else {
         complete_stop(queue, done);
         return;
     };
@@ -232,7 +255,7 @@ pub fn begin_stop(done: StopDone) {
 
 pub fn begin_message(message: Vec<u8>, done: Option<ReplyDone>) {
     let queue = &sys::MainDispatch;
-    let Some(engine) = ENGINE.get() else {
+    let Some(engine) = current() else {
         complete_reply(queue, done, None);
         return;
     };
@@ -323,9 +346,10 @@ fn build_engine<B: Backend>(backend: B, provider: Weak<NEPacketTunnelProvider>) 
 
 /// The extension process's entry point: register the provider class over
 /// `backend`, hand control to NetworkExtension and run the main queue. The
-/// engine is built on the first `startTunnel`, never dropped.
-pub fn run<B: Backend>(backend: B) -> ! {
-    let installed = install_factory(Box::new(move |provider| build_engine(backend, provider)));
+/// engine is built on each `startTunnel`.
+pub fn run<B: Backend + Clone>(backend: B) -> ! {
+    let installed =
+        install_factory(Box::new(move |provider| build_engine(backend.clone(), provider)));
     assert!(installed.is_ok(), "run called twice");
     sys::run_extension()
 }
@@ -372,6 +396,59 @@ mod tests {
     use block2::RcBlock;
 
     use super::super::tunnel::fake::{FakeHost, FakeQueue};
+
+    /// Like `Provider`: one tunnel's worth of state. Once stopped it refuses to
+    /// start again, with code 1.
+    #[derive(Default)]
+    struct OneShot {
+        stopped: Mutex<bool>,
+        started: Mutex<bool>,
+    }
+
+    impl Engine for OneShot {
+        fn start(&self, _options: &StartOptions) -> Result<(), Failure> {
+            let stopped = *self.stopped.lock().unwrap();
+            let mut started = self.started.lock().unwrap();
+            if stopped || *started {
+                return Err(Failure(1));
+            }
+            *started = true;
+            Ok(())
+        }
+        fn stop(&self) {
+            *self.stopped.lock().unwrap() = true;
+        }
+        fn handle_message(&self, _message: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// NetworkExtension keeps the process across a stop and starts the next
+    /// tunnel with a new provider object: the second start must get a fresh
+    /// engine, and stop must reach it. A refused start reports its real code.
+    #[test]
+    fn a_start_after_a_stop_gets_a_fresh_engine() {
+        let engines: Engines<()> =
+            Engines { factory: OnceLock::new(), current: Mutex::new(None) };
+        assert!(engines.factory.set(Box::new(|()| Box::new(OneShot::default()))).is_ok());
+        let queue = FakeQueue::new();
+        let options = StartOptions::default();
+
+        let (first, old) = engines.replace(()).unwrap();
+        assert!(old.is_none());
+        start_body(&*queue, &*first, &options, |r| assert_eq!(r, Ok(())));
+        engines.current().unwrap().stop();
+
+        let (second, old) = engines.replace(()).unwrap();
+        assert!(Arc::ptr_eq(&old.unwrap(), &first));
+        start_body(&*queue, &*second, &options, |r| assert_eq!(r, Ok(())));
+        assert!(Arc::ptr_eq(&engines.current().unwrap(), &second));
+
+        // The engine that was reused would have refused, with its real code.
+        let (code, done) = mpsc::channel();
+        start_body(&*queue, &*first, &options, move |r| code.send(r).unwrap());
+        assert_eq!(done.recv().unwrap(), Err(Failure(1)));
+    }
 
     struct TestEngine {
         latch: Arc<Latch>,

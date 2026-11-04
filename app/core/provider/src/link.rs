@@ -115,6 +115,7 @@ fn mapped(error: oftc_engine::Error) -> Status {
 }
 
 /// The engine's own [`Session`] behind a mutex.
+#[derive(Clone, Copy)]
 pub struct SessionBackend;
 
 impl Backend for SessionBackend {
