@@ -4,10 +4,8 @@
 use std::panic::AssertUnwindSafe;
 
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
 use objc2::Message;
-use objc2_foundation::{NSError, NSObjectProtocol, NSThread};
-use objc2_network_extension::{NETunnelProviderManager, NEVPNConnection};
+use objc2_foundation::{NSError, NSThread};
 
 use crate::error::AppleError;
 
@@ -17,20 +15,6 @@ use crate::error::AppleError;
 /// Implement only for a class whose documentation states that its instances are
 /// thread safe, and quote that statement in the `SAFETY` comment.
 pub(crate) unsafe trait ThreadSafeObject: Message {}
-
-// SAFETY: NETunnelProviderManager.h in the macOS SDK says "Instances of this
-// class are thread safe." (line 28), and NEVPNManager.h says the same of its
-// superclass (line 66).
-unsafe impl ThreadSafeObject for NETunnelProviderManager {}
-
-// SAFETY: NEVPNConnection.h says "Instances of this class are thread safe."
-// (line 99). Its subclass NETunnelProviderSession adds only a message call.
-unsafe impl ThreadSafeObject for NEVPNConnection {}
-
-// SAFETY: this is the opaque token `addObserverForName:...` returns. We only
-// ever pass it to `removeObserver:`, and NSNotificationCenter is documented as
-// safe to use from any thread.
-unsafe impl ThreadSafeObject for ProtocolObject<dyn NSObjectProtocol> {}
 
 /// An owned object of a [`ThreadSafeObject`] class, movable across threads.
 pub(crate) struct Shared<T: ThreadSafeObject>(Retained<T>);
@@ -87,4 +71,29 @@ pub(crate) fn catch<R>(f: impl FnOnce() -> R) -> Result<R, AppleError> {
 /// Whether the calling thread is the main thread.
 pub(crate) fn is_main() -> bool {
     NSThread::isMainThread_class()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::msg_send;
+    use objc2_foundation::{NSException, NSString};
+
+    #[test]
+    fn catch_turns_an_exception_into_an_error() {
+        let result = catch(|| {
+            let name = NSString::from_str("OftcTestException");
+            let reason = NSString::from_str("boom");
+            // SAFETY: a valid exception object; raising it inside `catch`.
+            unsafe {
+                let exception =
+                    NSException::exceptionWithName_reason_userInfo(&name, Some(&reason), None);
+                let _: () = msg_send![&*exception, raise];
+            }
+        });
+        match result {
+            Err(AppleError::Ns { domain, .. }) => assert_eq!(domain, "NSException"),
+            other => panic!("expected an Ns error, got {other:?}"),
+        }
+    }
 }

@@ -2,9 +2,12 @@
 //!
 //! Every call into the generated bindings is `unsafe`; each goes through
 //! [`catch`] so an Objective-C exception becomes an error instead of unwinding
-//! through Rust. Completion handlers run on the main thread, so callers must not
-//! be on it (the CLI parks its main thread in `dispatch_main` and runs commands
-//! on a worker); [`await_callback`] refuses otherwise.
+//! through Rust. The SDK documents main-thread delivery for the load, remove and
+//! save handlers; callers must therefore not be on the main thread (the CLI parks
+//! its main thread in `dispatch_main` and runs commands on a worker), and
+//! [`await_callback`] refuses otherwise. Load, save and observer behaviour, and
+//! the provider-message and disconnect-error handlers, are unverified against a
+//! live NetworkExtension.
 
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -25,7 +28,33 @@ use objc2_network_extension::{
 use super::{Result, StartKind, StartOptions, Subscription, VpnControl, VpnEntry, VpnStatus};
 use crate::completion::{await_callback, Resolver, DEFAULT_TIMEOUT};
 use crate::error::AppleError;
-use crate::objc::{catch, error_from_ptr, from_ns_error, is_main, Shared};
+use crate::objc::{catch, error_from_ptr, from_ns_error, is_main, Shared, ThreadSafeObject};
+
+// SAFETY: NETunnelProviderManager.h in the macOS SDK says "Instances of this
+// class are thread safe." (line 28), and NEVPNManager.h says the same of its
+// superclass (line 66).
+unsafe impl ThreadSafeObject for NETunnelProviderManager {}
+
+// SAFETY: NEVPNConnection.h says "Instances of this class are thread safe."
+// (line 99). Its subclass NETunnelProviderSession adds only a message call.
+unsafe impl ThreadSafeObject for NEVPNConnection {}
+
+/// The opaque token `addObserverForName:...` returns.
+struct ObserverToken(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+
+// SAFETY: the token is only ever passed to `removeObserver:`, never messaged
+// otherwise, and NSNotificationCenter is documented as safe to use from any
+// thread.
+unsafe impl Send for ObserverToken {}
+
+impl ObserverToken {
+    fn remove(self) {
+        // SAFETY: removing the token we added.
+        let _ = catch(|| unsafe {
+            NSNotificationCenter::defaultCenter().removeObserver(self.0.as_ref())
+        });
+    }
+}
 
 /// `saveToPreferences` can wait on the user approving a VPN configuration.
 const SAVE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -98,13 +127,17 @@ fn await_error(
     call: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>) -> std::result::Result<(), AppleError>,
 ) -> Result<()> {
     let mut started = Ok(());
-    let waited = await_callback(timeout, is_main, |resolver: Resolver<Option<AppleError>>| {
-        let block = RcBlock::new(move |error: *mut NSError| {
-            // SAFETY: NetworkExtension passes null or a live NSError.
-            resolver.resolve(unsafe { error_from_ptr(error) });
-        });
-        started = call(&block);
-    });
+    let waited = await_callback(
+        timeout,
+        is_main,
+        |resolver: Resolver<Option<AppleError>>| {
+            let block = RcBlock::new(move |error: *mut NSError| {
+                // SAFETY: NetworkExtension passes null or a live NSError.
+                resolver.resolve(unsafe { error_from_ptr(error) });
+            });
+            started = call(&block);
+        },
+    );
     // A call that raised never fires its handler; report that, not the timeout.
     started?;
     waited?.map_or(Ok(()), Err)
@@ -175,6 +208,9 @@ impl VpnControl for NeVpnControl {
     }
 
     fn create(&self, provider_id: &str, profile_key: &str, name: &str) -> Result<()> {
+        if is_main() {
+            return Err(AppleError::MainThread);
+        }
         let manager = catch(|| {
             // SAFETY: constructing and configuring objects we own, inside `catch`.
             unsafe {
@@ -202,6 +238,9 @@ impl VpnControl for NeVpnControl {
     }
 
     fn set_enabled(&self, entry: &VpnEntry, enabled: bool) -> Result<()> {
+        if is_main() {
+            return Err(AppleError::MainThread);
+        }
         let manager = manager(entry)?;
         // SAFETY: property write on a thread-safe object, inside `catch`.
         catch(|| unsafe { manager.setEnabled(enabled) })?;
@@ -253,34 +292,45 @@ impl VpnControl for NeVpnControl {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         let connection = connection(entry)?;
-        let reply = await_callback(
-            timeout,
-            is_main,
-            |resolver: Resolver<Result<Vec<u8>>>| {
-                let data = NSData::with_bytes(message);
-                let block = RcBlock::new(move |reply: *mut NSData| {
-                    // SAFETY: null or a live NSData for the handler's duration.
-                    let bytes = unsafe { reply.as_ref() }.map(|d| d.to_vec()).unwrap_or_default();
-                    resolver.resolve(Ok(bytes));
-                });
-                let session = Retained::<NEVPNConnection>::from(&*connection)
-                    .downcast::<NETunnelProviderSession>();
-                // Not a provider session, or the send failed: the block never
-                // fires and the wait times out.
-                if let Ok(session) = session {
-                    let mut error = None;
-                    // SAFETY: arguments live across the call; inside `catch`.
-                    let _ = catch(|| unsafe {
-                        session.sendProviderMessage_returnError_responseHandler(
-                            &data,
-                            Some(&mut error),
-                            Some(&block),
-                        )
-                    });
+        await_callback(timeout, is_main, |resolver: Resolver<Result<Vec<u8>>>| {
+            let failed = resolver.clone();
+            let data = NSData::with_bytes(message);
+            let block = RcBlock::new(move |reply: *mut NSData| {
+                // SAFETY: null or a live NSData for the handler's duration.
+                let bytes = unsafe { reply.as_ref() }
+                    .map(|d| d.to_vec())
+                    .unwrap_or_default();
+                resolver.resolve(Ok(bytes));
+            });
+            let session = Retained::<NEVPNConnection>::from(&*connection)
+                .downcast::<NETunnelProviderSession>();
+            let Ok(session) = session else {
+                failed.resolve(Err(AppleError::from_nserror(
+                    "oftc.apple",
+                    0,
+                    "connection is not a tunnel provider session",
+                )));
+                return;
+            };
+            let mut error = None;
+            // SAFETY: arguments live across the call; inside `catch`.
+            let sent = catch(|| unsafe {
+                session.sendProviderMessage_returnError_responseHandler(
+                    &data,
+                    Some(&mut error),
+                    Some(&block),
+                )
+            });
+            match sent {
+                Ok(true) => {}
+                Ok(false) => {
+                    failed.resolve(Err(error.as_deref().map(from_ns_error).unwrap_or_else(
+                        || AppleError::from_nserror("oftc.apple", 0, "provider message not sent"),
+                    )))
                 }
-            },
-        )?;
-        reply
+                Err(e) => failed.resolve(Err(e)),
+            }
+        })?
     }
 
     fn last_disconnect_error(
@@ -292,24 +342,29 @@ impl VpnControl for NeVpnControl {
         await_callback(
             timeout,
             is_main,
-            |resolver: Resolver<Option<AppleError>>| {
+            |resolver: Resolver<Result<Option<AppleError>>>| {
+                let failed = resolver.clone();
                 let block = RcBlock::new(move |error: *mut NSError| {
                     // SAFETY: null or a live NSError for the handler's duration.
-                    resolver.resolve(unsafe { error_from_ptr(error) });
+                    resolver.resolve(Ok(unsafe { error_from_ptr(error) }));
                 });
                 // SAFETY: handler block outlives the call (NE copies it).
-                let _ = catch(|| unsafe {
+                if let Err(e) = catch(|| unsafe {
                     connection.fetchLastDisconnectErrorWithCompletionHandler(&block)
-                });
+                }) {
+                    failed.resolve(Err(e));
+                }
             },
-        )
+        )?
     }
 
     fn observe_status(&self, entry: &VpnEntry, notify: Sender<()>) -> Result<Subscription> {
         let connection = connection(entry)?;
-        let block = RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
-            let _ = notify.send(());
-        });
+        let block = RcBlock::new(
+            move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                let _ = notify.send(());
+            },
+        );
         // Queue nil: delivering on the main queue deadlocks with NE. The
         // connection is always passed as the object: `object: nil` leaks mach
         // ports.
@@ -324,13 +379,8 @@ impl VpnControl for NeVpnControl {
                 )
             }
         })?;
-        let token = Shared::new(token);
-        Ok(Subscription::new(move || {
-            // SAFETY: removing the token we added.
-            let _ = catch(|| unsafe {
-                NSNotificationCenter::defaultCenter().removeObserver(token.as_ref())
-            });
-        }))
+        let token = ObserverToken(token);
+        Ok(Subscription::new(move || token.remove()))
     }
 }
 
@@ -339,4 +389,24 @@ fn save(manager: &NETunnelProviderManager) -> Result<()> {
         // SAFETY: handler block outlives the call (NE copies it).
         catch(|| unsafe { manager.saveToPreferencesWithCompletionHandler(Some(block)) })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_every_status_and_falls_back_to_invalid() {
+        for (raw, want) in [
+            (NEVPNStatus::Invalid, VpnStatus::Invalid),
+            (NEVPNStatus::Disconnected, VpnStatus::Disconnected),
+            (NEVPNStatus::Connecting, VpnStatus::Connecting),
+            (NEVPNStatus::Connected, VpnStatus::Connected),
+            (NEVPNStatus::Reasserting, VpnStatus::Reasserting),
+            (NEVPNStatus::Disconnecting, VpnStatus::Disconnecting),
+            (NEVPNStatus(99), VpnStatus::Invalid),
+        ] {
+            assert_eq!(map_status(raw), want);
+        }
+    }
 }
