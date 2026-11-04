@@ -21,6 +21,8 @@ dispatch2 = "=0.3.1"
 objc2 = { version = "=0.6.5", features = ["exception"] }
 objc2-foundation = "=0.3.2"
 objc2-network-extension = "=0.3.2"
+objc2-service-management = { version = "=0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+objc2-system-extensions = "=0.3.2"
 
 [lints]
 workspace = true

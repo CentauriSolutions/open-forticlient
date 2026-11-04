@@ -22,6 +22,7 @@ use oftc_provider::provider::Failure;
 
 use super::provider;
 use super::tunnel::{Host, MainQueue, ReadDone, SettingsDone, AF_INET};
+use crate::objc::guarded;
 use crate::settings::{NeRoute, NeSettings};
 
 /// A completion block NetworkExtension handed us, copied to the heap so it can
@@ -44,16 +45,6 @@ impl<T: ?Sized> SendBlock<T> {
     pub fn block(&self) -> &DynBlock<T> {
         &self.0
     }
-}
-
-/// Run `f`, turning a Rust panic or an Objective-C exception into `false`.
-/// Both must stay out of `extern "C"` trampolines: a panic there aborts the
-/// process, and an exception unwinding through Rust is undefined behaviour.
-pub fn guarded(f: impl FnOnce()) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
-        objc2::exception::catch(AssertUnwindSafe(f)).is_ok()
-    }))
-    .unwrap_or(false)
 }
 
 /// Post `f` to the main queue. Every Objective-C object is created and released
