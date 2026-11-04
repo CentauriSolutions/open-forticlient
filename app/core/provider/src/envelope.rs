@@ -21,6 +21,7 @@ const ENVELOPE_HEADER: usize = 5 + 8 + 16 + 2;
 const MAX_SECRET: usize = 4096;
 const MAX_LIFETIME_SECONDS: u64 = 120;
 const HBR1_MAGIC: [u8; 4] = *b"HBR1";
+const MAX_HBR1: usize = 4096;
 /// The replay set is bounded so a flood of starts cannot grow it.
 const MAX_REMEMBERED_STARTS: usize = 128;
 
@@ -85,6 +86,35 @@ impl ConnectMode {
         idi_v4: None,
         tcp_fallback: true,
     });
+
+    /// `[1, transport, family, tcp_fallback, idi_v4 x4]`. The inverse of
+    /// [`ConnectMode::decode`]: an option set that decode would reject is not
+    /// encoded, so a host cannot build a start the provider refuses.
+    pub fn encode(&self) -> Result<[u8; 8], EnvelopeError> {
+        let options = &self.0;
+        let transport = match options.wire {
+            Wire::Udp4500 => 1,
+            Wire::Tcp4443 => 2,
+        };
+        let (family, idi) = match (options.family, options.idi_v4) {
+            (OuterFamily::Ipv4, None) => (4, [0; 4]),
+            (OuterFamily::Ipv6, Some(idi)) => (6, idi.octets()),
+            _ => return Err(EnvelopeError::Invalid),
+        };
+        let bytes = [
+            1,
+            transport,
+            family,
+            u8::from(options.tcp_fallback),
+            idi[0],
+            idi[1],
+            idi[2],
+            idi[3],
+        ];
+        // One validity rule, shared with the decoder.
+        Self::decode(&bytes)?;
+        Ok(bytes)
+    }
 
     /// `[1, transport, family, tcp_fallback, idi_v4 x4]`.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeError> {
@@ -170,7 +200,7 @@ impl BootstrapInput {
     /// Decode an `HBR1` record: magic, four big-endian lengths (gateway, uid,
     /// psk, token), then the fields. A preflight carries no token.
     pub fn decode(wire: &[u8], token_required: bool) -> Result<Self, EnvelopeError> {
-        if wire.len() < 12 || wire.len() > 4096 || wire[..4] != HBR1_MAGIC {
+        if wire.len() < 12 || wire.len() > MAX_HBR1 || wire[..4] != HBR1_MAGIC {
             return Err(EnvelopeError::Invalid);
         }
         let lengths: Vec<usize> = (4..12).step_by(2).map(|at| be16(&wire[at..])).collect();
@@ -217,6 +247,75 @@ impl BootstrapInput {
             token: Secret(token.to_vec()),
         })
     }
+}
+
+/// Frame an `HBR1` record: magic, four big-endian lengths (gateway, uid, psk,
+/// token), then the fields. Framing only; the fields are not validated, so
+/// tests can build records the provider must reject. Hosts use [`encode_hbr1`].
+fn frame_hbr1(gateway: &str, uid: &str, psk: &[u8], token: &[u8]) -> Vec<u8> {
+    let fields = [gateway.as_bytes(), uid.as_bytes(), psk, token];
+    let mut wire = HBR1_MAGIC.to_vec();
+    for field in fields {
+        wire.extend_from_slice(&(field.len() as u16).to_be_bytes());
+    }
+    for field in fields {
+        wire.extend_from_slice(field);
+    }
+    wire
+}
+
+/// Frame the outer envelope: magic, expiry (u64 BE), 16-byte session id,
+/// secret length (u16 BE), secret. Framing only, like [`frame_hbr1`].
+fn frame_envelope(expires_at: u64, session_id: [u8; 16], secret: &[u8]) -> Vec<u8> {
+    let mut data = ENVELOPE_MAGIC.to_vec();
+    data.extend_from_slice(&expires_at.to_be_bytes());
+    data.extend_from_slice(&session_id);
+    data.extend_from_slice(&(secret.len() as u16).to_be_bytes());
+    data.extend_from_slice(secret);
+    data
+}
+
+/// Encode a live (`token` non-empty) or preflight (`token` empty) `HBR1`
+/// record. The result is checked by [`BootstrapInput::decode`], so every
+/// record this returns is one the provider accepts.
+pub fn encode_hbr1(
+    gateway: &str,
+    uid: &str,
+    psk: &[u8],
+    token: &[u8],
+) -> Result<Secret, EnvelopeError> {
+    // Lengths are u16 on the wire: refuse before one could wrap.
+    let total = 12 + gateway.len() + uid.len() + psk.len() + token.len();
+    if total > MAX_HBR1 {
+        return Err(EnvelopeError::Invalid);
+    }
+    let wire = Secret(frame_hbr1(gateway, uid, psk, token));
+    BootstrapInput::decode(wire.as_bytes(), !token.is_empty())?;
+    Ok(wire)
+}
+
+/// A preflight record: the same as a live one, with no token.
+pub fn preflight_wire(gateway: &str, uid: &str, psk: &[u8]) -> Result<Secret, EnvelopeError> {
+    encode_hbr1(gateway, uid, psk, b"")
+}
+
+/// Wrap `secret` (an `HBR1` record) in the outer envelope. `now` is the
+/// caller's clock read *after* any browser sign-in, so the expiry is relative
+/// to completion. The lifetime window is [`decode_envelope`]'s, so an envelope
+/// this returns is one the provider accepts at `now`.
+pub fn encode_envelope(
+    expires_at: u64,
+    session_id: [u8; 16],
+    secret: &[u8],
+    now: u64,
+) -> Result<Secret, EnvelopeError> {
+    if !(1..=MAX_SECRET).contains(&secret.len())
+        || expires_at <= now
+        || expires_at - now > MAX_LIFETIME_SECONDS
+    {
+        return Err(EnvelopeError::Invalid);
+    }
+    Ok(Secret(frame_envelope(expires_at, session_id, secret)))
 }
 
 /// The session ids already used, with their expiry. One envelope starts one
@@ -276,26 +375,13 @@ pub(crate) mod tests {
 
     pub const UID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-    /// Build an `HBR1` record the way `host-bootstrap` does.
+    // Framing-only builders: they let tests make records the provider must reject.
     pub fn hbr1(gateway: &str, uid: &str, psk: &[u8], token: &[u8]) -> Vec<u8> {
-        let fields = [gateway.as_bytes(), uid.as_bytes(), psk, token];
-        let mut wire = HBR1_MAGIC.to_vec();
-        for field in fields {
-            wire.extend_from_slice(&(field.len() as u16).to_be_bytes());
-        }
-        for field in fields {
-            wire.extend_from_slice(field);
-        }
-        wire
+        frame_hbr1(gateway, uid, psk, token)
     }
 
     pub fn envelope(expires_at: u64, id: [u8; 16], secret: &[u8]) -> Vec<u8> {
-        let mut data = ENVELOPE_MAGIC.to_vec();
-        data.extend_from_slice(&expires_at.to_be_bytes());
-        data.extend_from_slice(&id);
-        data.extend_from_slice(&(secret.len() as u16).to_be_bytes());
-        data.extend_from_slice(secret);
-        data
+        frame_envelope(expires_at, id, secret)
     }
 
     /// A session id no other test has used, since the real table is process-wide.
@@ -330,6 +416,126 @@ pub(crate) mod tests {
 
     fn data(bytes: &[u8]) -> Option<OptionValue> {
         Some(OptionValue::Data(Secret::new(bytes.to_vec())))
+    }
+
+    fn unhex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Bytes printed by the shipped Swift `preflightWire`, `BootstrapWire.encode`
+    // and `ConnectMode.encode` (BootstrapInput.swift, Bootstrap.swift) for the
+    // same inputs. The Rust encoders must reproduce them exactly.
+    const SWIFT_PREFLIGHT: &str = "484252310013002000090000696e746567726174696f6e2e696e76616c6964\
+        414141414141414141414141414141414141414141414141414141414141414173796e746865746963";
+
+    #[test]
+    fn encoders_reproduce_the_bytes_swift_builds_and_round_trip_through_the_decoders() {
+        let preflight = preflight_wire("integration.invalid", UID, b"synthetic").unwrap();
+        assert_eq!(preflight.as_bytes(), unhex(SWIFT_PREFLIGHT));
+        let id: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+        let envelope = encode_envelope(1060, id, preflight.as_bytes(), 1000).unwrap();
+        assert_eq!(
+            envelope.as_bytes(),
+            unhex(&format!(
+                "4f465443010000000000000424{}0048{SWIFT_PREFLIGHT}",
+                "0102030405060708090a0b0c0d0e0f10"
+            ))
+        );
+        let (got_id, expires_at, secret) = decode_envelope(envelope.as_bytes(), 1000).unwrap();
+        assert_eq!((got_id, expires_at), (id, 1060));
+        let input = BootstrapInput::decode(secret.as_bytes(), false).unwrap();
+        assert_eq!(
+            (input.gateway.as_str(), input.uid.as_str()),
+            ("integration.invalid", UID)
+        );
+        assert_eq!(input.psk.as_bytes(), b"synthetic");
+        assert!(input.token.is_empty());
+        // A live record differs only in the token and its length field.
+        let live =
+            encode_hbr1("integration.invalid", UID, b"synthetic", b"synthetic-token").unwrap();
+        let mut expected = unhex(SWIFT_PREFLIGHT);
+        expected[10..12].copy_from_slice(&[0, 15]);
+        expected.extend_from_slice(b"synthetic-token");
+        assert_eq!(live.as_bytes(), expected);
+        assert_eq!(
+            BootstrapInput::decode(live.as_bytes(), true)
+                .unwrap()
+                .token
+                .as_bytes(),
+            b"synthetic-token"
+        );
+    }
+
+    #[test]
+    fn connect_mode_encodes_what_swift_encodes_and_round_trips() {
+        let tcp6 = ConnectMode(ConnectOptions {
+            wire: Wire::Tcp4443,
+            family: OuterFamily::Ipv6,
+            idi_v4: Some(Ipv4Addr::new(192, 0, 0, 2)),
+            tcp_fallback: false,
+        });
+        let udp6 = ConnectMode(ConnectOptions {
+            wire: Wire::Udp4500,
+            tcp_fallback: true,
+            ..tcp6.0
+        });
+        for (mode, swift) in [
+            (ConnectMode::UDP_DEFAULT, "0101040100000000"),
+            (tcp6, "01020600c0000002"),
+            (udp6, "01010601c0000002"),
+        ] {
+            let bytes = mode.encode().unwrap();
+            assert_eq!(bytes.to_vec(), unhex(swift));
+            assert_eq!(ConnectMode::decode(&bytes).unwrap(), mode);
+        }
+        // Options the decoder rejects are not encoded: TCP with a fallback, an
+        // IPv6 outer with no IDi, an IPv4 outer with one.
+        for bad in [
+            ConnectOptions {
+                tcp_fallback: true,
+                ..tcp6.0
+            },
+            ConnectOptions {
+                idi_v4: None,
+                ..tcp6.0
+            },
+            ConnectOptions {
+                family: OuterFamily::Ipv4,
+                ..tcp6.0
+            },
+        ] {
+            assert_eq!(
+                ConnectMode(bad).encode(),
+                Err(EnvelopeError::Invalid),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoders_refuse_what_the_provider_would_refuse() {
+        // HBR1: the same boundaries `BootstrapInput::decode` enforces, plus
+        // the 4096 cap before a u16 length could wrap.
+        assert!(encode_hbr1("g", "short", b"p", b"t").is_err());
+        assert!(encode_hbr1("g", UID, b"", b"t").is_err());
+        assert!(encode_hbr1("g", UID, b"p\0q", b"t").is_err());
+        assert!(preflight_wire("", UID, b"p").is_err());
+        assert!(encode_hbr1(&"a".repeat(253), UID, &vec![b'p'; 1024], &vec![b't'; 2000]).is_err());
+        assert!(encode_hbr1(&"a".repeat(70_000), UID, b"p", b"t").is_err());
+        // Envelope: lifetime is (now, now + 120], and the secret is 1..=4096.
+        for (expires_at, ok) in [(1000, false), (1001, true), (1120, true), (1121, false)] {
+            assert_eq!(
+                encode_envelope(expires_at, [1; 16], b"x", 1000).is_ok(),
+                ok,
+                "{expires_at}"
+            );
+        }
+        assert!(encode_envelope(1060, [1; 16], b"", 1000).is_err());
+        assert!(encode_envelope(1060, [1; 16], &vec![b'x'; MAX_SECRET], 1000).is_ok());
+        assert!(encode_envelope(1060, [1; 16], &vec![b'x'; MAX_SECRET + 1], 1000).is_err());
     }
 
     #[test]
