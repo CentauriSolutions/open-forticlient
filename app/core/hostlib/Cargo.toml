@@ -1,0 +1,20 @@
+[package]
+name = "oftc-hostlib"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The staticlib the Swift OFTCAgent links: oftc_host_main"
+
+[lib]
+name = "oftc_hostlib"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+oftc-host = { path = "../host" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = "=0.3.1"
+
+[lints]
+workspace = true

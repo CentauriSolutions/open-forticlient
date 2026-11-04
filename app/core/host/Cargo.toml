@@ -1,0 +1,23 @@
+[package]
+name = "oftc-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Non-UI host logic: profiles, the profile registry, the Keychain and the host verbs"
+
+[lib]
+name = "oftc_host"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "=0.2.191"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+zeroize = "=1.9.0"
+
+# Security.framework is reached only from macOS builds; everything else builds anywhere.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
+
+[lints]
+workspace = true

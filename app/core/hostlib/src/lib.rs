@@ -1,0 +1,93 @@
+//! The static library the Swift `OFTCAgent` links: one entry point, `oftc_host_main`.
+//!
+//! This is the only host crate with FFI `unsafe`. The verbs themselves are in
+//! `oftc-host`; this crate composes the real backends around them.
+#![cfg(target_os = "macos")]
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
+use std::ffi::{c_char, c_int, CStr};
+use std::io::{stdin, Write};
+use std::panic::{self, AssertUnwindSafe};
+use std::process;
+use std::thread;
+
+use oftc_host::commands::{run, Backends, Io};
+use oftc_host::env::HostEnv;
+use oftc_host::keychain::SecKeychain;
+use oftc_host::out::Out;
+use oftc_host::registry::{forticlient_name_for_gateway, FORTICLIENT_VPN_PLIST};
+use oftc_host::TtyPrompt;
+
+/// `sysexits.h` EX_SOFTWARE: a bug, as opposed to a command that failed.
+const EXIT_INTERNAL: i32 = 70;
+
+fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
+    let mut out = Out::process();
+    let code = match HostEnv::from_process(bundle_id) {
+        Some(env) => {
+            let keychain = SecKeychain::new(&env.keychain_service());
+            let backends = Backends {
+                keychain: &keychain,
+                prompt: &TtyPrompt,
+                legacy_name: &|gateway| {
+                    forticlient_name_for_gateway(FORTICLIENT_VPN_PLIST.as_ref(), gateway)
+                },
+            };
+            let mut input = stdin().lock();
+            let mut io = Io {
+                stdin: &mut input,
+                out: &mut out,
+            };
+            run(&args, &env, &backends, &mut io)
+        }
+        // No bundle identifier (or no home): what the Swift host answered with usage.
+        None => {
+            out.line(&oftc_host::commands::usage());
+            2
+        }
+    };
+    out.flush();
+    code
+}
+
+/// Runs a host verb and exits the process with its code. Never returns.
+///
+/// `argv[0]` is the program name and is skipped. The verb runs on a worker thread
+/// while the calling (main) thread serves the main queue, which the
+/// NetworkExtension and SystemExtensions callbacks of later verbs need. A panic
+/// becomes one line on stderr and exit 70; the app workspace must stay
+/// `panic = "unwind"` for that to work.
+///
+/// # Safety
+/// `argv` must point to `argc` valid NUL-terminated strings and `bundle_id` to a
+/// valid NUL-terminated string; all are only read.
+#[no_mangle]
+pub unsafe extern "C" fn oftc_host_main(
+    argc: c_int,
+    argv: *const *const c_char,
+    bundle_id: *const c_char,
+) -> ! {
+    let args: Vec<String> = (1..argc.max(0) as usize)
+        // SAFETY: the caller guarantees `argc` valid strings at `argv`.
+        .map(|i| {
+            unsafe { CStr::from_ptr(*argv.add(i)) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    // SAFETY: the caller guarantees a valid string.
+    let bundle_id = unsafe { CStr::from_ptr(bundle_id) }
+        .to_string_lossy()
+        .into_owned();
+    // The default hook would print the panic message, which could carry anything.
+    panic::set_hook(Box::new(|_| {}));
+    thread::spawn(move || {
+        let code = panic::catch_unwind(AssertUnwindSafe(|| host_main(args, &bundle_id)))
+            .unwrap_or_else(|_| {
+                let _ = writeln!(std::io::stderr(), "OFTC host internal error");
+                EXIT_INTERNAL
+            });
+        process::exit(code)
+    });
+    dispatch2::dispatch_main()
+}

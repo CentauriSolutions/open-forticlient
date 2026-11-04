@@ -46,13 +46,14 @@ cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 cp "$CARGO_TARGET_DIR/release/OFTCTunnel" "$extension/Contents/MacOS/OFTCTunnel"
 cp "$CARGO_TARGET_DIR/release/liboftc_host_bootstrap.dylib" "$app_frameworks/"
 cp "$CARGO_TARGET_DIR/release/liboftc_migration.a" "$build/liboftc_migration.a"
+cp "$CARGO_TARGET_DIR/release/liboftc_hostlib.a" "$build/liboftc_hostlib.a"
 unset CARGO_TARGET_DIR
 
 xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
     -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \
     -L "$app_frameworks" -l oftc_host_bootstrap \
-    "$build/liboftc_migration.a" \
+    "$build/liboftc_migration.a" "$build/liboftc_hostlib.a" \
     -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
     "$root/support/Bootstrap.swift" \
     "$root/Host/CandidateHostBridge.swift" \
@@ -112,6 +113,13 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
     -o "$build/profile-check"
 "$build/profile-check"
+# The Swift readers still in use (menu, remaining verbs) must accept what the Rust
+# host writes. It stays while any Swift code reads these files.
+xcrun swiftc -swift-version 5 -target "$target" \
+    -framework Foundation -framework NetworkExtension \
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/AgentIntent.swift" \
+    "$root/Host/check-host-compat.swift" -o "$build/host-compat-check"
+"$build/host-compat-check" "$root/core/host/tests/fixtures/rust"
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
     "$root/Host/MenuModel.swift" "$root/Host/AgentIntent.swift" \
