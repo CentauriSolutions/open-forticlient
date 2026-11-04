@@ -67,8 +67,9 @@ pub struct ExtensionProperties {
     pub uninstalling: bool,
 }
 
-/// Receives [`ExtensionEvent`]s, in order, before the request returns. The real
-/// backend calls it from the main queue.
+/// Receives [`ExtensionEvent`]s, in order, before the request returns. It may
+/// be called from any thread (the real backend uses the main queue, not the
+/// caller's), so it must be `Send + Sync` and must not block on the caller.
 pub type EventSink = Arc<dyn Fn(ExtensionEvent) + Send + Sync>;
 
 pub trait ExtensionControl: Send + Sync {
@@ -78,8 +79,11 @@ pub trait ExtensionControl: Send + Sync {
     /// As `activate`, for deactivation.
     fn deactivate(&self, identifier: &str, events: EventSink) -> Result<Finish>;
     /// The installed copies of `identifier`. Read-only: it never prompts, so a
-    /// request that would need approval fails instead. A missing extension is
-    /// the error [`is_extension_not_found`] recognises.
+    /// request that would need approval fails with
+    /// [`AppleError::ApprovalRequired`]. A missing extension is the error
+    /// [`is_extension_not_found`] recognises. On timeout the request is
+    /// abandoned, not cancelled (the API has no cancel); its late reply is
+    /// dropped.
     fn properties(&self, identifier: &str, timeout: Duration) -> Result<Vec<ExtensionProperties>>;
 }
 

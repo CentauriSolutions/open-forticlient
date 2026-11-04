@@ -27,6 +27,11 @@ pub enum AppleError {
     MainThread,
     /// The entry was used after it was removed.
     StaleEntry,
+    /// A read-only system extension request would need the user's approval, so
+    /// it was refused instead of waiting on them.
+    ApprovalRequired,
+    /// A system callback panicked or raised; the request's result is unknown.
+    CallbackFailed,
 }
 
 impl AppleError {
@@ -56,6 +61,8 @@ impl fmt::Display for AppleError {
             AppleError::HandlerDropped => f.write_str("the system dropped the completion handler"),
             AppleError::MainThread => f.write_str("blocking call made on the main thread"),
             AppleError::StaleEntry => f.write_str("the VPN entry was removed"),
+            AppleError::ApprovalRequired => f.write_str("approval required"),
+            AppleError::CallbackFailed => f.write_str("a system callback failed"),
         }
     }
 }

@@ -43,6 +43,8 @@ struct Handlers {
     events: EventSink,
     /// What to answer when the system offers to replace an extension.
     action: OSSystemExtensionReplacementAction,
+    /// Fail the request on an approval prompt instead of reporting it.
+    refuse_approval: bool,
     done: Resolver<Result<Reply>>,
 }
 
@@ -73,7 +75,11 @@ define_class!(
 
         #[unsafe(method(requestNeedsUserApproval:))]
         fn needs_approval(&self, _request: &OSSystemExtensionRequest) {
-            guarded(|| (self.ivars().events)(ExtensionEvent::NeedsApproval));
+            if self.ivars().refuse_approval {
+                self.finish(Err(AppleError::ApprovalRequired));
+            } else {
+                guarded(|| (self.ivars().events)(ExtensionEvent::NeedsApproval));
+            }
         }
 
         #[unsafe(method(request:didFinishWithResult:))]
@@ -96,8 +102,9 @@ define_class!(
             _request: &OSSystemExtensionRequest,
             properties: &NSArray<OSSystemExtensionProperties>,
         ) {
-            let found = properties.iter().map(|p| describe(&p)).collect();
-            self.finish(Ok(Reply::Found(found)));
+            let mut found = None;
+            guarded(|| found = Some(properties.iter().map(|p| describe(&p)).collect()));
+            self.finish(found.map(Reply::Found).ok_or(AppleError::CallbackFailed));
         }
     }
 );
@@ -109,8 +116,9 @@ impl Delegate {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// Resolves the request. Guarded: this runs inside an `extern "C"` method.
     fn finish(&self, reply: Result<Reply>) {
-        self.ivars().done.resolve(reply);
+        guarded(|| self.ivars().done.resolve(reply));
     }
 }
 
@@ -158,29 +166,47 @@ impl SystemExtensions {
         timeout: Duration,
         events: EventSink,
         action: OSSystemExtensionReplacementAction,
+        refuse_approval: bool,
     ) -> Result<Reply> {
-        // The request holds its delegate weakly, so it lives here until the end.
-        let mut delegate = None;
-        let mut started = Ok(());
-        let waited = await_callback(timeout, is_main, |done: Resolver<Result<Reply>>| {
-            let d = Delegate::new(Handlers {
-                events,
-                action,
-                done,
-            });
-            started = catch(|| {
+        Self::submit_with(timeout, events, action, refuse_approval, |delegate| {
+            catch(|| {
                 // SAFETY: live arguments; the request and the shared manager are
                 // used only inside `catch`.
                 unsafe {
                     let request = make(&NSString::from_str(identifier), DispatchQueue::main());
-                    request.setDelegate(Some(ProtocolObject::from_ref(&*d)));
+                    request.setDelegate(Some(ProtocolObject::from_ref(delegate)));
                     OSSystemExtensionManager::sharedManager().submitRequest(&request);
                 }
+            })
+        })
+    }
+
+    /// Runs `send` with a fresh delegate and waits for the delegate's result. If
+    /// `send` fails, its error is the result at once: the delegate (and its
+    /// resolver) stays alive here, so without this the wait would only end at the
+    /// timeout.
+    fn submit_with(
+        timeout: Duration,
+        events: EventSink,
+        action: OSSystemExtensionReplacementAction,
+        refuse_approval: bool,
+        send: impl FnOnce(&Delegate) -> Result<()>,
+    ) -> Result<Reply> {
+        // The request holds its delegate weakly, so it lives here until the end.
+        let mut delegate = None;
+        let waited = await_callback(timeout, is_main, |done: Resolver<Result<Reply>>| {
+            let failed = done.clone();
+            let d = Delegate::new(Handlers {
+                events,
+                action,
+                refuse_approval,
+                done,
             });
+            if let Err(e) = send(&d) {
+                failed.resolve(Err(e));
+            }
             delegate = Some(d);
         });
-        // A call that raised never reports; say so, not that it timed out.
-        started?;
         drop(delegate);
         waited?
     }
@@ -192,6 +218,7 @@ impl SystemExtensions {
             NO_TIMEOUT,
             events,
             OSSystemExtensionReplacementAction::Replace,
+            false,
         )? {
             Reply::Finished(finish) => Ok(finish),
             Reply::Found(_) => Err(unexpected()),
@@ -223,29 +250,17 @@ impl ExtensionControl for SystemExtensions {
     fn properties(&self, identifier: &str, timeout: Duration) -> Result<Vec<ExtensionProperties>> {
         // A properties request never replaces, and one that would need approval
         // fails instead of waiting on the user.
-        let approval = std::sync::Arc::new(std::sync::Mutex::new(false));
-        let seen = approval.clone();
-        let events: EventSink = std::sync::Arc::new(move |e| {
-            if e == ExtensionEvent::NeedsApproval {
-                *seen.lock().unwrap() = true;
-            }
-        });
-        let reply = Self::submit(
+        let events: EventSink = std::sync::Arc::new(|_| {});
+        match Self::submit(
             OSSystemExtensionRequest::propertiesRequestForExtension_queue,
             identifier,
             timeout,
             events,
             OSSystemExtensionReplacementAction::Cancel,
-        );
-        match reply {
-            Ok(Reply::Found(found)) => Ok(found),
-            Ok(Reply::Finished(_)) => Err(unexpected()),
-            Err(_) if *approval.lock().unwrap() => Err(AppleError::from_nserror(
-                "oftc.apple",
-                0,
-                "approval required",
-            )),
-            Err(e) => Err(e),
+            true,
+        )? {
+            Reply::Found(found) => Ok(found),
+            Reply::Finished(_) => Err(unexpected()),
         }
     }
 }
@@ -288,6 +303,7 @@ mod tests {
             let delegate = Delegate::new(Handlers {
                 events,
                 action: OSSystemExtensionReplacementAction::Replace,
+                refuse_approval: false,
                 done,
             });
             // SAFETY: a request object that is never submitted.
@@ -343,5 +359,72 @@ mod tests {
             reply,
             Err(AppleError::Ns { ref domain, code: 8, .. }) if domain == super::super::ERROR_DOMAIN
         ));
+    }
+
+    fn no_events() -> EventSink {
+        Arc::new(|_| {})
+    }
+
+    #[test]
+    fn a_send_that_fails_ends_the_wait_at_once_even_for_an_objc_exception() {
+        use objc2_foundation::NSException;
+        // Five seconds: only the error path ends this before then.
+        let sent = |send: &dyn Fn() -> Result<()>| {
+            SystemExtensions::submit_with(
+                Duration::from_secs(5),
+                no_events(),
+                OSSystemExtensionReplacementAction::Replace,
+                false,
+                |_| send(),
+            )
+            .err()
+        };
+        let plain = AppleError::from_nserror("d", 1, "m");
+        assert_eq!(sent(&|| Err(plain.clone())), Some(plain));
+        let raised = sent(&|| {
+            catch(|| {
+                let name = NSString::from_str("OftcTestException");
+                // SAFETY: a valid exception object, raised inside `catch`.
+                unsafe {
+                    let e = NSException::exceptionWithName_reason_userInfo(&name, None, None);
+                    let _: () = msg_send![&*e, raise];
+                }
+            })
+        });
+        assert!(
+            matches!(raised, Some(AppleError::Ns { ref domain, .. }) if domain == "NSException")
+        );
+    }
+
+    #[test]
+    fn a_refusing_delegate_fails_on_approval_and_a_normal_one_only_reports_it() {
+        for (refuse, want_events, want_err) in [(true, 0, true), (false, 1, false)] {
+            let seen = Arc::new(Mutex::new(0));
+            let events: EventSink = {
+                let seen = seen.clone();
+                Arc::new(move |_| *seen.lock().unwrap() += 1)
+            };
+            let reply = await_callback(Duration::from_millis(200), off_main, |done| {
+                let d = Delegate::new(Handlers {
+                    events,
+                    action: OSSystemExtensionReplacementAction::Cancel,
+                    refuse_approval: refuse,
+                    done,
+                });
+                // SAFETY: a request object that is never submitted; the selector
+                // and argument are the protocol's.
+                unsafe {
+                    let r = OSSystemExtensionRequest::new();
+                    let _: () = msg_send![&*d, requestNeedsUserApproval: &*r];
+                }
+            });
+            assert_eq!(*seen.lock().unwrap(), want_events);
+            if want_err {
+                assert!(matches!(reply, Ok(Err(AppleError::ApprovalRequired))));
+            } else {
+                // Not refused: nothing resolved, and the delegate was dropped.
+                assert_eq!(reply.err(), Some(AppleError::HandlerDropped));
+            }
+        }
     }
 }
