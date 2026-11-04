@@ -12,3 +12,5 @@
 pub mod completion;
 pub mod error;
 pub mod manager;
+#[cfg(target_os = "macos")]
+pub mod ne;
