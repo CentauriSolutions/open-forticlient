@@ -129,13 +129,20 @@ pub trait VpnControl: Send + Sync {
     fn observe_status(&self, entry: &VpnEntry, notify: Sender<()>) -> Result<Subscription>;
 }
 
-pub use mock::{MockEntry, MockVpn};
+pub use mock::{MockEntry, MockVpn, StartRecord};
 
 mod mock {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use super::*;
+
+    /// One recorded `start`: kind, envelope (kept wiped-on-drop), mode.
+    pub type StartRecord = (StartKind, Zeroizing<Vec<u8>>, Option<Vec<u8>>);
+
+    /// The backend handle inside a mock [`VpnEntry`]. A newtype so `live` can
+    /// downcast to a concrete type and recover the `Arc`.
+    struct MockHandle(Arc<MockEntry>);
 
     /// The state of one mock entry; also the backend handle inside its
     /// [`VpnEntry`].
@@ -149,7 +156,7 @@ mod mock {
         enabled: bool,
         removed: bool,
         status: VpnStatus,
-        started: Vec<(StartKind, Vec<u8>, Option<Vec<u8>>)>,
+        started: Vec<StartRecord>,
         stops: usize,
         replies: VecDeque<Result<Vec<u8>>>,
         sent: Vec<Vec<u8>>,
@@ -169,7 +176,7 @@ mod mock {
                 s.provider_id.clone(),
                 s.profile_key.clone(),
                 s.enabled,
-                self.clone(),
+                Arc::new(MockHandle(self.clone())),
             )
         }
 
@@ -188,7 +195,7 @@ mod mock {
             self.lock().last_error = error;
         }
         /// The `(kind, envelope, mode)` of every `start` so far.
-        pub fn started(&self) -> Vec<(StartKind, Vec<u8>, Option<Vec<u8>>)> {
+        pub fn started(&self) -> Vec<StartRecord> {
             self.lock().started.clone()
         }
         pub fn stops(&self) -> usize {
@@ -243,8 +250,8 @@ mod mock {
         /// The live mock behind `entry`, or `StaleEntry` once it was removed.
         fn live(&self, entry: &VpnEntry) -> Result<Arc<MockEntry>> {
             let mock = entry
-                .handle::<Arc<MockEntry>>()
-                .cloned()
+                .handle::<MockHandle>()
+                .map(|h| h.0.clone())
                 .ok_or(AppleError::StaleEntry)?;
             if mock.lock().removed {
                 return Err(AppleError::StaleEntry);
@@ -299,7 +306,7 @@ mod mock {
             let mock = self.live(entry)?;
             mock.lock()
                 .started
-                .push((options.kind, options.envelope.to_vec(), options.mode));
+                .push((options.kind, options.envelope, options.mode));
             Ok(())
         }
 
@@ -342,5 +349,109 @@ mod mock {
                 mock.lock().observers.retain(|(i, _)| *i != id);
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{channel, TryRecvError};
+
+    /// The mock is what the host's logic is tested against, so it must behave as
+    /// the real backend does: entries load and reload, writes stick, replies and
+    /// observers work, and a removed entry goes stale.
+    #[test]
+    fn mock_honours_the_vpn_control_contract() {
+        let vpn = MockVpn::new();
+        let wait = Duration::from_millis(10);
+        let mock = vpn.add_entry("provider", Some("key"), false);
+
+        let entries = vpn.load_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.profile_key.as_deref(), Some("key"));
+        assert!(!entry.enabled);
+        assert_eq!(vpn.status(entry), VpnStatus::Disconnected);
+
+        vpn.set_enabled(entry, true).unwrap();
+        assert!(vpn.reload(entry).unwrap().enabled);
+        vpn.set_enabled(entry, false).unwrap();
+        assert!(!vpn.reload(entry).unwrap().enabled);
+        assert!(!mock.is_enabled());
+
+        vpn.start(
+            entry,
+            StartOptions {
+                kind: StartKind::Preflight,
+                envelope: Zeroizing::new(b"env".to_vec()),
+                mode: Some(b"m".to_vec()),
+            },
+        )
+        .unwrap();
+        let started = mock.started();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].0, StartKind::Preflight);
+        assert_eq!(&started[0].1[..], b"env");
+        assert_eq!(started[0].2.as_deref(), Some(&b"m"[..]));
+
+        vpn.stop(entry);
+        assert_eq!(mock.stops(), 1);
+
+        mock.push_reply(Ok(b"pong".to_vec()));
+        assert_eq!(
+            vpn.send_provider_message(entry, b"ping", wait),
+            Ok(b"pong".to_vec())
+        );
+        assert_eq!(
+            vpn.send_provider_message(entry, b"ping", wait),
+            Err(AppleError::TimedOut)
+        );
+        assert_eq!(mock.sent(), vec![b"ping".to_vec(), b"ping".to_vec()]);
+
+        assert_eq!(vpn.last_disconnect_error(entry, wait), Ok(None));
+        mock.set_last_error(Some(AppleError::TimedOut));
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Ok(Some(AppleError::TimedOut))
+        );
+        // Reads do not consume the error.
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Ok(Some(AppleError::TimedOut))
+        );
+
+        let (tx, rx) = channel();
+        let subscription = vpn.observe_status(entry, tx).unwrap();
+        mock.set_status(VpnStatus::Connected);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(vpn.status(entry), VpnStatus::Connected);
+        let (tx2, rx2) = channel();
+        let _second = vpn.observe_status(entry, tx2).unwrap();
+        drop(subscription);
+        mock.set_status(VpnStatus::Disconnected);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+        // Dropping one subscription leaves the other attached.
+        assert!(rx2.try_recv().is_ok());
+
+        vpn.create("p2", "k2", "n").unwrap();
+        let created = vpn
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.profile_key.as_deref() == Some("k2"))
+            .unwrap();
+        assert_eq!(created.provider_id, "p2");
+        assert!(created.enabled);
+
+        vpn.remove(entry).unwrap();
+        assert_eq!(vpn.load_all().unwrap().len(), 1);
+        vpn.stop(entry);
+        assert_eq!(mock.stops(), 1);
+        assert_eq!(
+            vpn.last_disconnect_error(entry, wait),
+            Err(AppleError::StaleEntry)
+        );
+        assert_eq!(vpn.reload(entry).err(), Some(AppleError::StaleEntry));
+        assert_eq!(vpn.status(entry), VpnStatus::Invalid);
     }
 }
