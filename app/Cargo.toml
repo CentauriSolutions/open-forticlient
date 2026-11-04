@@ -10,6 +10,7 @@ members = [
     "core/preflight",
     "core/provider",
     "core/provider-ffi",
+    "core/tunnel",
 ]
 
 [profile.release]

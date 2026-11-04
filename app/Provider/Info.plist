@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.5</string>
 	<key>CFBundleVersion</key>
-	<string>28</string>
+	<string>29</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSSystemExtensionUsageDescription</key>
@@ -27,7 +27,7 @@
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.packet-tunnel</key>
-			<string>OFTCTunnel.PacketTunnelProvider</string>
+			<string>OFTCPacketTunnelProvider</string>
 		</dict>
 	</dict>
 </dict>

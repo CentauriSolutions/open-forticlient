@@ -24,6 +24,19 @@ build job is required. Whoever adds a new CI job makes it required after their P
 merges, with `scripts/require-check.sh --apply "<job name>"` (run without `--apply`
 to preview). That needs admin rights on the repo.
 
+## Gate build (Rust provider candidate)
+
+The provider extension is the Rust `OFTCTunnel` binary (`app/core/tunnel`), built by
+`app/build.sh` with the rest of the workspace. To produce a signed, notarized app for a
+live gate check without cutting a release, from a clean checkout:
+
+```sh
+zsh app/gate-build.sh   # fresh /private/tmp/oftc-build-gate-*, sign, notarize; prints the app path
+```
+
+It uses the same environment as `release.sh` (`~/.config/oftc/release.env`), needs no
+installer identity, and installs nothing. Afterwards run `zsh app/release-dev-assets.sh`.
+
 ## Cutting a release
 
 1. Bump the version in `app/Host/Info.plist` (`CFBundleShortVersionString`,

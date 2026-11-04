@@ -464,6 +464,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oftc-tunnel"
+version = "0.1.0"
+dependencies = [
+ "oftc-apple",
+ "oftc-provider",
+]
+
+[[package]]
 name = "p384"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

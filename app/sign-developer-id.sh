@@ -12,7 +12,6 @@ app="$build/OFTC.app"
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
 app_frameworks="$app/Contents/Frameworks"
-provider_frameworks="$extension/Contents/Frameworks"
 cli="$build/oftc"
 [[ "$bundle_id" == "com.chris.openforticlient.oftc" ]] || {
     print -u2 'This release signs only the OFTC product bundle ID'; exit 2
@@ -99,8 +98,6 @@ cp "$APP_PROFILE" "$app/Contents/embedded.provisionprofile"
 cp "$EXTENSION_PROFILE" "$extension/Contents/embedded.provisionprofile"
 libraries=(
     "$app_frameworks/liboftc_host_bootstrap.dylib"
-    "$provider_frameworks/liboftc_provider_ffi.dylib"
-    "$provider_frameworks/liboftc_preflight.dylib"
 )
 for library in "${libraries[@]}"; do
     [[ -f "$library" ]] || { print -u2 "Missing nested library: $library"; exit 2; }
