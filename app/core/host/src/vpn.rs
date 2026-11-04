@@ -336,7 +336,9 @@ fn await_preflight(ctx: &Ctx, vpn: &VpnEntry) -> Outcome {
                 ctx.vpn()
                     .send_provider_message(vpn, PREFLIGHT_STATUS, PREFLIGHT_REPLY)
             {
-                if let Ok(stage) = String::from_utf8(reply) {
+                // The provider answers with nothing (a nil reply, an empty one here)
+                // until a stage exists, so an early poll is the normal case.
+                if let Some(stage) = String::from_utf8(reply).ok().filter(|s| !s.is_empty()) {
                     ctx.vpn().stop(vpn);
                     let code = i32::from(!stage.starts_with("preflight_passed"));
                     return (stage, code);

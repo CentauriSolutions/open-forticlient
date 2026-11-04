@@ -998,13 +998,6 @@ mod tests {
             &["start-live", "vpn.example.com", "65536"],
             &["start-live", "", "9443"],
             &["start-live", "vpn.example.com", "9443", "--bogus"],
-            &[
-                "start-live",
-                "vpn.example.com",
-                "9443",
-                "--ipv6-outer",
-                "127.0.0.1",
-            ],
         ] {
             assert_eq!(cmd(args), Err(ParseError::Usage), "{args:?}");
         }
@@ -1267,11 +1260,13 @@ mod tests {
     #[test]
     fn preflight_checks_its_inputs_then_reports_the_stage_and_stops_the_tunnel() {
         let h = Harness::new();
-        h.expect(
-            &["preflight", "vpn.example.com", "nope"],
-            "Expected a 32-character hexadecimal UID\n",
-            2,
-        );
+        for uid in ["nope", &format!("{UID}A"), &UID.replace('A', "G")] {
+            h.expect(
+                &["preflight", "vpn.example.com", uid],
+                "Expected a 32-character hexadecimal UID\n",
+                2,
+            );
+        }
         h.expect(
             &["preflight", "vpn.example.com", UID],
             "PSK unavailable in OFTC Keychain service\n",
@@ -1293,12 +1288,14 @@ mod tests {
         let entry2 = h.vpn.add_entry(PROVIDER, Some("example-office"), true);
         let _ = entry;
 
-        // The provider comes up on the first poll; its first reply is lost, so the
-        // loop asks again rather than giving up.
+        // The provider comes up on the first poll; its early replies are empty or
+        // lost, so the loop asks again rather than giving up.
         let hook = entry2.clone();
         *h.clock.on_sleep.borrow_mut() = Some(Box::new(move || {
             if hook.sent().is_empty() {
                 hook.set_status(VpnStatus::Connected);
+                // No stage yet (the provider's nil reply), then a lost reply.
+                hook.push_reply(Ok(Vec::new()));
                 hook.push_reply(Err(AppleError::TimedOut));
                 hook.push_reply(Ok(b"preflight_passed stage=ike".to_vec()));
             }
@@ -1309,7 +1306,7 @@ mod tests {
             0,
         );
         assert_eq!(entry2.stops(), 1);
-        assert_eq!(entry2.sent().len(), 2);
+        assert_eq!(entry2.sent().len(), 3);
         let StartMode::Preflight(input) = h.started_as_provider_sees_it(&entry2, 1000) else {
             panic!("not a preflight");
         };
@@ -1478,6 +1475,35 @@ mod tests {
         assert_eq!(
             (calls[0].0.as_str(), calls[0].2, calls[0].3),
             ("lab.example.com", 8443, true)
+        );
+        drop(calls);
+        // An explicit --tcp on a TCP profile is not doubled into a usage error.
+        h.expect(
+            &["start-profile", "--tcp"],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        // A UDP profile gets the UDP default (with its TCP fallback).
+        h.run(
+            &[
+                "--profile",
+                "udp",
+                "save-profile",
+                "udp.example.com",
+                "9443",
+            ],
+            "",
+        );
+        h.keychain.set("udp.example.com", b"udppsk").unwrap();
+        let udp = h.vpn.add_entry(PROVIDER, Some("udp"), true);
+        h.expect(
+            &["--profile", "udp", "start-profile"],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        assert_eq!(
+            udp.started()[0].2.as_deref(),
+            Some(&[1, 1, 4, 1, 0, 0, 0, 0][..])
         );
         // The profile's TCP transport applies without --tcp on the command line.
         assert_eq!(

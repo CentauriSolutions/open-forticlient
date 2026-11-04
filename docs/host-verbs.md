@@ -30,7 +30,6 @@ FortiClient profile for the same gateway, or the gateway itself.
 | `has-psk` | `OFTC PSK available`; exit 0 | `OFTC PSK unavailable`; exit 1 (or the profile errors above) |
 | `provision-psk [--stdin] [gateway]` | `OFTC PSK stored in Keychain`; exit 0 | `Invalid gateway name` (empty, over 253 bytes, contains `/` or `:`) exit 2; `Could not read a valid PSK from the terminal` / `...from standard input` exit 1; `Could not save OFTC Keychain PSK` exit 1 |
 | `save-profile <gateway> <saml-port> [--tcp] [--name <name>]` | `OFTC profile saved: id=<id>`; exit 0 | usage, exit 2, for settings the profile rules refuse; `OFTC already has a profile for <gateway>`; `Could not save OFTC profile (a profile with that id may already exist)`; exit 1 |
-
 | `install-config` | `OFTC configuration saved`, or `OFTC configuration already exists` (idempotent); exit 0 | `Could not save OFTC configuration`, `Could not load VPN configuration`, `Multiple OFTC configurations; refusing to guess`; exit 1 |
 | `status` | `OFTC VPN status: <invalid\|disconnected\|connecting\|connected\|reasserting\|disconnecting>`, or `OFTC configuration absent`; exit 0 | the load errors above; exit 1 |
 | `remove-config` | `OFTC configuration removed` or `OFTC configuration absent` (every entry of this app, any profile key; needs no profile); exit 0 | `Could not remove OFTC configuration`; exit 1 |
