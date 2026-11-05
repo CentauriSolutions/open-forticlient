@@ -93,7 +93,10 @@ fn ensure_profile(
                 Ok(entry)
             }
         }
-        None => commands::save_profile(cx.services.env.root(), profile, None),
+        None => {
+            let _creating = cx.busy.creating();
+            commands::save_profile(cx.services.env.root(), profile, None)
+        }
     }
 }
 

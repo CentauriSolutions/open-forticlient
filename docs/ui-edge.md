@@ -186,11 +186,15 @@ Details PR 3 settled where this document was silent:
 
 - `add_profile` runs the steps of `oftc setup` in this order: `keychain` (the PSK must be
   in the Keychain; with `forticlient` it is copied there inside the host), `profile`,
-  `extension_approval` (skipped when the system extension is already current), `vpn_entry`.
+  `extension_approval` (nothing is asked of the system when the extension is already current, but the step is still reported), `vpn_entry`.
   It is **resumable**: a gateway whose profile exists but has no VPN entry yet (an earlier
   call stopped at the extension step) is finished by the next call, and only a gateway
   that is fully set up answers `already_configured` with `profile_id`. Two calls for one
-  gateway, or an `import` that includes it, are `busy`.
+  gateway, or an `import` that includes it, are `busy`; so is a `remove` of that gateway's
+  profile: `add_profile`, `import` and `remove` each take the `gateway:<host>` and the
+  `profile:<id>` key, so none can race another into a VPN entry with no profile.
+  Profile creation itself is serialised, since ids are chosen from the profiles that
+  exist. `import` and `import_preview` read only regular files.
 - `settings_set auto_update` is stored by the host in `host-settings.json` in its own
   directory. Nothing reads it back over the socket yet (`UpdateStore` stays UI-private,
   4.5 has no field for it); the UI keeps its own value as the source of truth until a
@@ -301,14 +305,18 @@ long op shares the request id:
 unknown one decodes as `other`), and `state` is `running`, `waiting` or `done`: each step
 of `add_profile` and `component_update` says `running`, may say `waiting`, and ends
 `done` (there is no step named `done`; the final reply is the end of the op, and a
-setup step that is skipped reports nothing). The UI owns the wording. `waiting` means
+step is always reported, including `extension_approval` when the system extension is already current, which then goes straight from `running` to `done`). The UI owns the wording. `waiting` means
 "needs the user" and is not a failure. `sign_in` is not a step of any op: signing in
-belongs to the supervisor and shows in `state` and `phase`. Closing the connection does
-not cancel an op; the host's ops are idempotent (`install-config`, `remove` of an
-absent profile) so finishing is safe, and `cancel` is explicit.
+belongs to the supervisor and shows in `state` and `phase`. Closing the connection sets
+the cancel flag of every op it still has running, so an op nobody is waiting for stops
+at its next step; the ops are idempotent (`install-config`, `remove` of an absent
+profile) and resumable, so stopping half way is safe. A connection runs at most 8 ops at
+once; a ninth is `busy`.
 
 `cancel` sets the target's flag, which an op looks at between steps, and answers the
-target at once with `cancelled` (exit 1); the target's own answer, when it ends, is
+target at once with `cancelled` (exit 1). The op itself runs on to its next step
+boundary, so a cancelled `add_profile` can leave a profile with no VPN entry, which the
+next `add_profile` finishes (resumable, not rolled back). The target's own answer, when it ends, is
 dropped. The system extension request cannot be withdrawn, so a `cancel` during
 `waiting` leaves that request open: the op stops when it ends, and its profile key stays
 `busy` until then. A `cancel` for an id that is not running (never started, or ended)

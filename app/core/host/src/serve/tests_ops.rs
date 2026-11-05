@@ -186,6 +186,10 @@ fn remove_waits_then_erases() {
         ready(&mut client);
         let (_, reply) = op(&mut client, r#"{"id":2,"op":"remove","profile":"lab"}"#);
         assert_eq!(error(&reply), ("tunnels_active", 3));
+        // Nothing was removed and the row says why, not that it is disconnecting.
+        let status = client.call(r#"{"id":20,"op":"status"}"#)["result"].clone();
+        assert_eq!(status["profiles"][0]["state"], "connected");
+        assert_eq!(status["profiles"][0]["error"]["code"], "tunnels_active");
         assert!(rig.keychain.get("lab.example.com").is_ok());
         assert_eq!(registry::entries(rig.env.root()).len(), 1);
 
@@ -598,5 +602,150 @@ fn request_ids_and_unknown_ops() {
             client.call(r#"{"id":3,"op":"teleport"}"#)["error"]["code"],
             "unknown_op"
         );
+    });
+}
+
+/// A `.oftc` file holding `gateway`, for the ops that read one.
+fn bundle_file(dir: &TempDir, gateway: &str) -> String {
+    let data = crate::bundle::encode(vec![crate::bundle::Item {
+        gateway: gateway.to_owned(),
+        name: "Imported".to_owned(),
+        psk: zeroize::Zeroizing::new("psk-for-test".to_owned()),
+        saml_port: 9443,
+        transport: crate::profile::Transport::Udp,
+    }])
+    .unwrap();
+    let path = dir.0.join(format!("{gateway}.oftc"));
+    std::fs::write(&path, &*data).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+/// While `remove` runs, an `add_profile` or `import` of the same gateway is `busy`
+/// (it could create a VPN entry for a profile being erased); the other way round, a
+/// `remove` of a profile that an `add_profile` is finishing is `busy` too.
+#[test]
+fn remove_and_setup_exclude_each_other() {
+    let rig = Rig::new();
+    let files = TempDir::new("exclude");
+    let lab_file = bundle_file(&files, "lab.example.com");
+    rig.entry.set_status(VpnStatus::Connected);
+    rig.serving(&me, |socket| {
+        let mut remover = Client::connect(socket);
+        ready(&mut remover);
+        let other = std::sync::Mutex::new(Client::connect(socket));
+        other.lock().unwrap().hello();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let entry = rig.entry.clone();
+        // At the first wait for the tunnel, try the same gateway from another client.
+        *rig.on_pause.lock().unwrap() = Some(Box::new(move || {
+            let mut client = other.lock().unwrap();
+            let add = r#"{"id":2,"op":"add_profile","gateway":"lab.example.com","saml_port":8443,"transport":"tcp","psk_source":"saved"}"#;
+            seen.lock().unwrap().push(op(&mut client, add).1);
+            let import = format!(r#"{{"id":3,"op":"import","path":"{lab_file}"}}"#);
+            seen.lock().unwrap().push(op(&mut client, &import).1);
+            for reply in seen.lock().unwrap().iter() {
+                assert_eq!(error(reply), ("busy", 6), "{reply}");
+            }
+            entry.set_status(VpnStatus::Disconnected);
+        }));
+        let (_, reply) = op(&mut remover, r#"{"id":4,"op":"remove","profile":"lab"}"#);
+        assert_eq!(reply["ok"], true, "{reply}");
+    });
+
+    // The reverse: an add_profile stopped at the extension leaves a profile; while a
+    // second call finishes it, removing that profile is busy.
+    let rig = Rig::new();
+    old_extension(&rig);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        assert_eq!(error(&op(&mut client, ADD).1), ("internal", 1));
+        rig.extensions.hold();
+        let _release = Release(&rig);
+        client.send(ADD);
+        rig.extensions.wait_entered();
+        let mut second = Client::connect(socket);
+        ready(&mut second);
+        let remove = r#"{"id":5,"op":"remove","profile":"office-vpn"}"#;
+        assert_eq!(error(&op(&mut second, remove).1), ("busy", 6));
+    });
+}
+
+/// Paths that are not plain files cannot hold a worker or be written through: a FIFO
+/// is refused at once, and an export path that is a dangling symlink is not
+/// followed.
+#[test]
+fn special_paths_are_refused() {
+    let rig = Rig::new();
+    let dir = TempDir::new("special");
+    let fifo = dir.0.join("pipe.oftc");
+    assert!(std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let target = dir.0.join("target.oftc");
+    let link = dir.0.join("link.oftc");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        let line = format!(
+            r#"{{"id":2,"op":"import_preview","path":"{}"}}"#,
+            fifo.display()
+        );
+        assert_eq!(error(&op(&mut client, &line).1), ("invalid_file", 3));
+        let line = format!(r#"{{"id":3,"op":"export","path":"{}"}}"#, link.display());
+        assert!(op(&mut client, &line).1["ok"] == false);
+        assert!(!target.exists(), "export wrote through a symlink");
+    });
+}
+
+/// A connection runs at most 8 ops at once; and when it drops, its ops stop at their
+/// next step instead of finishing a setup nobody is waiting for.
+#[test]
+fn flights_are_capped_and_stop_with_the_connection() {
+    let rig = Rig::new();
+    old_extension(&rig);
+    rig.extensions
+        .mock
+        .script_activate(Vec::new(), Ok(Finish::Completed));
+    rig.extensions.hold();
+    rig.serving(&me, |socket| {
+        let _release = Release(&rig);
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        for n in 0..8 {
+            let gateway = format!("gw{n}.example.com");
+            rig.keychain.set(&gateway, b"psk").unwrap();
+            let line = ADD.replace("vpn.example.com", &gateway).replace(
+                r#""psk_source":"forticlient","label":"Example Office""#,
+                r#""psk_source":"saved""#,
+            );
+            client.send(&line.replace("\"id\":9", &format!("\"id\":{}", 10 + n)));
+        }
+        rig.extensions.wait_entered();
+        let ninth = ADD.replace("\"id\":9", "\"id\":30");
+        client.send(&ninth);
+        let reply = loop {
+            let line = client.next().unwrap();
+            if line["id"] == 30 && line["ok"].is_boolean() {
+                break line;
+            }
+        };
+        assert_eq!(error(&reply), ("busy", 6));
+        // Drop the connection, then let the held request end.
+        drop(client);
+        rig.extensions.release();
+        // Each worker ends after its extension step; none goes on to a VPN entry.
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until {
+            assert_eq!(
+                rig.vpn.load_all().unwrap().len(),
+                1,
+                "an op went on after its client left"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     });
 }

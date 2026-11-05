@@ -59,7 +59,12 @@ const SETTINGS_FILE: &str = "host-settings.json";
 /// gets `busy` at once; nothing waits. Keys are `profile:<id>`, `gateway:<host>` (a
 /// profile being added or imported) and `component`.
 #[derive(Default)]
-pub struct Busy(Mutex<HashMap<String, ()>>);
+pub struct Busy {
+    held: Mutex<HashMap<String, ()>>,
+    /// Held while a profile is created: ids are chosen from the profiles that exist, so
+    /// two creations at once (different gateways, same name) must not pick one id.
+    create: Mutex<()>,
+}
 
 pub struct BusyGuard<'a> {
     busy: &'a Busy,
@@ -67,9 +72,13 @@ pub struct BusyGuard<'a> {
 }
 
 impl Busy {
+    pub fn creating(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.create.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// All of `keys` or none of them.
     pub fn acquire(&self, keys: Vec<String>) -> Result<BusyGuard<'_>, Failure> {
-        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(taken) = keys.iter().find(|key| held.contains_key(*key)) {
             return Err(Failure::new(
                 ErrorCode::Busy,
@@ -85,7 +94,11 @@ impl Busy {
 
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
-        let mut held = self.busy.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut held = self
+            .busy
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for key in &self.keys {
             held.remove(key);
         }
@@ -313,9 +326,24 @@ fn remove(cx: &OpCx, id: &str) -> OpResult {
         Err(failure) if failure.code == ErrorCode::NotConfigured => return Ok(json!({})),
         Err(failure) => return Err(failure),
     };
-    let _busy = cx.busy.acquire(profile_keys(&entries))?;
-    let access = cx.access();
     let entry = &entries[0];
+    // The gateway key keeps an `add_profile` or `import` of the same gateway from
+    // racing the erase into a VPN entry with no profile.
+    let mut keys = profile_keys(&entries);
+    keys.push(format!("gateway:{}", entry.profile.gateway));
+    let _busy = cx.busy.acquire(keys)?;
+    show(cx, &entries, None);
+    let result = remove_held(cx, entry);
+    if let Err(failure) = &result {
+        // Nothing was removed: the row shows why, not a disconnect.
+        cx.collector.clear_stopping(&entry.id);
+        show(cx, &entries, Some(failure));
+    }
+    result
+}
+
+fn remove_held(cx: &OpCx, entry: &ProfileEntry) -> OpResult {
+    let access = cx.access();
     cx.collector.set_stopping(&entry.id);
     vpn::stop_profile(&access, entry)?;
     let mut down = false;
@@ -339,7 +367,7 @@ fn remove(cx: &OpCx, id: &str) -> OpResult {
             &format!("{} did not disconnect; nothing was removed", entry.name()),
         ));
     }
-    match vpn::erase_profiles(&access, &entries)? {
+    match vpn::erase_profiles(&access, std::slice::from_ref(entry))? {
         Erased::Done | Erased::NothingToErase => Ok(json!({})),
     }
 }
@@ -386,13 +414,20 @@ fn export(cx: &OpCx, args: &ExportArgs) -> OpResult {
 /// A `.oftc` file read for preview or import: at most [`bundle::MAX_BYTES`].
 fn read_bundle(path: &str) -> Result<Vec<bundle::Incoming>, Failure> {
     let path = absolute(path)?;
+    let unreadable = || Failure::new(ErrorCode::InvalidFile, "Could not read the profile file");
+    // Non-blocking, so a FIFO cannot hold a worker; only a regular file is read.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| unreadable())?;
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Err(unreadable());
+    }
     let mut data = zeroize::Zeroizing::new(Vec::new());
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take(bundle::MAX_BYTES as u64 + 1)
-                .read_to_end(&mut data)
-        })
-        .map_err(|_| Failure::new(ErrorCode::InvalidFile, "Could not read the profile file"))?;
+    file.take(bundle::MAX_BYTES as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| unreadable())?;
     commands::decode_bundle(&data)
 }
 
@@ -401,6 +436,20 @@ fn wire_transport(transport: profile::Transport) -> Transport {
         profile::Transport::Udp => Transport::Udp,
         profile::Transport::Tcp => Transport::Tcp,
     }
+}
+
+/// The keys an op that creates or finishes the profile for `gateway` takes: the
+/// gateway itself and, if one exists, its profile, so a `remove` of it cannot run
+/// beside it.
+pub(super) fn gateway_keys(cx: &OpCx, gateway: &str) -> Vec<String> {
+    let mut keys = vec![format!("gateway:{gateway}")];
+    keys.extend(
+        registry::entries(cx.root())
+            .iter()
+            .filter(|entry| entry.profile.gateway == gateway)
+            .map(|entry| format!("profile:{}", entry.id)),
+    );
+    keys
 }
 
 fn configured(cx: &OpCx, gateway: &str) -> bool {
@@ -428,12 +477,16 @@ fn import_preview(cx: &OpCx, path: &str) -> OpResult {
 /// `added` lists the ids this call created.
 fn import(cx: &OpCx, path: &str) -> OpResult {
     let incoming = read_bundle(path)?;
-    let keys = incoming
-        .iter()
-        .map(|item| format!("gateway:{}", item.profile.gateway))
-        .collect();
+    let mut keys = Vec::new();
+    for item in &incoming {
+        keys.extend(gateway_keys(cx, &item.profile.gateway));
+    }
+    keys.sort();
+    keys.dedup();
     let _busy = cx.busy.acquire(keys)?;
+    let creating = cx.busy.creating();
     let report = commands::import_bundle(cx.root(), cx.services.ops.keychain, incoming);
+    drop(creating);
     if let Some(failure) = report.failure {
         return Err(failure);
     }

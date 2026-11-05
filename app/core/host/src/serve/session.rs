@@ -23,6 +23,8 @@ use super::Services;
 
 /// A client that does not read for this long is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ops one connection may have running at once.
+const MAX_FLIGHTS: usize = 8;
 /// At most one `status` event per this interval on one connection.
 pub const STATUS_DEBOUNCE: Duration = Duration::from_millis(100);
 /// How long a pusher sleeps with nothing to send before it looks again.
@@ -139,6 +141,10 @@ pub fn serve(stream: UnixStream, shared: &Shared) {
             }
         });
         let _closed = super::OnDrop(|| {
+            // Ops of a client that is gone stop at their next step.
+            for flight in conn.flights.lock().unwrap_or_else(PoisonError::into_inner).values() {
+                flight.cancel.store(true, Ordering::SeqCst);
+            }
             conn.close();
             // The pusher may be asleep on the hub; it checks `closed` when it wakes.
             shared.hub.poke();
@@ -256,6 +262,14 @@ fn requests<'scope, 'env>(
                 if flights.contains_key(&id) {
                     drop(flights);
                     let reply = error(id, ErrorCode::BadRequest, "request id already running");
+                    if !conn.send(&reply) {
+                        return;
+                    }
+                    continue;
+                }
+                if flights.len() >= MAX_FLIGHTS {
+                    drop(flights);
+                    let reply = error(id, ErrorCode::Busy, "too many operations running");
                     if !conn.send(&reply) {
                         return;
                     }
