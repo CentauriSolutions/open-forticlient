@@ -350,10 +350,15 @@ pub const OSSTATUS_DOMAIN: &str = "NSOSStatusErrorDomain";
 /// chains (see `trust/loopback.rs`); only these mean the chain itself is what the
 /// system rejects.
 const ERR_NOT_TRUSTED: i64 = -67843; // errSecNotTrusted: a self-signed leaf
-const ERR_UNTRUSTED_ISSUER: i64 = -25318; // the chain ends in a root the system does not trust
+const ERR_UNTRUSTED_ISSUER: i64 = -25318; // errSecCreateChainFailed: no chain to a trusted root could be built
 const ERR_CERTIFICATE_EXPIRED: i64 = -67818;
 const ERR_HOST_NAME_MISMATCH: i64 = -67602;
 
+/// -25318 is also what a missing or truncated chain gives (the chain cannot be built),
+/// so a network-dependent one would still prompt. Deliberately *not* listed, so they are
+/// `Error` (silent, fail-closed, retried until the acquisition deadline): -67819 (not
+/// yet valid), -67820 (revoked), -67635 and -67654.
+///
 /// What a failed `SecTrustEvaluateWithError` says about the chain. The old
 /// `URLSession` check treated every failure as "untrusted", which cannot tell a bad
 /// certificate from an evaluation that could not run (a network-dependent step such
