@@ -307,7 +307,7 @@ they are display state.
 
 | Case | Behaviour |
 | --- | --- |
-| old UI, new host | the old UI has no socket client and keeps using the files and the C snapshot, which the new host does not remove until the UI migration (PR 10) lands; after that the bundle ships one UI, so the case is a UI left running across an upgrade. The `hello` from an old client does not exist, so the server sees no `hello` and closes; the old UI shows its existing unavailable state until relaunched. Not silently wrong. |
+| old UI, new host | the old UI has no socket client and keeps using the files and the C snapshot, which the new host does not remove until the UI migration (PR 6) lands; after that the bundle ships one UI, so the case is a UI left running across an upgrade. The `hello` from an old client does not exist, so the server sees no `hello` and closes; the old UI shows its existing unavailable state until relaunched. Not silently wrong. |
 | new UI, old host (UI launched before the host agent restarted) | `hello` reports `host.build` lower than the UI's: the UI shows "OFTC is finishing an update", runs `host restart` (direct), reconnects. If the old host predates the socket, the connect fails and the UI shows `host_unavailable` and starts the agent (7). |
 | protocol N UI, N+1 host | the host supports N and N+1 for one release; negotiated to N. |
 | protocol N+1 UI, N host | negotiated to N if the UI supports N, else `unsupported_schema`: "Update OFTC", actions disabled. |
@@ -403,7 +403,7 @@ SMAppService|OSSystemExtension|URLSession|NWConnection|socket\(|connect\(|profil
 **ratchet**: current violations are recorded in `app/ui-edge-baseline.txt` (file,
 pattern, count), the check fails on any new match or any count above baseline,
 and CI fails if the baseline file grows in a PR. Lines for deleted files are
-ignored. A fixture covers the script. The baseline reaches empty with PR 15.
+ignored. A fixture covers the script. The baseline reaches empty with PR 7.
 
 ## 11. Audit of the current UI files
 
@@ -513,34 +513,52 @@ from the host. Ships after the adapter, independent of the Rust work.
 
 ## 14. PR stack
 
-Sizes are estimates in changed lines. "#46" means a piece already on `origin/main`
-(`core/host`, `hostlib`, `core/apple`; the supervisor port #95 is merged).
+Seven PRs, cut at logical boundaries. Sizes are estimates in changed lines. All of
+#46 is on `main` (4f16573: `core/host`, `hostlib`, `core/apple`, the supervisor
+port), so no PR waits on it.
 
-| # | PR | Size | Needs | Parallel with |
-| --- | --- | ---: | --- | --- |
-| 1 | `docs: UI edge contract` (this file; plan and architecture links; spike stays on a branch) | ~700 doc | none | 2, 3 |
-| 2 | `build: ratchet check for the UI edge` (`ui-files.txt`, script, baseline, fixture, `build.sh` call) | ~200 | 1 | 3 |
-| 3 | `feat(ui-edge): wire types` (`core/ui-edge`: requests, events, status document, error and exit tables, golden JSON, ignore-unknown and `hello` tests) | ~600 Rust | 1 | 2 |
-| 4 | `feat(host): serve skeleton` (`serve/`: the hidden `host serve` and `host restart` verb rows, so no later PR edits the verb table for them; lock, stale socket, 0700 dir and 0600 socket, `peer_uid`, NDJSON framing, `hello`, `status` and `profiles` from `snapshot`/`status`/`registry`; fake-transport tests) | ~900 Rust | 3; #46 registry, snapshot, status, lease | 2 |
-| 5 | `feat(host): subscribe, state resolution, traffic` (compose `VpnControl` subscription with phase: port of `MenuConnectionState.resolve` and `VPNComponentState` with their check cases moved to `cargo test`; debounce; the host sends `oftc.traffic.v1` once per second per connected profile and derives rates, a Rust port of `TrafficRates`/`TrafficSnapshot` validation and its Swift cases; `traffic` events only with a subscriber) | ~1000 Rust | 4; #46 vpn, apple manager | 6, 7, 8 |
-| 6 | `feat(host): verbs over the socket` (connect, disconnect, remove, export, import preview and import, settings, check-update, open-settings, cancel; typed results shared with the verb printers; `busy`; error and exit codes; golden verb table kept green) | ~1000 Rust | 4; #46 commands, start, supervisor, bundle, intent | 5, 7, 8 |
-| 7 | `feat(cli): socket client` (`status`, `profiles`, `--version`, `--json`, exit mapping, direct fallback) | ~500 Rust | 3, 4 | 5, 6, 8 |
-| 8 | `build: host launch agent` (plist, `Launchctl::kickstart`, register path, postinstall kickstart, signing and `build.sh` edits, `docs/operations.md`) | ~350 | 4; #46 agent | 5, 6, 7 |
-| 9 | `feat(ui): HostEdge` (Network client, hello, subscribe, backoff and kickstart, typed errors, stale-state handling; Swift check decoding the golden files) | ~550 Swift | 3, 4, 5, 8 | 6, 7 |
-| 10 | `refactor(ui): MenuBar and MenuModel on HostEdge` (delete `classify`, `SupervisorStatus`, `ProfileScope`, `OFTCProfile` readers, the C snapshot caller and its FFI, and every `NetworkExtension` use: `TunnelRuntime`'s manager, status observers, `sampleTraffic`, `TrafficSnapshot` decoding; baseline lowered) | about -1000 Swift | 9, 6 | |
-| 11 | `feat(host): add_profile, list_sources, component_update` (progress events, `psk_source`, `tunnels_active`, idempotent `install-config`) | ~700 Rust | 6; #46 sysext, keychain, bundle | 10 |
-| 12 | `fix(ui): component update view; Onboarding shrinks onto add_profile` (defect 1) | about -250 Swift | 10, 11 | 13, 14 |
-| 13 | `feat(ui): About and shared options menu` (defect 2, with the "Details" line) | ~150 Swift | 10 | 12, 14 |
-| 14 | `refactor: update check to the host; GatewayTrustPrompt takes pre-parsed fields` | about -150 Swift, ~200 Rust | 6; #46 trust | 12, 13 |
-| 15 | `build: empty the ratchet baseline` (remove `ui-edge-baseline.txt` and its allowances once PRs 10, 12, 13, 14 have burned it down) | ~100 | 10, 12, 13, 14 | |
+| # | PR | Size | Needs |
+| --- | --- | ---: | --- |
+| 1 | `docs: UI edge contract` (this file) | ~700 doc | none |
+| 2 | **The host serves status**: `core/ui-edge` wire types and golden JSON; `core/host/src/serve/` skeleton (lock, socket, peer check, framing, `hello`); `status` and `profiles`; `subscribe`; state resolution (port of `MenuConnectionState.resolve` and `VPNComponentState`, their Swift cases moved to `cargo test`); host traffic sampling (`oftc.traffic.v1` once a second per connected profile, only with a `traffic` subscriber, plus a Rust port of `TrafficRates` and snapshot validation); the hidden `host serve` and `host restart` verb rows | ~2500 Rust, mostly tables and tests | 1 |
+| 3 | **Verbs and setup over the socket**: typed results shared with the verb printers, `busy`, error and exit codes, `connect`, `disconnect`, `remove`, `export`, `import_preview`, `import`, `settings_set`, `check_update`, `open_settings`, `cancel`, `add_profile`, `list_sources`, `component_update` with progress events | ~1700 Rust | 2 |
+| 4 | **CLI becomes a socket client** with the direct fallback: `status`, `profiles`, `--version`, `--json`, exit mapping | ~500 Rust | 2 |
+| 5 | **Host launch agent**: plist, `Launchctl::kickstart`, register path, detached supervisor spawn, postinstall `kickstart -k`, signing, operations doc | ~350 | 2 |
+| 6 | **`HostEdge.swift` and the ratchet**: the Swift client; `ui-files.txt`, `check-ui-edge.sh`, baseline and fixture, introduced here; `MenuBar`/`MenuModel` migrate onto it; the Swift readers, the C snapshot FFI and every `NetworkExtension` use are deleted | about +750, -1800 Swift and script | 2, 3, 5 |
+| 7 | **UI features on the new edge**: component-update view and Onboarding shrink onto `add_profile` (defect 1); About and shared options menu with the "Details" line (defect 2); update check to the host and the trust prompt taking pre-parsed fields; the ratchet baseline emptied | about -550 Swift, ~200 Rust | 3, 6 |
 
-Critical path: 3, 4, 5, 9, 10 (PR 9 needs PR 5 so `HostEdge` can subscribe to `traffic` from the start; no UI file ever imports `NetworkExtension`). PRs 1 to 3 need nothing from #46. The remaining
-#46 work that matters is deleting the Swift readers that `MenuBar.swift` and
-`Onboarding.swift` still call (`ProfileScope`, `OFTCProfile`, `SupervisorStatus`,
-`AgentService`, `ProviderReadiness`): they must be deleted in PR 10 and PR 12, not
-earlier, or the UI target breaks; no #46 PR should delete them first. PRs 5, 6
-and 11 touch `commands.rs` and its golden table with #46 follow-ups; land them in
-order and rebase, no parallel edits to that file.
+Parallel: 2 first. Then 3, 4 and 5 run in parallel; 3 and 4 share no files, and 5
+touches only the plist, scripts and `agent.rs`. 6 needs 2, 3 and 5. 7 needs 3 and 6.
+Serial spine: 2, 3 (or 5), 6, 7.
+
+### Files each PR touches
+
+| # | Files |
+| --- | --- |
+| 1 | `docs/ui-edge.md` |
+| 2 | new `app/core/ui-edge/**`; new `app/core/host/src/serve/**`; `host/src/lib.rs`; `host/src/os.rs` (`peer_uid`, the only new `unsafe`); `host/src/vpn.rs`; `host/src/commands.rs` (two hidden verb rows and the golden table); `docs/host-verbs.md`; `host/Cargo.toml`; `app/Cargo.toml`, `app/Cargo.lock` |
+| 3 | `serve/ops*.rs`; `host/src/{commands,start,bundle,intent,supervisor,sysext,keychain}.rs` (shared typed internals; no new verb rows); `docs/host-verbs.md` |
+| 4 | `client/src/**`; `client/Cargo.toml`; `client/man/oftc.1`; `client/README.md` |
+| 5 | new `app/Host/*.host.plist`; `host/src/agent.rs`; `app/build.sh`; `app/sign-developer-id.sh`; `app/package-scripts/postinstall`; `docs/operations.md` |
+| 6 | new `app/Host/HostEdge.swift`; a Swift check that decodes the golden files; new `app/ui-files.txt`, `app/check-ui-edge.sh`, `app/ui-edge-baseline.txt`, fixture; `app/build.sh`; `MenuBar.swift`, `MenuModel.swift`, `MenuCommand.swift`, `main.swift`, `check-menu*.swift`, `check-experience.swift`; deletes `ProfileScope`, `OFTCProfile`, `SupervisorStatus`, the `AgentService` readers; `core/hostlib/src/lib.rs` and `host/src/snapshot.rs` (the FFI) |
+| 7 | `Onboarding.swift`, `Welcome.swift`, `LaunchExperience.swift`, `UpdateCheck.swift` (deleted), `GatewayTrustPrompt.swift`, `MenuBar.swift` (menu section), `en.lproj`; new `host/src/update.rs`, `host/src/trust.rs`; `app/ui-edge-baseline.txt`, `app/ui-files.txt` |
+
+### Serial constraints
+
+- `commands.rs` and its pinned usage text and golden table: PR 2 adds the two
+  hidden rows; PR 3 changes the file for typed internals and adds no verb rows;
+  7 edits it last for the update check. 2 before 3 before 7. PR 4 and PR 5 do not
+  touch it.
+- `app/build.sh`: PR 5, then PR 6 (the ratchet call and the Swift compile list).
+  They are sequential by dependency (6 needs 5), so no conflict.
+- `MenuBar.swift`: only PR 6 and PR 7 edit it, and 7 needs 6.
+- The Swift readers (`ProfileScope`, `OFTCProfile`, `SupervisorStatus`,
+  `AgentService`, `ProviderReadiness`) must stay until PR 6 removes their last
+  callers; no other PR deletes them. The camelCase C snapshot FFI
+  (`oftc_host_snapshot_json`) stays until PR 6.
+- **Live-run items stay attached to PR 5** (see section 15): supervisors
+  surviving a host restart, and the Login Items prompt count with two agents.
+  Neither is verified.
 
 ## 15. Risks
 
@@ -550,7 +568,7 @@ order and rebase, no parallel edits to that file.
   risks. Mitigation: spawn them detached in their own session
   (`spawn_supervisor` in `agent.rs` today does not `setsid`; verify) and set
   `AbandonProcessGroup`. **Not verified**; it needs a live test with a connected
-  tunnel and a host restart, run by the user (Issue 48 style), before PR 8
+  tunnel and a host restart, run by the user (Issue 48 style), before PR 5
   merges.
 - **A second Login Items entry** and its approval prompt; behaviour of two
   agents in one app is not verified. If the cost is unacceptable, fall back to
