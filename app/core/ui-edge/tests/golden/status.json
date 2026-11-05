@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "generated": "2026-11-04T12:00:00Z",
+  "seq": 1771,
+  "host": { "version": "0.9.0", "build": "24", "provider_build": "24" },
+  "component": { "state": "ready", "installed_build": "24", "expected_build": "24" },
+  "login": { "menu_item": "enabled", "agent": "enabled", "host_agent": "enabled" },
+  "profiles": [
+    {
+      "id": "c2", "name": "Office VPN", "gateway": "vpn.example.com",
+      "saml_port": 9443, "transport": "udp", "auto_start": true,
+      "state": "connected", "ne_status": "connected", "phase": "connected",
+      "connected_since": "2026-11-04T11:18:00Z",
+      "traffic": { "session": "9f1c2e7a", "rx_bytes": 842000000, "tx_bytes": 96000000,
+                   "rx_rate": 1200000.0, "tx_rate": 84000.0, "sample_seq": 12 },
+      "error": null
+    },
+    {
+      "id": "lab", "name": "Lab", "gateway": "lab.example.com",
+      "saml_port": 8443, "transport": "tcp", "auto_start": false,
+      "state": "sign_in", "ne_status": "disconnected", "phase": "acquiring",
+      "connected_since": null, "traffic": null, "error": null
+    }
+  ]
+}

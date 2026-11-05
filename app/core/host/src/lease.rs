@@ -77,7 +77,7 @@ pub(crate) fn write_private(directory: &Path, name: &str, data: &[u8]) -> io::Re
 }
 
 /// Opens `path` read-write for locking, creating it 0600, never through a symlink.
-fn open_lock_file(path: &Path, create: bool) -> io::Result<File> {
+pub(crate) fn open_lock_file(path: &Path, create: bool) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
