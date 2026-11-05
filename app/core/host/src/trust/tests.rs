@@ -290,6 +290,72 @@ fn probe(chain: Option<Vec<Vec<u8>>>, answer: Evaluation, host: &str) -> (Verdic
     (verdict, evaluator.calls.into_inner())
 }
 
+/// Real `SecTrustEvaluateWithError` codes: only a verdict on the certificate may
+/// lead to a prompt. Anything else (another domain, an unlisted OSStatus such as a
+/// network failure) is an evaluation that could not be made, so it retries.
+#[test]
+fn failure_classification_table() {
+    let cases = [
+        (OSSTATUS_DOMAIN, -67843, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -25318, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -67818, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -67602, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -25218, Evaluation::Error),
+        (OSSTATUS_DOMAIN, -9806, Evaluation::Error),
+        ("NSURLErrorDomain", -1009, Evaluation::Error),
+        ("NSURLErrorDomain", -67843, Evaluation::Error),
+    ];
+    for (domain, code, expected) in cases {
+        assert_eq!(classify_failure(domain, code), expected, "{domain} {code}");
+    }
+}
+
+#[test]
+fn failure_line_carries_verdict_code_and_chain_length_only() {
+    assert_eq!(
+        failure_line(Evaluation::Error, OSSTATUS_DOMAIN, Some(-25218), 3),
+        "OFTC trust: evaluation Error domain=NSOSStatusErrorDomain code=-25218 chain=3"
+    );
+    assert_eq!(
+        failure_line(Evaluation::Error, "setup", None, 1),
+        "OFTC trust: evaluation Error domain=setup code=none chain=1"
+    );
+}
+
+/// An evaluation that fails for a reason that is not a verdict on the certificate
+/// (an unlisted code) never reaches `Trusted`, never asks the user and never writes
+/// a pin, whatever the chain, so the supervisor just retries until its deadline.
+#[test]
+fn an_unlisted_failure_never_prompts_trusts_or_pins() {
+    let dir = temp_dir("unlisted");
+    let chain = vec![fixture_der(), vec![0x30, 0x00]];
+    for chain in [chain.clone(), chain[..1].to_vec()] {
+        let evaluator = Evaluate {
+            answer: classify_failure(OSSTATUS_DOMAIN, -25218),
+            calls: RefCell::new(Vec::new()),
+        };
+        let probe = ChainProbe {
+            source: &Source(Some(chain)),
+            evaluator: &evaluator,
+            text: &NO_TEXT,
+        };
+        let answer = Answer {
+            decision: Decision::Trust,
+            asked: RefCell::new(Vec::new()),
+        };
+        let outcome = Reviewer {
+            pin_dir: &dir,
+            probe: &probe,
+            prompt: &answer,
+            text: &NO_TEXT,
+        }
+        .review("gw.example", 9443, "Example Office");
+        assert_eq!(outcome, Outcome::NotACertificateProblem);
+        assert!(answer.asked.borrow().is_empty());
+        assert!(!tls::pin_path(&dir, "gw.example", 9443).exists());
+    }
+}
+
 #[test]
 fn verdict_table() {
     let leaf = fixture_der();

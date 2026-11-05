@@ -92,9 +92,12 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
             // executable: the supervisor's worker threads cannot build an AppKit window.
             let text = OpensslText;
             let source = OpensslChainSource::default();
+            let diagnostic = |line: &str| {
+                let _ = writeln!(std::io::stderr(), "{line}");
+            };
             let probe = ChainProbe {
                 source: &source,
-                evaluator: &SystemTrustEvaluator,
+                evaluator: &SystemTrustEvaluator { log: &diagnostic },
                 text: &text,
             };
             let child = ProcessChild {
@@ -127,9 +130,7 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 launchctl: &SystemLaunchctl,
                 signals: &OsSignals,
                 review: &|host, port, name| reviewer.review(host, port, name),
-                diagnostic: &|line| {
-                    let _ = writeln!(std::io::stderr(), "{line}");
-                },
+                diagnostic: &diagnostic,
             };
             let mut input = stdin().lock();
             let mut io = Io {
