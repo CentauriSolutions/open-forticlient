@@ -191,6 +191,29 @@ oftc disconnect
 oftc connect
 ```
 
+### The host service
+
+The app bundles a second launch agent, `com.chris.openforticlient.oftc.host`, in
+`Contents/Library/LaunchAgents/`. It runs `OFTCAgent host serve`, the long-lived
+process that serves the UI's local socket (`docs/ui-edge.md`). It starts at login,
+is restarted if it exits with a failure (`KeepAlive` `SuccessfulExit` false; exit 0 on
+SIGTERM or when another host already serves does not respawn it), and sets `AbandonProcessGroup`. Supervisors it
+starts lead their own process groups, so restarting or killing the host leaves
+their tunnels up (not yet verified live); the Network Extension owns packet flow either way.
+
+- It is a separate Login Items entry from the login agent
+  (`com.chris.openforticlient.oftc.agent`): macOS may list two items for OFTC.
+  `agent-status` and `register-agent` cover the login agent only; the host
+  service's registration functions exist in the host crate but no verb calls them yet.
+- The package's postinstall runs
+  `launchctl kickstart -k gui/<uid>/com.chris.openforticlient.oftc.host` for the
+  logged-in user, so an upgrade replaces the running host with the new bundle's
+  executable. It fails harmlessly if the service was never registered.
+- By hand: `launchctl kickstart -k gui/$(id -u)/com.chris.openforticlient.oftc.host`
+  (or `OFTCAgent host restart`). Its output is not yet written to a log file.
+- The login agent's `launchctl disable` after an unexplained drop never touches
+  the host service's label.
+
 `oftc uninstall` stops the agent and VPN, closes the menu app, unregisters its
 login launch, removes OFTC's VPN configuration,
 requests system extension deactivation, then invokes the package removal

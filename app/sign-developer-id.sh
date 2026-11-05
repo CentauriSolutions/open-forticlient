@@ -23,6 +23,15 @@ for plist in "$app/Contents/Info.plist" "$extension/Contents/Info.plist"; do
         print -u2 "Missing or non-numeric build number: $plist"; exit 2
     }
 done
+# Both bundled launch agents sit under Contents, so the app signature seals them;
+# refuse a candidate that lacks one, or whose label is not its file name.
+for agent in agent host; do
+    agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.${agent}.plist"
+    [[ -f "$agent_plist" && $(/usr/libexec/PlistBuddy -c 'Print :Label' "$agent_plist") == "${bundle_id}.${agent}" \
+       && $(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$agent_plist") == Contents/MacOS/OFTCAgent ]] || {
+        print -u2 "Missing or mismatched launch agent plist: ${bundle_id}.${agent}.plist"; exit 2
+    }
+done
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") == OFTCAgent \
    && $(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$extension/Contents/Info.plist") == OFTCTunnel \
    && -f "$app/Contents/Resources/OFTC.icns" && -f "$cli" ]] || {

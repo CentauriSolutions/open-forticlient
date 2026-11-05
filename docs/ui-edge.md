@@ -59,20 +59,26 @@ Candidates:
 | **A. The existing login agent, made resident** | starts at login, but its plist is `KeepAlive` false and the supervisor calls `launchctl disable` on that label after an unexplained drop so a bad session is not reconnected at the next login (`agent.rs`, `Launchctl::disable`). Disabling the agent would also take the socket down | rejected: the socket would die exactly when the user most needs status |
 | **B. The menu app** | exists only while the UI runs; the CLI and the next UI launch would have no server; couples the lifecycles the user wants decoupled | rejected as the server (it stays a client) |
 | **C. A supervisor** | one per profile, exits when its tunnel ends | rejected: many, short-lived |
-| **D. A new second launch agent, `...oftc.host`, running `OFTCAgent host serve`** | resident from login (`RunAtLoad`), restarted on crash (`KeepAlive`), registered with `SMAppService.agent(plistName:)` like the existing one, same entitled main executable so it may use NetworkExtension and SystemExtensions | **recommended** |
+| **D. A new second launch agent, `...oftc.host`, running `OFTCAgent host serve`** | resident from login (`RunAtLoad`), restarted after a failed exit (`KeepAlive` with `SuccessfulExit` false), registered with `SMAppService.agent(plistName:)` like the existing one, same entitled main executable so it may use NetworkExtension and SystemExtensions | **recommended** |
 
 Design of D:
 
 - New bundled plist `Contents/Library/LaunchAgents/com.chris.openforticlient.oftc.host.plist`:
   `BundleProgram` `Contents/MacOS/OFTCAgent`, arguments `host serve`, `RunAtLoad`
-  true, `KeepAlive` true, `ProcessType` `Interactive`, `AbandonProcessGroup` true
+  true, `KeepAlive` `{SuccessfulExit: false}`, `ProcessType` `Interactive`, `AbandonProcessGroup` true
   (see the risk in section 15: supervisors it starts must outlive it). A hidden
   verb pair `host serve` / `host restart` follows the existing `hidden(...)`
   rows in `commands.rs`, so the usage text stays byte for byte (a test now pins
   the text). `host serve` arms SIGINT and SIGTERM and serves until one arrives;
   `host restart` is `launchctl kickstart -k` of the host label, so the
-  `Launchctl::kickstart` seam lands with the verb in PR 2, not PR 5; with no plist
-  registered (PR 5) it reports that the service is not registered and exits 1.
+  `Launchctl::kickstart` seam lands with the verb in PR 2, not PR 5; with the
+  service not registered it reports that and exits 1. PR 5 adds the plist
+  (`app/Host/HostAgent.plist`, bundled as `<bundle id>.host.plist`) and
+  `agent::{host_item, host_status, register_host, unregister_host}`; wiring them to
+  a verb and to `oftc setup` is left to the verb owners (`commands.rs`), and the
+  plist's `OFTC_BUNDLED_AGENT=1` is there so `host serve` can send its output to
+  `agent.log` through `redirect_output` once it calls it (it does not yet, so
+  launchd discards the host's output).
 - It is registered by the same `register-agent` path (`agent.rs` already wraps
   `SMAppService.agent`), by `oftc setup`, the installer's postinstall, or the UI's
   first run. macOS asks the user to allow background items once; the exact
@@ -590,11 +596,12 @@ Serial spine: 2, 3 (or 5), 6, 7.
 - **Supervisors must outlive the host.** A resident agent that starts
   supervisors makes them its children; `launchctl kickstart -k` or a crash would
   kill the process group and drop every VPN, which today's one-shot agent never
-  risks. Mitigation: spawn them detached in their own session
-  (`spawn_supervisor` in `agent.rs` today does not `setsid`; verify) and set
-  `AbandonProcessGroup`. **Not verified**; it needs a live test with a connected
-  tunnel and a host restart, run by the user (Issue 48 style), before PR 5
-  merges.
+  risks. Mitigation: spawn them in their own process group (`spawn_supervisor`
+  in `agent.rs` did not detach; PR 5 sets `process_group(0)`, pinned by a test that
+  the child leads its own group, not a `setsid`: that needs an `unsafe` `pre_exec`
+  and a launchd job has no controlling terminal) and set `AbandonProcessGroup`.
+  **Not verified live**; it needs a connected tunnel and a host restart, run by the
+  user on a signed build (steps in the PR 5 description) before PR 5 merges.
 - **A second Login Items entry** and its approval prompt; behaviour of two
   agents in one app is not verified. If the cost is unacceptable, fall back to
   option A with the `launchctl disable` behaviour moved off the shared label.

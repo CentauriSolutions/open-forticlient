@@ -7,6 +7,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -30,6 +31,45 @@ pub const HOST_LABEL: &str = "com.chris.openforticlient.oftc.host";
 
 pub fn agent_item() -> LoginItem {
     LoginItem::Agent(AGENT_PLIST.to_owned())
+}
+
+/// The host service's login item (`OFTCAgent host serve`, `KeepAlive`).
+pub fn host_item() -> LoginItem {
+    LoginItem::Agent(HOST_PLIST.to_owned())
+}
+
+/// Which bundled launch agent a registration call is about. Both register through
+/// `SMAppService.agent` and share one policy; they differ in the item, the launchd
+/// label and the name an error uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentKind {
+    /// The login agent: starts connect-at-login supervisors once and exits.
+    Login,
+    /// The resident host service that serves the UI socket.
+    Host,
+}
+
+impl AgentKind {
+    pub fn item(self) -> LoginItem {
+        match self {
+            AgentKind::Login => agent_item(),
+            AgentKind::Host => host_item(),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentKind::Login => AGENT_LABEL,
+            AgentKind::Host => HOST_LABEL,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            AgentKind::Login => "OFTC login agent",
+            AgentKind::Host => "OFTC host service",
+        }
+    }
 }
 
 /// `launchctl`, for the two calls the agent needs.
@@ -133,45 +173,76 @@ pub fn describe(error: &AppleError) -> String {
     }
 }
 
-fn unavailable(status: &str) -> String {
-    format!("OFTC login agent is {status}")
+fn unavailable(kind: AgentKind, status: &str) -> String {
+    format!("{} is {status}", kind.noun())
 }
 
 /// The `agent-status` string.
 pub fn status(items: &dyn LoginItems) -> &'static str {
-    items.status(&agent_item()).as_str()
+    status_of(items, AgentKind::Login)
 }
 
-/// Registers the agent and clears any launchd disabled override.
+/// The status string of the host service.
+pub fn host_status(items: &dyn LoginItems) -> &'static str {
+    status_of(items, AgentKind::Host)
+}
+
+fn status_of(items: &dyn LoginItems, kind: AgentKind) -> &'static str {
+    items.status(&kind.item()).as_str()
+}
+
+/// Registers the login agent and clears any launchd disabled override.
 pub fn register(items: &dyn LoginItems, launchctl: &dyn Launchctl) -> Result<(), String> {
-    let agent = agent_item();
+    register_kind(AgentKind::Login, items, launchctl)
+}
+
+/// Registers the host service and clears any launchd disabled override.
+pub fn register_host(items: &dyn LoginItems, launchctl: &dyn Launchctl) -> Result<(), String> {
+    register_kind(AgentKind::Host, items, launchctl)
+}
+
+fn register_kind(
+    kind: AgentKind,
+    items: &dyn LoginItems,
+    launchctl: &dyn Launchctl,
+) -> Result<(), String> {
+    let agent = kind.item();
     match items.status(&agent) {
         LoginStatus::Enabled => {}
         LoginStatus::NotRegistered | LoginStatus::NotFound => {
             items.register(&agent).map_err(|e| describe(&e))?;
         }
         LoginStatus::RequiresApproval | LoginStatus::Unknown => {
-            return Err(unavailable(status(items)));
+            return Err(unavailable(kind, status_of(items, kind)));
         }
     }
     if items.status(&agent) != LoginStatus::Enabled {
-        return Err(unavailable(status(items)));
+        return Err(unavailable(kind, status_of(items, kind)));
     }
-    if !launchctl.enable(AGENT_LABEL) {
-        return Err(unavailable("disabled"));
+    if !launchctl.enable(kind.label()) {
+        return Err(unavailable(kind, "disabled"));
     }
     Ok(())
 }
 
-/// Unregisters the agent; nothing to do when it is not registered.
+/// Unregisters the login agent; nothing to do when it is not registered.
 pub fn unregister(items: &dyn LoginItems) -> Result<(), String> {
-    let agent = agent_item();
+    unregister_kind(AgentKind::Login, items)
+}
+
+/// Unregisters the host service; nothing to do when it is not registered.
+pub fn unregister_host(items: &dyn LoginItems) -> Result<(), String> {
+    unregister_kind(AgentKind::Host, items)
+}
+
+fn unregister_kind(kind: AgentKind, items: &dyn LoginItems) -> Result<(), String> {
+    let agent = kind.item();
     match items.status(&agent) {
         LoginStatus::NotRegistered | LoginStatus::NotFound => Ok(()),
         LoginStatus::Enabled | LoginStatus::RequiresApproval => {
             items.unregister(&agent).map_err(|e| describe(&e))
         }
-        LoginStatus::Unknown => Err(unavailable("unknown")),
+        LoginStatus::Unknown => Err(unavailable(kind, "unknown")),
     }
 }
 
@@ -210,12 +281,20 @@ pub fn redirect_output(env: &HostEnv) -> Result<(), String> {
 
 /// Starts `<exe> --profile <id> supervise-profile` with the agent marker removed, its
 /// output appended to `log` (or inherited when there is none) and no input.
+///
+/// The child leads its own process group. The resident host service starts
+/// supervisors, and `launchctl kickstart -k` or a crash of the host signals its
+/// process group; a supervisor in that group would die with it and drop its tunnel.
+/// (`std` offers `process_group` without `unsafe`; `setsid` would need a `pre_exec`
+/// hook. A launchd job has no controlling terminal, so the group is what matters, and
+/// the host plist sets `AbandonProcessGroup` so launchd does not reap the leftovers.)
 pub fn supervisor_command(exe: &Path, id: &str) -> Command {
     let mut command = Command::new(exe);
     command
         .args(["--profile", id, "supervise-profile"])
         .env_remove("OFTC_BUNDLED_AGENT")
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .process_group(0);
     command
 }
 
@@ -270,41 +349,50 @@ mod tests {
     }
 
     /// (start, status after a register call, launchctl ok, register calls,
-    /// enable calls, result)
+    /// enable calls, error suffix after "<noun> is ")
     type Row = (
         LoginStatus,
         LoginStatus,
         bool,
         usize,
         usize,
-        Result<(), &'static str>,
+        Option<&'static str>,
     );
 
-    /// Each starting status: whether `register` calls the system, what it ends
-    /// as, and whether `launchctl enable` ran.
+    const KINDS: [(AgentKind, &str, &str); 2] = [
+        (AgentKind::Login, "OFTC login agent", AGENT_LABEL),
+        (AgentKind::Host, "OFTC host service", HOST_LABEL),
+    ];
+
+    fn register_for(
+        kind: AgentKind,
+        items: &MockLoginItems,
+        launchctl: &RecordingLaunchctl,
+    ) -> Result<(), String> {
+        match kind {
+            AgentKind::Login => register(items, launchctl),
+            AgentKind::Host => register_host(items, launchctl),
+        }
+    }
+
+    /// Each starting status, for each agent kind: whether `register` calls the
+    /// system, what it ends as, whether `launchctl enable` ran and for which label.
     #[test]
     fn register_acts_only_from_a_state_that_can_succeed() {
         use LoginStatus::*;
         let rows: [Row; 8] = [
-            (Enabled, Enabled, true, 0, 1, Ok(())),
-            (NotRegistered, Enabled, true, 1, 1, Ok(())),
-            (NotFound, Enabled, true, 1, 1, Ok(())),
+            (Enabled, Enabled, true, 0, 1, None),
+            (NotRegistered, Enabled, true, 1, 1, None),
+            (NotFound, Enabled, true, 1, 1, None),
             (
                 RequiresApproval,
                 Enabled,
                 true,
                 0,
                 0,
-                Err("OFTC login agent is requires-approval"),
+                Some("requires-approval"),
             ),
-            (
-                Unknown,
-                Enabled,
-                true,
-                0,
-                0,
-                Err("OFTC login agent is unknown"),
-            ),
+            (Unknown, Enabled, true, 0, 0, Some("unknown")),
             // Registered but left awaiting approval.
             (
                 NotRegistered,
@@ -312,74 +400,99 @@ mod tests {
                 true,
                 1,
                 0,
-                Err("OFTC login agent is requires-approval"),
+                Some("requires-approval"),
             ),
             // Enabled in the system but disabled in launchd.
-            (
-                Enabled,
-                Enabled,
-                false,
-                0,
-                1,
-                Err("OFTC login agent is disabled"),
-            ),
+            (Enabled, Enabled, false, 0, 1, Some("disabled")),
             (
                 NotRegistered,
                 NotRegistered,
                 true,
                 1,
                 0,
-                Err("OFTC login agent is not-registered"),
+                Some("not-registered"),
             ),
         ];
-        for (start, after, launchctl_ok, calls, enables, want) in rows {
+        for (kind, noun, label) in KINDS {
+            for (start, after, launchctl_ok, calls, enables, want) in rows {
+                let items = MockLoginItems::new();
+                items.set_status(&kind.item(), start);
+                items.script_register(&kind.item(), Ok(after));
+                let launchctl = RecordingLaunchctl::new(launchctl_ok);
+                let got = register_for(kind, &items, &launchctl);
+                let want = match want {
+                    None => Ok(()),
+                    Some(suffix) => Err(format!("{noun} is {suffix}")),
+                };
+                assert_eq!(got, want, "{kind:?} {start:?}");
+                assert_eq!(items.calls().len(), calls, "{kind:?} {start:?}");
+                // Only this kind's item was touched, and only its label enabled.
+                assert!(
+                    items.calls().iter().all(|(_, item)| *item == kind.item()),
+                    "{kind:?} {start:?}"
+                );
+                assert_eq!(launchctl.calls().len(), enables, "{kind:?} {start:?}");
+                assert!(launchctl.calls().iter().all(|l| l == label));
+            }
+            // A failed registration is reported by its description alone.
             let items = MockLoginItems::new();
-            items.set_status(&agent_item(), start);
-            items.script_register(&agent_item(), Ok(after));
-            let launchctl = RecordingLaunchctl::new(launchctl_ok);
-            let got = register(&items, &launchctl);
-            assert_eq!(
-                got.as_ref().map(|_| ()).map_err(String::as_str),
-                want,
-                "{start:?}"
-            );
-            assert_eq!(items.calls().len(), calls, "{start:?}");
-            assert_eq!(launchctl.calls().len(), enables, "{start:?}");
+            items.script_register(&kind.item(), Err(denied()));
+            let got = register_for(kind, &items, &RecordingLaunchctl::new(true));
+            assert_eq!(got, Err("Operation not permitted".to_owned()));
         }
-        // A failed registration is reported by its description alone.
-        let items = MockLoginItems::new();
-        items.script_register(&agent_item(), Err(denied()));
-        let got = register(&items, &RecordingLaunchctl::new(true));
-        assert_eq!(got, Err("Operation not permitted".to_owned()));
     }
 
     #[test]
     fn unregister_skips_what_is_not_registered_and_refuses_an_unknown_state() {
         use LoginStatus::*;
-        for (start, calls, want) in [
-            (NotRegistered, 0, Ok(())),
-            (NotFound, 0, Ok(())),
-            (Enabled, 1, Ok(())),
-            (RequiresApproval, 1, Ok(())),
-            (Unknown, 0, Err("OFTC login agent is unknown")),
-        ] {
+        for (kind, noun, _) in KINDS {
+            let unregister_for = |items: &MockLoginItems| match kind {
+                AgentKind::Login => unregister(items),
+                AgentKind::Host => unregister_host(items),
+            };
+            let unknown = format!("{noun} is unknown");
+            for (start, calls, want) in [
+                (NotRegistered, 0, Ok(())),
+                (NotFound, 0, Ok(())),
+                (Enabled, 1, Ok(())),
+                (RequiresApproval, 1, Ok(())),
+                (Unknown, 0, Err(unknown.as_str())),
+            ] {
+                let items = MockLoginItems::new();
+                items.set_status(&kind.item(), start);
+                let got = unregister_for(&items);
+                assert_eq!(
+                    got.as_ref().map(|_| ()).map_err(String::as_str),
+                    want,
+                    "{kind:?} {start:?}"
+                );
+                assert_eq!(items.calls().len(), calls, "{kind:?} {start:?}");
+            }
             let items = MockLoginItems::new();
-            items.set_status(&agent_item(), start);
-            let got = unregister(&items);
+            items.set_status(&kind.item(), Enabled);
+            items.script_unregister(&kind.item(), Err(denied()));
             assert_eq!(
-                got.as_ref().map(|_| ()).map_err(String::as_str),
-                want,
-                "{start:?}"
+                unregister_for(&items),
+                Err("Operation not permitted".to_owned())
             );
-            assert_eq!(items.calls().len(), calls, "{start:?}");
         }
+    }
+
+    /// The two agents are separate login items: the status strings and the
+    /// registration of one never read or change the other.
+    #[test]
+    fn the_login_agent_and_the_host_service_are_independent_items() {
+        assert_ne!(agent_item(), host_item());
         let items = MockLoginItems::new();
-        items.set_status(&agent_item(), Enabled);
-        items.script_unregister(&agent_item(), Err(denied()));
+        items.set_status(&agent_item(), LoginStatus::Enabled);
+        items.set_status(&host_item(), LoginStatus::RequiresApproval);
+        assert_eq!(status(&items), "enabled");
+        assert_eq!(host_status(&items), "requires-approval");
         assert_eq!(
-            unregister(&items),
-            Err("Operation not permitted".to_owned())
+            host_item(),
+            LoginItem::Agent("com.chris.openforticlient.oftc.host.plist".into())
         );
+        assert_eq!(HOST_LABEL, "com.chris.openforticlient.oftc.host");
     }
 
     /// Set in the child of [`redirect_sends_output_to_the_agent_log`]: it is a
@@ -456,6 +569,41 @@ mod tests {
         // `None` means removed from the child's environment.
         let envs: Vec<_> = command.get_envs().collect();
         assert_eq!(envs, [(std::ffi::OsStr::new("OFTC_BUNDLED_AGENT"), None)]);
+    }
+
+    /// The supervisor leads its own process group, so a signal to the host's group
+    /// (`launchctl kickstart -k`, a crash) does not reach it. The stand-in
+    /// executable records its own pid and process group; both differ from ours.
+    #[test]
+    fn a_spawned_supervisor_leads_its_own_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::profile::testutil::TempDir::new("detach");
+        let exe = dir.0.join("fake-oftc");
+        fs::write(
+            &exe,
+            "#!/bin/sh\n/bin/ps -o pgid= -p $$ | /usr/bin/tr -d ' '\necho \"$$ $*\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        let log_path = dir.0.join("lab.log");
+        let log = open_log(&log_path).unwrap();
+        let mut child = spawn_supervisor(&exe, "lab", Some(log)).unwrap();
+        assert!(child.wait().unwrap().success());
+        let text = fs::read_to_string(&log_path).unwrap();
+        let mut lines = text.lines();
+        let pgid: i32 = lines.next().unwrap().parse().unwrap();
+        let (pid, args) = lines.next().unwrap().split_once(' ').unwrap();
+        assert_eq!(args, "--profile lab supervise-profile");
+        assert_eq!(pgid, pid.parse::<i32>().unwrap(), "child leads its group");
+        let ours = Command::new("/bin/ps")
+            .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        let ours: i32 = String::from_utf8_lossy(&ours.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert_ne!(pgid, ours);
     }
 
     #[test]
