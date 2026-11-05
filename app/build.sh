@@ -117,7 +117,7 @@ xcrun swiftc -swift-version 5 -target "$target" \
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
     "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/AgentIntent.swift" \
-    "$root/Host/check-host-compat.swift" -o "$build/host-compat-check"
+    "$root/Host/SupervisorStatus.swift" "$root/Host/check-host-compat.swift" -o "$build/host-compat-check"
 "$build/host-compat-check" "$root/core/host/tests/fixtures/rust"
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \

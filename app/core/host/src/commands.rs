@@ -7,6 +7,7 @@
 //! table in the tests.
 
 use std::io::Read;
+use std::time::{Duration, SystemTime};
 
 use oftc_apple::error::AppleError;
 use oftc_apple::login::LoginItems;
@@ -87,8 +88,8 @@ pub const VERBS: &[Verb] = &[
     rust("show-profile"),
     rust("erase-profile"),
     rust("has-psk"),
-    swift("set-autostart on|off"),
-    swift("supervise-autostart"),
+    rust("set-autostart on|off"),
+    rust("supervise-autostart"),
     rust("start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     swift("supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     rust("provision-psk [--stdin] [gateway]"),
@@ -102,7 +103,7 @@ pub const VERBS: &[Verb] = &[
     rust("rekey-ike-once"),
     rust("rekey-counts"),
     rust("status"),
-    swift("stop"),
+    rust("stop"),
     rust("remove-config"),
     hidden("login-settings"),
     hidden("unregister-menu-login"),
@@ -149,6 +150,11 @@ pub enum Command {
     RekeyOnce,
     RekeyIkeOnce,
     RekeyCounts,
+    Stop,
+    SetAutostart {
+        enabled: bool,
+    },
+    SuperviseAutostart,
     Preflight {
         gateway: String,
         uid: String,
@@ -238,6 +244,11 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("rekey-once", []) => Command::RekeyOnce,
         ("rekey-ike-once", []) => Command::RekeyIkeOnce,
         ("rekey-counts", []) => Command::RekeyCounts,
+        ("stop", []) => Command::Stop,
+        ("set-autostart", [state]) if state == "on" || state == "off" => Command::SetAutostart {
+            enabled: state == "on",
+        },
+        ("supervise-autostart", []) => Command::SuperviseAutostart,
         ("preflight", [gateway, uid]) => Command::Preflight {
             gateway: gateway.clone(),
             uid: uid.clone(),
@@ -476,6 +487,9 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             }
             finish(io, &lines.join("\n"), 0)
         }
+        Command::Stop => vpn_verb(vpn::stop(&ctx), io),
+        Command::SetAutostart { enabled } => set_autostart(io, env, backends, &selected, enabled),
+        Command::SuperviseAutostart => supervise_autostart(io, env, backends),
         Command::InstallConfig => vpn_verb(vpn::install_config(&ctx), io),
         Command::Status => vpn_verb(vpn::status(&ctx), io),
         Command::RemoveConfig => vpn_verb(vpn::remove_config(&ctx), io),
@@ -602,6 +616,83 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             }
         }
     }
+}
+
+/// `set-autostart on|off`: the selected profile's connect-at-login choice. Stopping
+/// a tunnel leaves it alone; it is a separate per-profile setting.
+fn set_autostart(
+    io: &mut Io,
+    env: &HostEnv,
+    backends: &Backends,
+    selected: &Option<String>,
+    enabled: bool,
+) -> i32 {
+    let entry = match require_entry(selected, env.root()) {
+        Ok(entry) => entry,
+        Err(message) => return finish(io, &message, 1),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(backends.clock.unix_secs());
+    let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
+    match agent::set_connect_at_login(
+        backends.login,
+        backends.launchctl,
+        &registry::entry_directory(env.root(), &entry.id),
+        adopted,
+        enabled,
+        now,
+    ) {
+        Ok(()) => finish(
+            io,
+            &format!(
+                "Connect at login for {}: {}",
+                entry.id,
+                if enabled { "on" } else { "off" }
+            ),
+            0,
+        ),
+        Err(error) => finish(
+            io,
+            &format!("Could not change automatic connection: {error}"),
+            1,
+        ),
+    }
+}
+
+/// `supervise-autostart`, run by the login agent: one supervisor process per
+/// profile whose connect-at-login choice (or one-use request) says to connect. They
+/// serialise their own SAML sign-ins, so they can all start at once.
+fn supervise_autostart(io: &mut Io, env: &HostEnv, backends: &Backends) -> i32 {
+    if let Err(message) = agent::redirect_output(env) {
+        return finish(io, &message, 1);
+    }
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(backends.clock.unix_secs());
+    let mut children = Vec::new();
+    for entry in registry::entries(env.root()) {
+        let directory = registry::entry_directory(env.root(), &entry.id);
+        let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
+        if !intent::should_start(&directory, now, adopted) {
+            continue;
+        }
+        let Some(exe) = env.exe() else { continue };
+        let log = agent::open_log(&env.logs_dir().join(format!("{}.log", entry.id))).ok();
+        match agent::spawn_supervisor(exe, &entry.id, log) {
+            Ok(child) => children.push(child),
+            Err(_) => io
+                .out
+                .line(&format!("Could not start supervisor for {}", entry.id)),
+        }
+    }
+    if children.is_empty() {
+        return finish(
+            io,
+            "OFTC automatic VPN connection is disabled for every profile",
+            0,
+        );
+    }
+    for mut child in children {
+        let _ = child.wait();
+    }
+    finish(io, "OFTC supervisors exited", 0)
 }
 
 fn has_gateway(root: &std::path::Path, gateway: &str) -> bool {
@@ -824,7 +915,25 @@ mod tests {
                 vec!["--profile", "lab", "unregister-menu-login"],
                 invocation(Some("lab"), Command::UnregisterMenuLogin),
             ),
-            (vec!["stop"], Err(ParseError::Usage)), // still Swift's
+            (vec!["supervise-profile"], Err(ParseError::Usage)), // still Swift's
+            (vec!["stop"], invocation(None, Command::Stop)),
+            (vec!["stop", "x"], Err(ParseError::Usage)),
+            (
+                vec!["--profile", "lab", "set-autostart", "on"],
+                invocation(Some("lab"), Command::SetAutostart { enabled: true }),
+            ),
+            (
+                vec!["set-autostart", "off"],
+                invocation(None, Command::SetAutostart { enabled: false }),
+            ),
+            (vec!["set-autostart"], Err(ParseError::Usage)),
+            (vec!["set-autostart", "yes"], Err(ParseError::Usage)),
+            (vec!["set-autostart", "on", "x"], Err(ParseError::Usage)),
+            (
+                vec!["supervise-autostart"],
+                invocation(None, Command::SuperviseAutostart),
+            ),
+            (vec!["supervise-autostart", "x"], Err(ParseError::Usage)),
             (vec!["nonsense"], Err(ParseError::Usage)),
             // --profile needs a valid id and a verb after it.
             (vec!["--profile"], Err(ParseError::ProfileFlag)),
@@ -1312,7 +1421,7 @@ mod tests {
             &format!("{}\n", usage()),
             2,
         );
-        h.expect(&["stop"], &format!("{}\n", usage()), 2); // still Swift's
+        h.expect(&["supervise-profile"], &format!("{}\n", usage()), 2); // still Swift's
     }
 
     #[test]
@@ -2394,5 +2503,211 @@ mod tests {
              VPN connect at login (lab): disabled\n",
             0,
         );
+    }
+
+    /// A profile named `Example Office` and one named `Lab`, saved through the verb.
+    fn two_profiles(h: &Harness) {
+        h.run(
+            &[
+                "save-profile",
+                "vpn.example.com",
+                "9443",
+                "--name",
+                "Example Office",
+            ],
+            "",
+        );
+        h.run(
+            &["save-profile", "lab.example.com", "8443", "--name", "Lab"],
+            "",
+        );
+    }
+
+    #[test]
+    fn stop_signals_the_supervisor_before_stopping_the_tunnel() {
+        let h = Harness::new();
+        h.expect(&["stop"], "OFTC profile unavailable; run oftc setup\n", 1);
+        h.run(
+            &[
+                "save-profile",
+                "vpn.example.com",
+                "9443",
+                "--name",
+                "Example Office",
+            ],
+            "",
+        );
+        // No entry: nothing to stop, and with no supervisor the request still succeeds.
+        h.expect(&["stop"], "OFTC configuration absent\n", 0);
+        let directory = registry::entry_directory(h.env.root(), "example-office");
+        let entry = h.vpn.add_entry(PROVIDER, Some("example-office"), true);
+        // A supervisor's lock names the lease the request is addressed to.
+        let lease = crate::lease::SupervisorLease::acquire(&directory).unwrap();
+        h.expect(&["stop"], "Stop requested\n", 0);
+        assert_eq!(entry.stops(), 1);
+        assert!(lease.stop_requested());
+        // A lock that is not a lease id cannot be answered: the VPN is left running.
+        drop(lease);
+        std::fs::write(directory.join("supervisor.lock"), "broken").unwrap();
+        h.expect(
+            &["stop"],
+            "Could not signal OFTC supervisor; VPN left running\n",
+            1,
+        );
+        assert_eq!(entry.stops(), 1);
+        // Other profiles' entries are not stopped.
+        std::fs::remove_file(directory.join("supervisor.lock")).unwrap();
+        let other = h.vpn.add_entry(PROVIDER, Some("lab"), true);
+        h.expect(&["stop"], "Stop requested\n", 0);
+        assert_eq!((entry.stops(), other.stops()), (2, 0));
+    }
+
+    #[test]
+    fn set_autostart_registers_without_signing_in_and_undoes_a_failed_registration() {
+        let h = Harness::new();
+        h.expect(
+            &["set-autostart", "on"],
+            "OFTC profile unavailable; run oftc setup\n",
+            1,
+        );
+        two_profiles(&h);
+        h.expect(
+            &["set-autostart", "on"],
+            "Several OFTC profiles are configured; choose one with --profile <id> (example-office, lab)\n",
+            1,
+        );
+        let lab = registry::entry_directory(h.env.root(), "lab");
+        let prefs = || std::fs::read_to_string(lab.join("connection-preferences.json")).ok();
+        let request = || lab.join("agent-request.json");
+        let agent = agent_item();
+
+        // Off needs no agent.
+        h.expect(
+            &["--profile", "lab", "set-autostart", "off"],
+            "Connect at login for lab: off\n",
+            0,
+        );
+        assert_eq!(prefs().as_deref(), Some(r#"{"connectAtLogin":false}"#));
+        assert!(h.login.calls().is_empty());
+
+        // On, agent not yet enabled: registered, with a request that keeps this
+        // registration from opening a sign-in.
+        h.expect(
+            &["--profile", "lab", "set-autostart", "on"],
+            "Connect at login for lab: on\n",
+            0,
+        );
+        assert_eq!(prefs().as_deref(), Some(r#"{"connectAtLogin":true}"#));
+        assert!(request().exists());
+        assert_eq!(h.login.calls(), [("register", agent.clone())]);
+        assert_eq!(h.launchctl.calls(), [crate::agent::AGENT_LABEL]);
+
+        // On again, agent enabled: only the launchd override is cleared.
+        std::fs::remove_file(request()).unwrap();
+        h.expect(
+            &["--profile", "lab", "set-autostart", "on"],
+            "Connect at login for lab: on\n",
+            0,
+        );
+        assert!(!request().exists());
+        assert_eq!(h.login.calls().len(), 1);
+        assert_eq!(h.launchctl.calls().len(), 2);
+
+        // Registration refused: the request and the previous choice are put back.
+        h.login.set_status(&agent, LoginStatus::NotRegistered);
+        h.login
+            .script_register(&agent, Err(AppleError::from_nserror("d", 1, "denied")));
+        h.expect(
+            &["--profile", "lab", "set-autostart", "on"],
+            "Could not change automatic connection: denied\n",
+            1,
+        );
+        assert_eq!(prefs().as_deref(), Some(r#"{"connectAtLogin":true}"#)); // was on
+        assert!(!request().exists());
+        h.expect(
+            &["--profile", "lab", "set-autostart", "off"],
+            "Connect at login for lab: off\n",
+            0,
+        );
+        h.login.set_status(&agent, LoginStatus::RequiresApproval);
+        h.expect(
+            &["--profile", "lab", "set-autostart", "on"],
+            "Could not change automatic connection: OFTC login agent is requires-approval\n",
+            1,
+        );
+        assert_eq!(prefs().as_deref(), Some(r#"{"connectAtLogin":false}"#));
+        assert!(!request().exists());
+    }
+
+    /// The login agent starts a supervisor process for each profile that asks to
+    /// connect, and one that does not is left alone.
+    #[test]
+    fn supervise_autostart_starts_one_supervisor_per_profile_that_connects() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = Harness::new();
+        let disabled = "OFTC automatic VPN connection is disabled for every profile\n";
+        h.expect(&["supervise-autostart"], disabled, 0);
+        two_profiles(&h);
+        // The "executable" records how it was started in the profile's log.
+        let script = h.dir.0.join("fake-agent");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"args=$* bundled=${OFTC_BUNDLED_AGENT-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::lease::make_private_dir(&h.env.logs_dir()).unwrap();
+        let logs = h.env.logs_dir();
+        let log = |id: &str| std::fs::read_to_string(logs.join(format!("{id}.log"))).ok();
+
+        // Nothing asked to connect yet.
+        h.env = h.env.clone().with_exe(&script);
+        h.expect(&["supervise-autostart"], disabled, 0);
+        // Registering the agent leaves a request that keeps that registration from
+        // opening a sign-in; it is spent by the first start.
+        h.expect(
+            &["--profile", "lab", "set-autostart", "on"],
+            "Connect at login for lab: on\n",
+            0,
+        );
+        h.expect(&["supervise-autostart"], disabled, 0);
+        assert_eq!(log("lab"), None);
+
+        // The agent is told the marker is gone for the child, whatever it inherited.
+        std::env::set_var("OFTC_BUNDLED_AGENT", "1");
+        h.expect(&["supervise-autostart"], "OFTC supervisors exited\n", 0);
+        std::env::remove_var("OFTC_BUNDLED_AGENT");
+        assert_eq!(
+            log("lab").as_deref(),
+            Some("args=--profile lab supervise-profile bundled=unset\n")
+        );
+        assert_eq!(log("example-office"), None);
+        let mode = std::fs::metadata(logs.join("lab.log"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A second profile that connects runs beside the first; one that cannot be
+        // started is reported and the rest still run.
+        h.expect(
+            &["--profile", "example-office", "set-autostart", "on"],
+            "Connect at login for example-office: on\n",
+            0,
+        );
+        h.expect(&["supervise-autostart"], "OFTC supervisors exited\n", 0);
+        assert_eq!(
+            log("example-office").as_deref(),
+            Some("args=--profile example-office supervise-profile bundled=unset\n")
+        );
+        h.env = h.env.clone().with_exe(&h.dir.0.join("missing"));
+        h.expect(
+            &["supervise-autostart"],
+            &format!("Could not start supervisor for example-office\nCould not start supervisor for lab\n{disabled}"),
+            0,
+        );
+        // With no executable to start, a profile that wants to connect is skipped.
+        h.env = HostEnv::new("com.example.oftc", &h.dir.0).unwrap();
+        h.expect(&["supervise-autostart"], disabled, 0);
     }
 }

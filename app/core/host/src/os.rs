@@ -1,7 +1,8 @@
-//! The host's `unsafe` code: the terminal secret prompt and the user id. The
-//! file-lock, signal and process calls land here with the supervisor.
+//! The host's `unsafe` code: the terminal secret prompt, the user id, advisory file
+//! locks, a liveness probe and stdio redirection. Signal handling lands here with
+//! the supervisor that needs it.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
@@ -68,4 +69,38 @@ impl SecretPrompt for TtyPrompt {
 pub fn uid() -> u32 {
     // SAFETY: `getuid` takes no arguments, cannot fail and touches no memory.
     unsafe { libc::getuid() }
+}
+
+/// Takes the exclusive advisory lock on `file` without waiting: true if this call
+/// holds it. It is `flock(2)`, the lock type the Swift supervisor holds, so the two
+/// exclude each other.
+pub fn try_lock(file: &File) -> bool {
+    // SAFETY: `file` owns an open descriptor for the whole call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Releases a lock taken with [`try_lock`] (closing the file does too).
+pub fn unlock(file: &File) {
+    // SAFETY: `file` owns an open descriptor for the whole call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+/// Whether `kill(pid, 0)` succeeds: the process exists and may be signalled. A
+/// process of another user counts as gone, as the Swift status reader had it.
+pub fn process_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The effective user id, to check that a log file is ours.
+pub fn euid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
+    unsafe { libc::geteuid() }
+}
+
+/// Points this process's stdout and stderr at `file`.
+pub fn redirect_stdio(file: &File) -> bool {
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is open for the call; `dup2` copies it onto the standard descriptors.
+    unsafe { libc::dup2(fd, libc::STDOUT_FILENO) >= 0 && libc::dup2(fd, libc::STDERR_FILENO) >= 0 }
 }

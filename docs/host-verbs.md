@@ -45,6 +45,9 @@ FortiClient profile for the same gateway, or the gateway itself.
 | `preflight <gateway> <32-hex-UID>` | the provider's stage line when it starts with `preflight_passed`; the tunnel is stopped; exit 0 | any other stage line, `Provider preflight did not report a stage before timeout` (45 s), `PSK unavailable in OFTC Keychain service`, `No OFTC configuration; run install-config`, `OFTC configuration or status changed before start`, `Start request failed; ...`; exit 1. `Expected a 32-character hexadecimal UID`, `Invalid preflight input`, `Could not make preflight envelope`; exit 2 |
 | `start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]` | `Live start requested; inspect status before any fresh-token retry`; exit 0 | `SAML bootstrap failed`, `OFTC configuration unavailable or VPN already active`, `PSK unavailable in OFTC Keychain service`, `No OFTC configuration; run install-config`, `OFTC configuration or status changed before start`, `Start request failed; acquire a fresh token before another live attempt`; exit 1. Usage, exit 2, for a port outside 1-65535, an empty gateway, or flags the provider would refuse |
 | `start-profile [flags]` | as `start-live`, with the selected profile's gateway, port and transport (`--tcp` is implied by a TCP profile); usage (exit 2) is checked after the profile is found | as `start-live`, plus the profile errors |
+| `stop` | `Stop requested` after asking the supervisor to stand down (its lease id is copied from `supervisor.lock` to `supervisor.stop`) and stopping the tunnel; `OFTC configuration absent` (exit 0) when the profile has no VPN entry | `Could not signal OFTC supervisor; VPN left running` (the lock holds something that is not a lease id, or the request cannot be written; the tunnel is not touched), `Could not load VPN configuration`, `Multiple OFTC configurations; refusing to guess`, or the profile errors above; exit 1 |
+| `set-autostart on\|off` | `Connect at login for <id>: on\|off`; exit 0. `on` also registers the login agent without starting a sign-in (see below) | `Could not change automatic connection: <reason>`, exit 1: the preference or request file could not be written, or registration failed (`OFTC login agent is requires-approval`, `... is disabled`, the system's description); on a failed registration the previous choice is restored |
+| `supervise-autostart` | run by the login agent: starts `OFTCAgent --profile <id> supervise-profile` for each profile that should connect, waits for them, prints `OFTC supervisors exited`; exit 0. With none: `OFTC automatic VPN connection is disabled for every profile`, exit 0. `Could not start supervisor for <id>` is printed for one that would not start | `Could not open the OFTC supervisor log`, exit 1 (under launchd only) |
 | `export-profiles [id...]` | the `.oftc` bundle of the named profiles (all when none) on stdout, PSKs included; exit 0 | `OFTC profile unavailable: no profile named <id>`, `No OFTC profiles to export`, `PSK unavailable for <name>; nothing exported` (nothing is written); exit 1 |
 | `import-profiles` | reads a bundle from stdin (at most 64 KiB, 16 profiles); one line per profile, `Imported <name>: id=<id>` or `Skipped <name>: already configured` (a gateway that has a profile keeps it and its PSK); exit 0 | the bundle's message (`That file isn't an OFTC profile file`, `...from a newer OFTC; update OFTC and try again`, `...is too large`, `...contains no profiles`, `The profile "<name>" in that file has invalid settings`), `Could not save the profile "<name>"`; exit 1 |
 | `import-profile <FortiClient-profile>` | `FortiClient profile imported into OFTC configuration and Keychain: id=<id>`; exit 0 | `Could not import FortiClient profile`, `Imported profile has invalid connection settings`, `OFTC already has a profile for <gateway>`, `Could not save OFTC profile (a profile with that id may already exist)`, `Could not save OFTC Keychain PSK`; exit 1 |
@@ -53,7 +56,9 @@ FortiClient profile for the same gateway, or the gateway itself.
 `start-live` and `start-profile` sign in once through the browser and start once;
 they never retry. The envelope's expiry is read from the clock after the sign-in
 returns, so a long login cannot age it out. `supervise-live` and `supervise-profile`
-are still Swift.
+are still Swift (a `supervise-profile` with no `--profile` and `OFTC_BUNDLED_AGENT=1`, as
+an agent plist from before multi-profile support runs it, is handed to
+`supervise-autostart`).
 
 `oftc` parses `id=` from the `save-profile` line with `rsplit_once("id=")` and the
 `list-profiles` tab-separated fields; the menu classifies failures by the substrings
@@ -66,6 +71,16 @@ without handling the Keychain itself.
 
 `login-settings` and `unregister-menu-login` are not in the usage text (they never
 were); the verb table marks them hidden so the text stays byte-for-byte.
+`set-autostart on` with the agent not yet enabled leaves a one-use
+`agent-request.json` (`connect: false`, valid for 60 s) so that registering the agent
+does not itself open a browser; the next `supervise-autostart` consumes it. A fresh
+request decides, whatever it says; otherwise the profile's choice does. A request
+that cannot be decoded is left in place and ignored. Under launchd
+(`OFTC_BUNDLED_AGENT=1`) `supervise-autostart` first sends its own output to
+`~/Library/Logs/OFTC/agent.log`, and each supervisor it starts writes to
+`<id>.log` there (appended, mode 0600, never through a symlink); a direct run keeps
+its terminal.
+
 A profile's connect-at-login is its `connection-preferences.json`; with no such file,
 a profile that adopted the original layout inherits an enabled agent. A file that
 exists but cannot be decoded counts as off.
@@ -100,6 +115,30 @@ exists but cannot be decoded counts as off.
 The bundle format (`app/core/host/src/bundle.rs`) is byte-identical to what
 `ProfileBundle.swift` writes; `tests/fixtures/swift/bundle.oftc` is its output. The
 menu still reads bundles with the Swift decoder until its UI moves.
+
+- `set-autostart` reports a write failure with the operating system's error text
+  (`Permission denied (os error 13)`); Swift printed Foundation's description. The
+  agent log directory failing to be created reports `Could not open the OFTC
+  supervisor log`, where Swift printed Foundation's description.
+- `OFTC_BUNDLED_AGENT` is read once at start, into the host's environment, instead of
+  by each function.
+
+Files shared with older builds (a supervisor started by an old build keeps running
+while a new `stop` or menu reads its files): `supervisor.lock` (a `flock` on the file,
+which holds the lease id: 36 uppercase hex-and-hyphen characters, no newline),
+`supervisor.stop` (the same text), `supervisor-status.json` (`updated` counts seconds
+from 2001-01-01 UTC, not 1970), `connection-preferences.json`, `agent-request.json`
+and `<root>/saml.lock`. Swift-written copies are checked in under
+`app/core/host/tests/fixtures/swift/supervisor`; the Rust-written status and
+preference files under `fixtures/rust/supervisor` are decoded by the Swift readers in
+`build.sh`.
+
+## Reading the host's files from the menu
+
+`oftc_host_snapshot_json(bundle_id)` in `liboftc_host.a` returns every profile with its
+supervisor phase and connect-at-login choice as JSON, for the menu to read in process
+(free the string with `oftc_host_free`). The shape is documented in
+`app/core/host/src/snapshot.rs`. Nothing in the menu calls it yet.
 
 ## Still in Swift
 

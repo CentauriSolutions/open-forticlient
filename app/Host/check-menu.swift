@@ -9,31 +9,16 @@ import NetworkExtension
         defer { try? FileManager.default.removeItem(at: directory) }
         let intent = AgentIntent(bundleID: "test.oftc", directory: directory)
         // Upgrade fallback preserves an existing pre-menu agent. Once the
-        // explicit preference exists, it governs every unrequested launch.
-        precondition(intent.shouldStart(now: now))
-        precondition(!intent.connectAtLogin(legacyEnabled: false))
-        let fresh = AgentIntent(bundleID: "test.oftc", directory: directory.appendingPathComponent("fresh"))
-        precondition(!fresh.shouldStart(now: now, legacyEnabled: false)) // new profiles start off
+        // explicit preference exists, it governs. (Whether the agent starts a
+        // supervisor is decided in Rust; its tests cover the request rows.)
+        precondition(intent.connectAtLogin(legacyEnabled: true))
+        precondition(!intent.connectAtLogin(legacyEnabled: false)) // new profiles start off
         try intent.setConnectAtLogin(false)
-        precondition(!intent.shouldStart(now: now))
-        try intent.request(connect: true, now: now)
-        precondition(intent.shouldStart(now: now))
-        precondition(!intent.shouldStart(now: now)) // one-use request
-        try intent.request(connect: true, now: now)
-        precondition(!intent.shouldStart(now: now.addingTimeInterval(61)))
-        try intent.request(connect: true, now: now.addingTimeInterval(1))
-        precondition(!intent.shouldStart(now: now)) // clock rollback
-        try intent.setConnectAtLogin(true)
-        try intent.request(connect: false, now: now)
-        precondition(!intent.shouldStart(now: now)) // registration is idle
-        precondition(intent.shouldStart(now: now.addingTimeInterval(1)))
-        try intent.request(connect: true, now: now)
-        intent.cancelRequest()
-        try intent.setConnectAtLogin(false)
-        precondition(!intent.shouldStart(now: now))
-        try Data("invalid".utf8).write(to: directory.appendingPathComponent("connection-preferences.json"))
-        precondition(!intent.shouldStart(now: now)) // malformed preferences fail closed
         precondition(!intent.connectAtLogin(legacyEnabled: true))
+        try intent.setConnectAtLogin(true)
+        precondition(intent.connectAtLogin(legacyEnabled: false))
+        try Data("invalid".utf8).write(to: directory.appendingPathComponent("connection-preferences.json"))
+        precondition(!intent.connectAtLogin(legacyEnabled: true)) // malformed preferences fail closed
 
         precondition(MenuConnectionState.resolve(status: .connected, configured: true,
                                                 phase: .failed) == .connected)

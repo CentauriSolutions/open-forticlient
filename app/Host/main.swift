@@ -150,49 +150,21 @@ private func runLive(gateway: String, port: UInt32,
     dispatchMain()
 }
 
-// Runs as the login agent: starts a supervisor process for every profile whose
-// connect-at-login choice (or a one-use request) says to connect. Supervisors
-// serialize their own SAML sign-ins, so they can all start at once.
-private func superviseAutostart() -> Never {
-    do { try OFTCAgentService.redirectSupervisorOutput() }
-    catch { finish(error.localizedDescription, code: 1) }
-    var children: [Process] = []
-    for entry in allEntries() where OFTCAgentService.intent(for: entry).shouldStart(
-        legacyEnabled: entry.profile.adoptsUnkeyedVPNEntry == true) {
-        guard let executable = Bundle.main.executableURL else { continue }
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["--profile", entry.id, "supervise-profile"]
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "OFTC_BUNDLED_AGENT")
-        process.environment = environment
-        let logs = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/OFTC", isDirectory: true)
-        let logURL = logs.appendingPathComponent(entry.id + ".log")
-        if let descriptor = Optional(open(logURL.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)),
-           descriptor >= 0 {
-            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-            process.standardOutput = handle
-            process.standardError = handle
-        }
-        process.standardInput = FileHandle.nullDevice
-        do { try process.run(); children.append(process) }
-        catch { print("Could not start supervisor for \(entry.id)") }
-    }
-    if children.isEmpty { finish("OFTC automatic VPN connection is disabled for every profile") }
-    for process in children { process.waitUntilExit() }
-    finish("OFTC supervisors exited")
-}
-
 private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|check-update [url]|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [--stdin] [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
 // The verbs below are implemented in Rust (liboftc_hostlib.a) and the rest here. Keep
 // this list equal to the `rust` rows of `VERBS` in app/core/host/src/commands.rs; a
 // Rust test compares them. Rust also handles a leading `--profile <id>` for them.
-private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile", "install-config", "erase-profile", "preflight", "start-live", "start-profile", "status", "rekey-once", "rekey-ike-once", "rekey-counts", "remove-config", "export-profiles", "import-profiles", "import-profile", "migrate-psk"]
+private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile", "install-config", "erase-profile", "preflight", "start-live", "start-profile", "status", "rekey-once", "rekey-ike-once", "rekey-counts", "remove-config", "stop", "set-autostart", "supervise-autostart", "export-profiles", "import-profiles", "import-profile", "migrate-psk"]
 
 @_silgen_name("oftc_host_main")
 private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
                           _ bundleID: UnsafePointer<CChar>) -> Never
+
+// Hands `args` to the Rust host as if they had been the command line.
+private func runRust(_ args: [String]) -> Never {
+    var argv: [UnsafeMutablePointer<CChar>?] = (["OFTCAgent"] + args).map { strdup($0) } + [nil]
+    return appID.withCString { oftcHostMain(Int32(args.count + 1), &argv, $0) }
+}
 
 var args = Array(CommandLine.arguments.dropFirst())
 if let verb = args.first == "--profile" && args.count >= 3 ? args[2] : args.first,
@@ -235,16 +207,6 @@ case "quit-menu" where args.count == 1:
         Notification.Name(appID + ".quit-menu"), object: nil, deliverImmediately: true)
     finish("OFTC menu quit requested")
 
-case "set-autostart" where args.count == 2 && ["on", "off"].contains(args[1]):
-    let entry = requireEntry()
-    do { try OFTCAgentService.setConnectAtLogin(args[1] == "on", for: entry) }
-    catch { finish("Could not change automatic connection: \(error.localizedDescription)", code: 1) }
-    finish("Connect at login for \(entry.id): \(args[1])")
-
-case "supervise-autostart" where args.count == 1:
-    superviseAutostart()
-
-
 case "launcher-alias" where args.count == 2 && ["ensure", "remove"].contains(args[1]):
     if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }
     finish("Launcher alias \(args[1] == "ensure" ? "checked" : "removed")")
@@ -276,7 +238,7 @@ case "supervise-profile":
     // command without a profile; it now means "start the autostart set".
     if selectedProfile == nil,
        ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" {
-        superviseAutostart()
+        runRust(["supervise-autostart"])
     }
     do { try OFTCAgentService.redirectSupervisorOutput() }
     catch { finish(error.localizedDescription, code: 1) }
@@ -287,19 +249,6 @@ case "supervise-profile":
     }
     guard let (mode, insecure) = startMode(flags) else { finish(usage, code: 2) }
     runLive(gateway: profile.gateway, port: profile.samlPort, mode: mode, insecure: insecure)
-
-case "stop" where args.count == 1:
-    // Stopping a tunnel leaves its connect-at-login choice alone; that is a
-    // separate per-profile setting.
-    guard SupervisorLease.requestStop(directory: requireEntry().directory) else {
-        finish("Could not signal OFTC supervisor; VPN left running", code: 1)
-    }
-    loadManager { manager in
-        guard let manager else { finish("OFTC configuration absent") }
-        manager.connection.stopVPNTunnel()
-        finish("Stop requested")
-    }
-    dispatchMain()
 
 default:
     finish(usage, code: 2)
