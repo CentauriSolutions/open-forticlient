@@ -1,7 +1,7 @@
 //! Shared plumbing for the Objective-C backends: the only code here that is not
 //! specific to one framework. Kept small and generic on purpose.
 
-use std::panic::AssertUnwindSafe;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use objc2::rc::Retained;
 use objc2::Message;
@@ -66,6 +66,16 @@ pub(crate) fn catch<R>(f: impl FnOnce() -> R) -> Result<R, AppleError> {
             .unwrap_or_else(|| "unknown exception".to_string());
         AppleError::from_nserror("NSException", 0, reason)
     })
+}
+
+/// Run `f`, turning a Rust panic or an Objective-C exception into `false`.
+/// Both must stay out of `extern "C"` trampolines: a panic there aborts the
+/// process, and an exception unwinding through Rust is undefined behaviour.
+pub(crate) fn guarded(f: impl FnOnce()) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        objc2::exception::catch(AssertUnwindSafe(f)).is_ok()
+    }))
+    .unwrap_or(false)
 }
 
 /// Whether the calling thread is the main thread.
