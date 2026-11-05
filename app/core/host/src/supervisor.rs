@@ -221,7 +221,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Runs until the supervisor stops; returns what to print and the exit code.
-    pub fn run(mut self) -> (String, i32) {
+    pub fn run(&mut self) -> (String, i32) {
         self.d.signals.arm();
         self.attach_observer();
         self.diag("timer armed");
@@ -237,7 +237,8 @@ impl<'a> Supervisor<'a> {
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
             }
             if self.exit.is_none() && self.d.clock.now() >= next_tick {
-                next_tick += TICK;
+                // From now, not from the last tick: after a long sleep one tick is due, not hundreds.
+                next_tick = self.d.clock.now() + TICK;
                 self.tick();
             }
         }
@@ -626,9 +627,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    use oftc_apple::manager::{MockEntry, MockVpn, StartKind};
+    use oftc_apple::manager::{MockEntry, MockVpn, Result as VpnResult, StartKind};
     use oftc_host_bootstrap::TunnelProfile;
     use oftc_provider::envelope::encode_hbr1;
     use zeroize::Zeroizing;
@@ -698,6 +700,11 @@ mod tests {
         assert!(!policy.allow_recovery(&provider(409), at(599)));
         // The first has aged out at exactly the window.
         assert!(policy.allow_recovery(&provider(409), at(600)));
+        // After a sleep of hours every earlier recovery has aged out at once.
+        for _ in 0..3 {
+            assert!(policy.allow_recovery(&provider(409), at(100_000)));
+        }
+        assert!(!policy.allow_recovery(&provider(409), at(100_001)));
     }
 
     // --------------------------------------------------------------- the rig
@@ -733,25 +740,98 @@ mod tests {
         }
     }
 
-    struct Clk(Cell<Duration>);
+    /// Time that moves only when told, from any thread.
+    #[derive(Default)]
+    struct Clk(AtomicU64);
 
     impl Clock for Clk {
         fn unix_secs(&self) -> u64 {
-            BASE_UNIX + self.0.get().as_secs()
+            BASE_UNIX + self.now().as_secs()
         }
         fn now(&self) -> Duration {
-            self.0.get()
+            Duration::from_nanos(self.0.load(Ordering::SeqCst))
         }
         fn sleep(&self, duration: Duration) {
-            self.0.set(self.0.get() + duration);
+            self.0
+                .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
+        }
+    }
+
+    /// The mock with three knobs: entries it loads read the truth while the one the
+    /// supervisor holds reads "connected" once `stale` is set (loaded entries are
+    /// marked `enabled == false`); `start` can fail; and it records the timeout of
+    /// each disconnect-error fetch.
+    struct Tweaked {
+        inner: Arc<MockVpn>,
+        stale: AtomicBool,
+        fail_start: AtomicBool,
+        error_timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl VpnControl for Tweaked {
+        fn load_all(&self) -> VpnResult<Vec<VpnEntry>> {
+            let mut all = self.inner.load_all()?;
+            if self.stale.load(Ordering::SeqCst) {
+                all.iter_mut().for_each(|entry| entry.enabled = false);
+            }
+            Ok(all)
+        }
+        fn reload(&self, e: &VpnEntry) -> VpnResult<VpnEntry> {
+            self.inner.reload(e)
+        }
+        fn status(&self, e: &VpnEntry) -> VpnStatus {
+            if e.enabled && self.stale.load(Ordering::SeqCst) {
+                VpnStatus::Connected
+            } else {
+                self.inner.status(e)
+            }
+        }
+        fn create(&self, p: &str, k: &str, n: &str) -> VpnResult<()> {
+            self.inner.create(p, k, n)
+        }
+        fn set_enabled(&self, e: &VpnEntry, on: bool) -> VpnResult<()> {
+            self.inner.set_enabled(e, on)
+        }
+        fn remove(&self, e: &VpnEntry) -> VpnResult<()> {
+            self.inner.remove(e)
+        }
+        fn start(&self, e: &VpnEntry, o: oftc_apple::manager::StartOptions) -> VpnResult<()> {
+            if self.fail_start.load(Ordering::SeqCst) {
+                return Err(AppleError::CallbackFailed);
+            }
+            self.inner.start(e, o)
+        }
+        fn stop(&self, e: &VpnEntry) {
+            self.inner.stop(e)
+        }
+        fn send_provider_message(&self, e: &VpnEntry, m: &[u8], t: Duration) -> VpnResult<Vec<u8>> {
+            self.inner.send_provider_message(e, m, t)
+        }
+        fn last_disconnect_error(
+            &self,
+            e: &VpnEntry,
+            t: Duration,
+        ) -> VpnResult<Option<AppleError>> {
+            self.error_timeouts.lock().unwrap().push(t);
+            self.inner.last_disconnect_error(e, t)
+        }
+        fn observe_status(
+            &self,
+            e: &VpnEntry,
+            n: std::sync::mpsc::Sender<()>,
+        ) -> VpnResult<oftc_apple::manager::Subscription> {
+            self.inner.observe_status(e, n)
         }
     }
 
     struct Browser<'a> {
         clock: &'a Clk,
+        root: &'a std::path::Path,
         script: RefCell<VecDeque<Step>>,
         /// The clock at each sign-in, and what `cancelled` said after the step ran.
         calls: RefCell<Vec<(Duration, bool)>>,
+        /// Whether `saml.lock` was held while the browser was open.
+        lock_held: RefCell<Vec<bool>>,
     }
 
     impl Acquirer for Browser<'_> {
@@ -775,6 +855,8 @@ mod tests {
                 action();
             }
             self.calls.borrow_mut().push((at, cancelled()));
+            let busy = SamlLock::acquire(self.root, &mut || true, Duration::ZERO).is_none();
+            self.lock_held.borrow_mut().push(busy);
             match step.result {
                 Ok(()) => Ok(Zeroizing::new(
                     encode_hbr1(GATEWAY, UID, b"secret", b"token")
@@ -793,14 +875,18 @@ mod tests {
         root: PathBuf,
         entry: ProfileEntry,
         vpn: Arc<MockVpn>,
+        tweak: Arc<Tweaked>,
         mock: Arc<MockEntry>,
         keychain: MemoryKeychain,
-        clock: Clk,
+        clock: Arc<Clk>,
         launchctl: RecordingLaunchctl,
         signals: Arc<ManualSignals>,
         script: RefCell<VecDeque<Step>>,
         calls: RefCell<Vec<(Duration, bool)>>,
+        lock_held: RefCell<Vec<bool>>,
         reviews: RefCell<VecDeque<Trust>>,
+        /// Whether `saml.lock` was free each time the review was asked.
+        lock_free_at_review: RefCell<Vec<bool>>,
         asked: Cell<u32>,
         insecure: bool,
     }
@@ -819,15 +905,23 @@ mod tests {
                 _dir: dir,
                 root,
                 entry,
+                tweak: Arc::new(Tweaked {
+                    inner: vpn.clone(),
+                    stale: AtomicBool::new(false),
+                    fail_start: AtomicBool::new(false),
+                    error_timeouts: Mutex::new(Vec::new()),
+                }),
                 vpn,
                 mock,
                 keychain,
-                clock: Clk(Cell::new(Duration::ZERO)),
+                clock: Arc::new(Clk::default()),
                 launchctl: RecordingLaunchctl::new(true),
                 signals: Arc::new(ManualSignals::default()),
                 script: RefCell::new(VecDeque::new()),
                 calls: RefCell::new(Vec::new()),
+                lock_held: RefCell::new(Vec::new()),
                 reviews: RefCell::new(VecDeque::new()),
+                lock_free_at_review: RefCell::new(Vec::new()),
                 asked: Cell::new(0),
                 insecure: false,
             }
@@ -862,21 +956,25 @@ mod tests {
     fn with_supervisor<R>(rig: &Rig, body: impl FnOnce(&mut Supervisor) -> R) -> R {
         let browser = Browser {
             clock: &rig.clock,
+            root: &rig.root,
             script: std::mem::take(&mut *rig.script.borrow_mut()).into(),
             calls: RefCell::new(Vec::new()),
+            lock_held: RefCell::new(Vec::new()),
         };
         let review = |_: &str, _: u32, _: &str| {
             rig.asked.set(rig.asked.get() + 1);
+            let free = SamlLock::acquire(&rig.root, &mut || true, Duration::ZERO).is_some();
+            rig.lock_free_at_review.borrow_mut().push(free);
             rig.reviews
                 .borrow_mut()
                 .pop_front()
                 .unwrap_or(Trust::NotACertificateProblem)
         };
         let deps = Deps {
-            vpn: &*rig.vpn,
+            vpn: &*rig.tweak,
             keychain: &rig.keychain,
             acquirer: &browser,
-            clock: &rig.clock,
+            clock: &*rig.clock,
             session_id: &|| [7; 16],
             launchctl: &rig.launchctl,
             signals: &*rig.signals,
@@ -900,6 +998,9 @@ mod tests {
         rig.calls
             .borrow_mut()
             .extend(browser.calls.borrow().iter().copied());
+        rig.lock_held
+            .borrow_mut()
+            .extend(browser.lock_held.borrow().iter().copied());
         result
     }
 
@@ -945,16 +1046,17 @@ mod tests {
     }
 
     /// A stop request or SIGTERM while the browser is open abandons the sign-in:
-    /// `cancelled` is true when it is polled, nothing starts, nobody is asked.
+    /// `cancelled` is true when it is polled, nothing starts, nobody is asked (even
+    /// though the failure is the kind that normally leads to a certificate review).
     #[test]
     fn stop_while_signing_in() {
         for by_signal in [false, true] {
             let rig = Rig::new();
             let step = if by_signal {
                 let signals = rig.signals.clone();
-                Step::fail(AcquireFailure::Other).meanwhile(move || signals.raise())
+                Step::fail(AcquireFailure::BeforeBrowser).meanwhile(move || signals.raise())
             } else {
-                Step::fail(AcquireFailure::Other).meanwhile(rig.stop_request())
+                Step::fail(AcquireFailure::BeforeBrowser).meanwhile(rig.stop_request())
             };
             rig.script(vec![step]);
             with_supervisor(&rig, |s| {
@@ -1078,6 +1180,11 @@ mod tests {
                     assert_eq!(rig.phase(), Some(Phase::Connecting));
                 }
             });
+            // The system is given ten seconds to say why the tunnel dropped.
+            assert_eq!(
+                rig.tweak.error_timeouts.lock().unwrap()[..],
+                [Duration::from_secs(10)]
+            );
             assert_eq!(
                 rig.launchctl.disabled().len(),
                 usize::from(disabled),
@@ -1293,121 +1400,95 @@ mod tests {
     /// replaced after two fresh readings in a row say "disconnected".
     #[test]
     fn a_stale_connected_status_needs_two_fresh_disconnected_readings() {
-        use oftc_apple::manager::{Result as VpnResult, StartOptions as Opts, Subscription};
-        use std::sync::mpsc::Sender;
-
-        /// Entries it loads are marked by `enabled == false`; the one the supervisor
-        /// started with reads "connected" once told to, whatever the tunnel does.
-        struct Stale(Arc<MockVpn>, std::sync::atomic::AtomicBool);
-        impl VpnControl for Stale {
-            fn load_all(&self) -> VpnResult<Vec<VpnEntry>> {
-                let mut all = self.0.load_all()?;
-                for entry in &mut all {
-                    entry.enabled = false;
-                }
-                Ok(all)
-            }
-            fn reload(&self, e: &VpnEntry) -> VpnResult<VpnEntry> {
-                self.0.reload(e)
-            }
-            fn status(&self, e: &VpnEntry) -> VpnStatus {
-                if e.enabled && self.1.load(std::sync::atomic::Ordering::SeqCst) {
-                    VpnStatus::Connected
-                } else {
-                    self.0.status(e)
-                }
-            }
-            fn create(&self, p: &str, k: &str, n: &str) -> VpnResult<()> {
-                self.0.create(p, k, n)
-            }
-            fn set_enabled(&self, e: &VpnEntry, on: bool) -> VpnResult<()> {
-                self.0.set_enabled(e, on)
-            }
-            fn remove(&self, e: &VpnEntry) -> VpnResult<()> {
-                self.0.remove(e)
-            }
-            fn start(&self, e: &VpnEntry, o: Opts) -> VpnResult<()> {
-                self.0.start(e, o)
-            }
-            fn stop(&self, e: &VpnEntry) {
-                self.0.stop(e)
-            }
-            fn send_provider_message(
-                &self,
-                e: &VpnEntry,
-                m: &[u8],
-                t: Duration,
-            ) -> VpnResult<Vec<u8>> {
-                self.0.send_provider_message(e, m, t)
-            }
-            fn last_disconnect_error(
-                &self,
-                e: &VpnEntry,
-                t: Duration,
-            ) -> VpnResult<Option<AppleError>> {
-                self.0.last_disconnect_error(e, t)
-            }
-            fn observe_status(&self, e: &VpnEntry, n: Sender<()>) -> VpnResult<Subscription> {
-                self.0.observe_status(e, n)
-            }
-        }
-
         let rig = Rig::new();
-        let stale = Stale(rig.vpn.clone(), Default::default());
-        let browser = Browser {
-            clock: &rig.clock,
-            script: VecDeque::from([Step::ok()]).into(),
-            calls: RefCell::new(Vec::new()),
-        };
-        let deps = Deps {
-            vpn: &stale,
-            keychain: &rig.keychain,
-            acquirer: &browser,
-            clock: &rig.clock,
-            session_id: &|| [7; 16],
-            launchctl: &rig.launchctl,
-            signals: &*rig.signals,
-            review: &|_, _, _| Trust::NotACertificateProblem,
-            diagnostic: &|_| {},
-        };
-        let job = Job {
-            entry: &rig.entry,
-            provider_id: "com.example.oftc.provider".to_owned(),
-            vpn_entry: rig.vpn.load_all().unwrap().remove(0),
-            gateway: GATEWAY.to_owned(),
-            saml_port: 9443,
-            mode: crate::start::parse_start_flags(&[]).unwrap().0,
-            insecure: false,
-            root: &rig.root,
-        };
-        let mut s = Supervisor::new(
-            &deps,
-            job,
-            SupervisorLease::acquire(&rig.directory()).unwrap(),
-        );
-        // Once the tunnel is up, the held entry says connected whatever it does.
-        s.begin_attempt();
-        rig.mock.set_status(VpnStatus::Connected);
-        stale.1.store(true, std::sync::atomic::Ordering::SeqCst);
-        s.observe();
-        assert_eq!(rig.phase(), Some(Phase::Connected));
-        let five = |s: &mut Supervisor| (0..5).for_each(|_| s.tick());
-        rig.mock.set_status(VpnStatus::Disconnected);
-        five(&mut s); // one fresh disconnected reading
-        assert_eq!(exit(&s), None);
-        rig.mock.set_status(VpnStatus::Connected);
-        five(&mut s); // a fresh connected reading resets the count
-        rig.mock.set_status(VpnStatus::Disconnected);
-        five(&mut s);
-        assert_eq!(exit(&s), None);
-        five(&mut s); // the second in a row: accepted as a drop (no error, so it stays down)
-        assert_eq!(
-            exit(&s),
-            Some((
-                "VPN disconnected without a recoverable error; staying down",
-                0
-            ))
-        );
+        rig.script(vec![Step::ok()]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            // From here the held entry says connected whatever the tunnel does.
+            rig.tweak.stale.store(true, Ordering::SeqCst);
+            let five = |s: &mut Supervisor| (0..5).for_each(|_| s.tick());
+            rig.mock.set_status(VpnStatus::Disconnected);
+            five(s); // one fresh disconnected reading
+            assert_eq!(exit(s), None);
+            rig.mock.set_status(VpnStatus::Connected);
+            five(s); // a fresh connected reading resets the count
+            rig.mock.set_status(VpnStatus::Disconnected);
+            five(s);
+            assert_eq!(exit(s), None);
+            five(s); // the second in a row: a drop (no error, so it stays down)
+            assert_eq!(
+                exit(s),
+                Some((
+                    "VPN disconnected without a recoverable error; staying down",
+                    0
+                ))
+            );
+        });
+    }
+
+    /// The status record is rewritten every 30 ticks, so a long-lived supervisor's
+    /// record does not age out (readers distrust one older than 300 s).
+    #[test]
+    fn the_heartbeat_keeps_the_status_record_fresh() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok()]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            rig.advance(250);
+            for _ in 0..30 {
+                s.tick();
+            }
+            rig.advance(250); // 500 s after the connect, 250 s after the heartbeat
+            assert_eq!(rig.phase(), Some(Phase::Connected));
+        });
+    }
+
+    /// A start request that fails is final: the token may be spent.
+    #[test]
+    fn a_failed_start_request_is_final() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok()]);
+        rig.tweak.fail_start.store(true, Ordering::SeqCst);
+        with_supervisor(&rig, |s| {
+            s.begin_attempt();
+            assert_eq!(exit(s), Some(("VPN start failed; no token retry", 1)));
+        });
+        assert_eq!(rig.phase(), Some(Phase::Failed));
+        assert_eq!(rig.calls.borrow().len(), 1);
+    }
+
+    /// The browser step holds `saml.lock` (one sign-in at a time) and the review
+    /// prompt, which can stay open for minutes, does not.
+    #[test]
+    fn the_saml_lock_covers_the_browser_and_not_the_prompt() {
+        let rig = Rig::new();
+        rig.script(vec![Step::fail(AcquireFailure::BeforeBrowser)]);
+        with_supervisor(&rig, |s| s.begin_attempt());
+        assert_eq!(rig.lock_held.borrow()[..], [true]);
+        assert_eq!(rig.lock_free_at_review.borrow()[..], [true]);
+        // And the lock is free once the attempt is over.
+        assert!(SamlLock::acquire(&rig.root, &mut || true, Duration::ZERO).is_some());
+    }
+
+    /// A tunnel someone else starts while we wait to recover is not ours to stop.
+    #[test]
+    fn a_connection_we_no_longer_own_is_left_alone() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok()]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            rig.mock.set_last_error(Some(provider(409)));
+            rig.mock.set_status(VpnStatus::Disconnected);
+            s.observe();
+            rig.mock.set_status(VpnStatus::Connecting); // started elsewhere
+            rig.advance(2);
+            s.observe();
+            assert_eq!(
+                exit(s),
+                Some(("OFTC status changed before supervised start", 1))
+            );
+        });
+        assert_eq!(rig.mock.stops(), 0);
     }
 
     /// The runner: woken by status changes, it ends on a stop request.
@@ -1426,47 +1507,29 @@ mod tests {
             assert!(request_stop(&directory));
             mock.set_status(VpnStatus::Connected);
         });
-        let result = with_supervisor_run(&rig);
+        let result = with_supervisor(&rig, |s| s.run());
         helper.join().unwrap();
         assert_eq!(result, ("Supervisor stopped".to_owned(), 0));
         assert_eq!(rig.mock.stops(), 1);
         assert_eq!(rig.phase(), Some(Phase::Stopped));
     }
 
-    fn with_supervisor_run(rig: &Rig) -> (String, i32) {
-        let mut result = None;
-        with_supervisor_owned(rig, |s| result = Some(s.run()));
-        result.unwrap()
-    }
-
-    fn with_supervisor_owned(rig: &Rig, body: impl FnOnce(Supervisor)) {
-        let browser = Browser {
-            clock: &rig.clock,
-            script: std::mem::take(&mut *rig.script.borrow_mut()).into(),
-            calls: RefCell::new(Vec::new()),
-        };
-        let deps = Deps {
-            vpn: &*rig.vpn,
-            keychain: &rig.keychain,
-            acquirer: &browser,
-            clock: &rig.clock,
-            session_id: &|| [7; 16],
-            launchctl: &rig.launchctl,
-            signals: &*rig.signals,
-            review: &|_, _, _| Trust::NotACertificateProblem,
-            diagnostic: &|_| {},
-        };
-        let job = Job {
-            entry: &rig.entry,
-            provider_id: "com.example.oftc.provider".to_owned(),
-            vpn_entry: rig.vpn.load_all().unwrap().remove(0),
-            gateway: GATEWAY.to_owned(),
-            saml_port: 9443,
-            mode: crate::start::parse_start_flags(&[]).unwrap().0,
-            insecure: false,
-            root: &rig.root,
-        };
-        let lease = SupervisorLease::acquire(&rig.directory()).unwrap();
-        body(Supervisor::new(&deps, job, lease));
+    /// With no status change at all, the once-a-second tick alone ends a start that
+    /// runs past its deadline.
+    #[test]
+    fn run_ticks_observe_without_any_status_event() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok()]);
+        let (mock, clock) = (rig.mock.clone(), rig.clock.clone());
+        let helper = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while mock.started().is_empty() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            clock.sleep(Duration::from_secs(100)); // no event: only the tick can notice
+        });
+        let result = with_supervisor(&rig, |s| s.run());
+        helper.join().unwrap();
+        assert_eq!(result, ("VPN start deadline expired".to_owned(), 1));
     }
 }

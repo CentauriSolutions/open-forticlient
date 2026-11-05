@@ -52,19 +52,20 @@ impl Acquirer for SamlAcquirer {
 /// Wall-clock time and waiting, so polling loops and envelope expiry are testable.
 pub trait Clock {
     fn unix_secs(&self) -> u64;
-    /// A monotonic reading, for deadlines.
+    /// A monotonic reading that keeps counting while the Mac sleeps, for deadlines
+    /// and the recovery window (`Instant` does not count sleep on macOS).
     fn now(&self) -> Duration;
     fn sleep(&self, duration: Duration);
 }
 
 pub struct SystemClock {
-    start: std::time::Instant,
+    start: Duration,
 }
 
 impl SystemClock {
     pub fn new() -> SystemClock {
         SystemClock {
-            start: std::time::Instant::now(),
+            start: crate::os::monotonic(),
         }
     }
 }
@@ -83,7 +84,7 @@ impl Clock for SystemClock {
     }
 
     fn now(&self) -> Duration {
-        self.start.elapsed()
+        crate::os::monotonic().saturating_sub(self.start)
     }
 
     fn sleep(&self, duration: Duration) {

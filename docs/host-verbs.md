@@ -90,9 +90,11 @@ Differences from the Swift supervisor (each deliberate):
   request and SIGINT/SIGTERM every 100 ms and abandons the browser wait, and the
   loop notices a stop or signal within one second otherwise (up to 10 s while it waits
   for the disconnect error, which has that timeout). Swift exited from the main queue.
-- Deadlines (390 s, 90 s, 2 s, 1 s…30 s) use the monotonic clock; Swift used wall-clock
-  `Date`, so a Mac that slept through a deadline expired it on wake and now does not
-  (whether the monotonic clock counts sleep is the platform's).
+- Deadlines and the three-in-ten-minutes recovery window use a clock that keeps
+  counting while the Mac sleeps (`CLOCK_MONOTONIC`, as Swift's wall-clock `Date` did),
+  so a wake after a long sleep expires a pending deadline, and an `overslept` wake
+  does not leave old recoveries counted forever. `std::time::Instant` is not used: it
+  stops during sleep on macOS.
 - The "preference refresh timed out" diagnostic is gone: the reload carries its own
   timeout. The heartbeat diagnostic prints status words, not raw numbers.
 - A missing or unusable PSK is the same failure as a failed sign-in (Swift's

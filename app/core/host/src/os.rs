@@ -97,6 +97,18 @@ pub fn process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Time since an arbitrary point, counting while the machine sleeps (macOS's
+/// `CLOCK_MONOTONIC`; `std::time::Instant` is `CLOCK_UPTIME_RAW` and does not).
+pub fn monotonic() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
 /// The effective user id, to check that a log file is ours.
 pub fn euid() -> u32 {
     // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
@@ -152,5 +164,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(OsSignals.raised());
+    }
+
+    /// The reading moves with real time, and never backwards.
+    #[test]
+    fn monotonic_advances_with_real_time() {
+        let before = monotonic();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(monotonic() >= before + std::time::Duration::from_millis(20));
     }
 }
