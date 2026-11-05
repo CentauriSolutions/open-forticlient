@@ -21,13 +21,40 @@ use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
 use oftc_host::out::Out;
 use oftc_host::registry::{forticlient_name_for_gateway, FORTICLIENT_VPN_PLIST};
-use oftc_host::TtyPrompt;
+use oftc_host::trust::{
+    ChainProbe, ChildPrompt, OpensslChainSource, OpensslText, ProcessChild, Reviewer,
+    SystemTrustEvaluator,
+};
+use oftc_host::{OsSignals, TtyPrompt};
 use oftc_provider::envelope::{LIVE_KEY, MODE_KEY, PREFLIGHT_KEY};
 use zeroize::Zeroizing;
 
 // The C entry the Swift setup window still calls. Re-exported so the symbols are
 // in this one static library; `oftc-migration` is no longer linked on its own.
 pub use oftc_migration::{oftc_migrate_free, oftc_migrate_profile_psk};
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *const std::ffi::c_void;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+/// Whether a user is logged in to a GUI session, so a window can be shown. The
+/// supervisor started by a login agent before login has nobody to ask.
+fn has_gui_session() -> bool {
+    // SAFETY: returns a retained dictionary or null; a non-null one is released here.
+    let session = unsafe { CGSessionCopyCurrentDictionary() };
+    if session.is_null() {
+        return false;
+    }
+    // SAFETY: `session` is a live Core Foundation object we own.
+    unsafe { CFRelease(session) };
+    true
+}
 
 /// The installed FortiClient's profiles, through `oftc-migration`.
 struct InstalledFortiClient;
@@ -61,6 +88,29 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 mode: MODE_KEY.to_owned(),
             });
             let clock = SystemClock::new();
+            // Untrusted gateway certificates are shown by a short-lived child of this
+            // executable: the supervisor's worker threads cannot build an AppKit window.
+            let text = OpensslText;
+            let source = OpensslChainSource::default();
+            let probe = ChainProbe {
+                source: &source,
+                evaluator: &SystemTrustEvaluator,
+                text: &text,
+            };
+            let child = ProcessChild {
+                executable: env.exe().map(Into::into).unwrap_or_default(),
+            };
+            let prompt = ChildPrompt {
+                child: &child,
+                has_gui_session: &has_gui_session,
+            };
+            let pin_dir = env.pin_dir();
+            let reviewer = Reviewer {
+                pin_dir: &pin_dir,
+                probe: &probe,
+                prompt: &prompt,
+                text: &text,
+            };
             let backends = Backends {
                 keychain: &keychain,
                 prompt: &TtyPrompt,
@@ -75,6 +125,11 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 extensions: &SystemExtensions,
                 login: &ServiceLoginItems,
                 launchctl: &SystemLaunchctl,
+                signals: &OsSignals,
+                review: &|host, port, name| reviewer.review(host, port, name),
+                diagnostic: &|line| {
+                    let _ = writeln!(std::io::stderr(), "{line}");
+                },
             };
             let mut input = stdin().lock();
             let mut io = Io {

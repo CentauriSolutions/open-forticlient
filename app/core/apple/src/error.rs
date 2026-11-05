@@ -68,3 +68,43 @@ impl fmt::Display for AppleError {
 }
 
 impl std::error::Error for AppleError {}
+
+/// The `NEVPNConnectionError` domain and the codes the reconnect supervisor treats
+/// as a drop worth recovering from. They are plain numbers here so the supervisor
+/// builds anywhere; a macOS test checks each against the SDK's own constants, since
+/// a wrong number would silently stop recovery.
+pub mod ne_vpn_error {
+    pub const DOMAIN: &str = "NEVPNConnectionErrorDomain";
+    pub const OVERSLEPT: i64 = 1;
+    pub const NO_NETWORK_AVAILABLE: i64 = 2;
+    pub const UNRECOVERABLE_NETWORK_CHANGE: i64 = 3;
+    pub const SERVER_NOT_RESPONDING: i64 = 6;
+    pub const SERVER_DEAD: i64 = 7;
+    pub const SERVER_DISCONNECTED: i64 = 16;
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::ne_vpn_error::*;
+    use objc2_network_extension::{NEVPNConnectionError as Sdk, NEVPNConnectionErrorDomain};
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_recoverable_codes_are_the_sdk_constants() {
+        for (ours, sdk) in [
+            (OVERSLEPT, Sdk::Overslept),
+            (NO_NETWORK_AVAILABLE, Sdk::NoNetworkAvailable),
+            (
+                UNRECOVERABLE_NETWORK_CHANGE,
+                Sdk::UnrecoverableNetworkChange,
+            ),
+            (SERVER_NOT_RESPONDING, Sdk::ServerNotResponding),
+            (SERVER_DEAD, Sdk::ServerDead),
+            (SERVER_DISCONNECTED, Sdk::ServerDisconnected),
+        ] {
+            assert_eq!(ours, sdk.0 as i64);
+        }
+        // SAFETY: a constant string the framework exports.
+        assert_eq!(DOMAIN, unsafe { NEVPNConnectionErrorDomain }.to_string());
+    }
+}

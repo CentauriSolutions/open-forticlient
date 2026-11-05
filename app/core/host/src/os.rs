@@ -1,17 +1,18 @@
 //! The host's `unsafe` code: the terminal secret prompt, the user id, advisory file
-//! locks, a liveness probe and stdio redirection. Signal handling lands here with
-//! the supervisor that needs it.
+//! locks, a liveness probe, stdio redirection and the supervisor's stop signals.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use zeroize::Zeroizing;
 
 use crate::commands::SecretPrompt;
 use crate::keychain::{read_psk_line, KeychainError};
+use crate::supervisor::Signals;
 
 /// Prompts on `/dev/tty` with echo off, so the secret never reaches the shell's
 /// history, a pipe or the screen.
@@ -96,6 +97,18 @@ pub fn process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Time since an arbitrary point, counting while the machine sleeps (macOS's
+/// `CLOCK_MONOTONIC`; `std::time::Instant` is `CLOCK_UPTIME_RAW` and does not).
+pub fn monotonic() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid out-pointer for the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
 /// The effective user id, to check that a log file is ours.
 pub fn euid() -> u32 {
     // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
@@ -107,4 +120,57 @@ pub fn redirect_stdio(file: &File) -> bool {
     let fd = file.as_raw_fd();
     // SAFETY: `fd` is open for the call; `dup2` copies it onto the standard descriptors.
     unsafe { libc::dup2(fd, libc::STDOUT_FILENO) >= 0 && libc::dup2(fd, libc::STDERR_FILENO) >= 0 }
+}
+
+/// Set by the handler; nothing else in the handler is async-signal-unsafe.
+static STOP_SIGNALLED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP_SIGNALLED.store(true, Ordering::SeqCst);
+}
+
+/// SIGINT and SIGTERM as a flag the supervisor polls once a second. A plain C handler
+/// is safe here because the supervisor path never starts AppKit; do not arm it from
+/// the menu.
+pub struct OsSignals;
+
+impl Signals for OsSignals {
+    fn arm(&self) {
+        let handler = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+            unsafe { libc::signal(signal, handler) };
+        }
+    }
+
+    fn raised(&self) -> bool {
+        STOP_SIGNALLED.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SIGTERM to ourselves is caught once armed, instead of ending the process.
+    #[test]
+    fn an_armed_sigterm_sets_the_flag_instead_of_killing_the_process() {
+        assert!(!OsSignals.raised());
+        OsSignals.arm();
+        // SAFETY: signals this process, which now handles SIGTERM.
+        unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !OsSignals.raised() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(OsSignals.raised());
+    }
+
+    /// The reading moves with real time, and never backwards.
+    #[test]
+    fn monotonic_advances_with_real_time() {
+        let before = monotonic();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(monotonic() >= before + std::time::Duration::from_millis(20));
+    }
 }

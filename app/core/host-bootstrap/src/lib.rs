@@ -1,7 +1,5 @@
-//! In-memory host SAML -> provider bootstrap library. No executable entry.
-//!
-//! Two front doors over one implementation: [`acquire`] for Rust callers, and
-//! the `oftc_host_*` C exports the Swift host still uses until it is removed.
+//! In-memory host SAML -> provider bootstrap library. No executable entry: the
+//! host's Rust code calls [`acquire`].
 
 mod log;
 mod uid;
@@ -14,16 +12,6 @@ use std::time::Duration;
 
 const MAGIC: &[u8; 4] = b"HBR1";
 const MAX_WIRE: usize = 4096;
-
-#[repr(C)]
-pub struct WireBuffer {
-    pub ptr: *mut u8,
-    pub len: usize,
-}
-
-impl Default for WireBuffer {
-    fn default() -> Self { Self { ptr: ptr::null_mut(), len: 0 } }
-}
 
 struct SecretString(String);
 impl Drop for SecretString {
@@ -73,13 +61,6 @@ fn encode(input: Input) -> Result<Box<[u8]>, ()> {
     Ok(wire)
 }
 
-fn leak_for_swift(wire: Box<[u8]>, output: &mut WireBuffer) {
-    let len = wire.len();
-    let raw = Box::into_raw(wire);
-    output.ptr = raw as *mut u8;
-    output.len = len;
-}
-
 pub use saml::TunnelProfile;
 
 /// The `HBR1` record [`acquire`] returns. It carries the PSK and the single-use
@@ -88,9 +69,6 @@ pub struct Wire(Box<[u8]>);
 
 impl Wire {
     pub fn as_bytes(&self) -> &[u8] { &self.0 }
-
-    /// Hand the allocation to a caller that now owns wiping it.
-    fn into_boxed(mut self) -> Box<[u8]> { std::mem::take(&mut self.0) }
 }
 
 impl Drop for Wire {
@@ -126,73 +104,23 @@ fn classify_saml_error(error: &(dyn std::error::Error + 'static)) -> AcquireFail
 /// five minutes), so read the clock for the envelope only after it returns.
 /// `profile` names the tunnel on the browser's callback page; the caller
 /// supplies it, nothing is read from the environment, a Keychain item or
-/// FortiClient's profile.
+/// FortiClient's profile. `cancelled` is polled while waiting for the browser; once
+/// it says true the sign-in is abandoned and the result is `Other`.
 pub fn acquire(gateway: String, psk: String, saml_port: u32, insecure: bool,
-               profile: TunnelProfile) -> Result<Wire, AcquireFailure> {
+               profile: TunnelProfile, cancelled: &dyn Fn() -> bool)
+    -> Result<Wire, AcquireFailure> {
     let psk = SecretString(psk);
     if psk.0.is_empty() || !valid_gateway(&gateway) {
         return Err(AcquireFailure::Other);
     }
     let cfg = saml::SamlConfig { server: gateway.clone(),
         saml_port, insecure, timeout: Duration::from_secs(300), profile };
-    let mut creds = saml::obtain(&cfg).map_err(|error| classify_saml_error(error.as_ref()))?;
+    let mut creds = saml::obtain(&cfg, cancelled).map_err(|error| classify_saml_error(error.as_ref()))?;
     let uid = std::mem::take(&mut creds.uid);
     let token = SecretString(std::mem::take(&mut creds.tokenid));
     encode(Input { gateway, uid, psk, token })
         .map(Wire)
         .map_err(|_| AcquireFailure::Other)
-}
-
-/// The Swift supervisor names the tunnel for the callback page through these
-/// two variables; the C entry turns them into the parameter [`acquire`] takes.
-fn profile_from_env() -> TunnelProfile {
-    let var = |name: &str| std::env::var(name).unwrap_or_default();
-    TunnelProfile { name: var("OFTC_PROFILE_NAME"), gateway: var("OFTC_PROFILE_GATEWAY") }
-}
-
-/// The caller supplies profile values already held in memory. This never reads
-/// FortiClient's profile or a Keychain item; the only environment it reads is
-/// the non-secret tunnel name for the callback page (`profile_from_env`).
-/// Invoking this entry performs the browser SSO flow; offline tests never do.
-/// Status 3 means the gateway could not be reached before the browser opened;
-/// it consumed no SAML token and can be retried with a bound. Other failures
-/// stay generic to avoid retrying after an uncertain SSO callback.
-#[no_mangle]
-pub unsafe extern "C" fn oftc_host_acquire(
-    gateway: *const u8, gateway_len: usize, psk: *const u8, psk_len: usize,
-    saml_port: u32, insecure: u8, output: *mut WireBuffer,
-) -> i32 {
-    if output.is_null() { return 1; }
-    *output = WireBuffer::default();
-    if gateway.is_null() || psk.is_null() || gateway_len == 0 || gateway_len > 253 ||
-        psk_len == 0 || psk_len > 1024 || saml_port == 0 || saml_port > 65535 || insecure > 1 {
-        return 1;
-    }
-    let gateway = match std::str::from_utf8(std::slice::from_raw_parts(gateway, gateway_len)) {
-        Ok(v) if valid_gateway(v) => v.to_owned(), _ => return 1,
-    };
-    let psk = match std::str::from_utf8(std::slice::from_raw_parts(psk, psk_len)) {
-        Ok(v) if !v.contains('\0') => v.to_owned(), _ => return 1,
-    };
-    let result = std::panic::catch_unwind(|| {
-        acquire(gateway, psk, saml_port, insecure != 0, profile_from_env())
-    });
-    match result {
-        Ok(Ok(wire)) => { leak_for_swift(wire.into_boxed(), &mut *output); 0 },
-        Ok(Err(AcquireFailure::BeforeBrowser)) => 3,
-        _ => 2,
-    }
-}
-
-/// The Swift host calls this immediately after copying into Data. The exact
-/// allocation length is required so even spare capacity cannot retain bytes.
-#[no_mangle]
-pub unsafe extern "C" fn oftc_host_free_wire(data: *mut u8, len: usize) {
-    if data.is_null() || len == 0 || len > MAX_WIRE { return; }
-    let slice = ptr::slice_from_raw_parts_mut(data, len);
-    let mut owned = Box::from_raw(slice);
-    wipe(&mut owned);
-    drop(owned);
 }
 
 #[cfg(test)]
@@ -220,19 +148,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_live_call_before_browser_if_input_invalid() {
-        let mut out = WireBuffer::default();
-        let status = unsafe { oftc_host_acquire(ptr::null(), 0, ptr::null(), 0, 0, 0, &mut out) };
-        assert_ne!(status, 0);
-        assert!(out.ptr.is_null());
-    }
-
-    #[test]
     fn acquire_rejects_invalid_input_before_any_network_or_browser() {
         // Port 0 on loopback: if a guard were removed the call would fall through
         // to a refused connection (BeforeBrowser), not a live network or browser.
         for (gateway, psk) in [("https://bad/", "PSK"), ("127.0.0.1", "")] {
-            let result = acquire(gateway.into(), psk.into(), 0, false, TunnelProfile::default());
+            let result = acquire(gateway.into(), psk.into(), 0, false, TunnelProfile::default(),
+                &|| false);
             assert_eq!(result.unwrap_err(), AcquireFailure::Other, "{gateway:?}");
         }
     }

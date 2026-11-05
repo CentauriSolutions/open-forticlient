@@ -11,7 +11,6 @@ fi
 app="$build/OFTC.app"
 bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
-app_frameworks="$app/Contents/Frameworks"
 cli="$build/oftc"
 [[ "$bundle_id" == "com.chris.openforticlient.oftc" ]] || {
     print -u2 'This release signs only the OFTC product bundle ID'; exit 2
@@ -96,14 +95,6 @@ PY
 
 cp "$APP_PROFILE" "$app/Contents/embedded.provisionprofile"
 cp "$EXTENSION_PROFILE" "$extension/Contents/embedded.provisionprofile"
-libraries=(
-    "$app_frameworks/liboftc_host_bootstrap.dylib"
-)
-for library in "${libraries[@]}"; do
-    [[ -f "$library" ]] || { print -u2 "Missing nested library: $library"; exit 2; }
-    codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$library"
-    codesign --verify --strict --verbose=2 "$library"
-done
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$cli"
 codesign --verify --strict --verbose=2 "$cli"
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$app/Contents/Helpers/oftc"
@@ -114,7 +105,7 @@ codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime \
     --entitlements "$tmpdir/app.entitlements" "$app"
 codesign --verify --strict --verbose=2 "$extension"
 codesign --verify --deep --strict --verbose=2 "$app"
-python3 - "$app" "$extension" "$cli" "$app/Contents/Helpers/oftc" "${libraries[@]}" <<'PY'
+python3 - "$app" "$extension" "$cli" "$app/Contents/Helpers/oftc" <<'PY'
 import subprocess
 import sys
 
@@ -131,7 +122,7 @@ for path in sys.argv[1:]:
     teams.add(team)
 if len(teams) != 1:
     sys.exit('Nested code has inconsistent Developer teams')
-print(f'App, provider, CLI, and {len(sys.argv) - 5} dylibs share one Developer ID team and timestamps')
+print('App, provider and CLIs share one Developer ID team and timestamps')
 PY
 print "Developer ID signed candidate: $app"
 print 'This script did not notarize, install, activate, or start the candidate.'

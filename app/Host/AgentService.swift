@@ -83,40 +83,12 @@ enum OFTCAgentService {
         }
     }
 
-    // An app-bundled plist cannot contain a per-user absolute log path.
-    // Redirect only the launchd-started supervisor; direct host commands keep
-    // their terminal output.
-    static func redirectSupervisorOutput(logName: String = "agent") throws {
-        guard ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" else { return }
-        let logDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/OFTC", isDirectory: true)
-        try FileManager.default.createDirectory(at: logDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        let log = logDirectory.appendingPathComponent(logName + ".log")
-        let descriptor = open(log.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
-        guard descriptor >= 0 else { throw AgentError.logUnavailable }
-        defer { close(descriptor) }
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_uid == geteuid(),
-              dup2(descriptor, STDOUT_FILENO) >= 0,
-              dup2(descriptor, STDERR_FILENO) >= 0 else {
-            throw AgentError.logUnavailable
-        }
-        setvbuf(stdout, nil, _IOLBF, 0)
-        setvbuf(stderr, nil, _IONBF, 0)
-    }
-
     private enum AgentError: LocalizedError {
         case unavailable(String)
-        case logUnavailable
 
         var errorDescription: String? {
             switch self {
             case .unavailable(let status): return "OFTC login agent is \(status)"
-            case .logUnavailable: return "Could not open the OFTC supervisor log"
             }
         }
     }

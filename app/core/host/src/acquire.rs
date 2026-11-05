@@ -8,7 +8,8 @@ use oftc_host_bootstrap::{AcquireFailure, TunnelProfile};
 use zeroize::Zeroizing;
 
 /// The browser sign-in: blocks until the user finishes, then returns the `HBR1`
-/// record the start envelope carries.
+/// record the start envelope carries. `cancelled` is polled while it waits for the
+/// browser; once it says true the sign-in is abandoned with `Other`.
 pub trait Acquirer {
     fn acquire(
         &self,
@@ -17,6 +18,7 @@ pub trait Acquirer {
         saml_port: u32,
         insecure: bool,
         profile: TunnelProfile,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure>;
 }
 
@@ -31,11 +33,18 @@ impl Acquirer for SamlAcquirer {
         saml_port: u32,
         insecure: bool,
         profile: TunnelProfile,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure> {
         // A Keychain item can hold any bytes; the sign-in takes text.
         let psk = String::from_utf8(psk.to_vec()).map_err(|_| AcquireFailure::Other)?;
-        let wire =
-            oftc_host_bootstrap::acquire(gateway.to_owned(), psk, saml_port, insecure, profile)?;
+        let wire = oftc_host_bootstrap::acquire(
+            gateway.to_owned(),
+            psk,
+            saml_port,
+            insecure,
+            profile,
+            cancelled,
+        )?;
         Ok(Zeroizing::new(wire.as_bytes().to_vec()))
     }
 }
@@ -43,19 +52,20 @@ impl Acquirer for SamlAcquirer {
 /// Wall-clock time and waiting, so polling loops and envelope expiry are testable.
 pub trait Clock {
     fn unix_secs(&self) -> u64;
-    /// A monotonic reading, for deadlines.
+    /// A monotonic reading that keeps counting while the Mac sleeps, for deadlines
+    /// and the recovery window (`Instant` does not count sleep on macOS).
     fn now(&self) -> Duration;
     fn sleep(&self, duration: Duration);
 }
 
 pub struct SystemClock {
-    start: std::time::Instant,
+    start: Duration,
 }
 
 impl SystemClock {
     pub fn new() -> SystemClock {
         SystemClock {
-            start: std::time::Instant::now(),
+            start: crate::os::monotonic(),
         }
     }
 }
@@ -74,7 +84,7 @@ impl Clock for SystemClock {
     }
 
     fn now(&self) -> Duration {
-        self.start.elapsed()
+        crate::os::monotonic().saturating_sub(self.start)
     }
 
     fn sleep(&self, duration: Duration) {

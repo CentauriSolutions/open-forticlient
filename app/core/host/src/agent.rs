@@ -27,19 +27,22 @@ pub fn agent_item() -> LoginItem {
     LoginItem::Agent(AGENT_PLIST.to_owned())
 }
 
-/// `launchctl`, for the one call the agent needs.
+/// `launchctl`, for the two calls the agent needs.
 pub trait Launchctl {
     /// `launchctl enable gui/<uid>/<label>`; true when it exited 0.
     fn enable(&self, label: &str) -> bool;
+    /// `launchctl disable gui/<uid>/<label>`; true when it exited 0. The supervisor
+    /// uses it to keep the login agent from reconnecting after an unexplained drop.
+    fn disable(&self, label: &str) -> bool;
 }
 
 /// `/bin/launchctl` in the current user's GUI domain.
 pub struct SystemLaunchctl;
 
-impl Launchctl for SystemLaunchctl {
-    fn enable(&self, label: &str) -> bool {
+impl SystemLaunchctl {
+    fn run(verb: &str, label: &str) -> bool {
         Command::new("/bin/launchctl")
-            .arg("enable")
+            .arg(verb)
             .arg(format!("gui/{}/{label}", crate::os::uid()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -48,10 +51,21 @@ impl Launchctl for SystemLaunchctl {
     }
 }
 
-/// A [`Launchctl`] that records the labels it was asked to enable.
+impl Launchctl for SystemLaunchctl {
+    fn enable(&self, label: &str) -> bool {
+        SystemLaunchctl::run("enable", label)
+    }
+
+    fn disable(&self, label: &str) -> bool {
+        SystemLaunchctl::run("disable", label)
+    }
+}
+
+/// A [`Launchctl`] that records the labels it was asked to enable or disable.
 pub struct RecordingLaunchctl {
     succeeds: bool,
     calls: Mutex<Vec<String>>,
+    disabled: Mutex<Vec<String>>,
 }
 
 impl RecordingLaunchctl {
@@ -59,17 +73,29 @@ impl RecordingLaunchctl {
         RecordingLaunchctl {
             succeeds,
             calls: Mutex::new(Vec::new()),
+            disabled: Mutex::new(Vec::new()),
         }
     }
 
+    /// The labels passed to `enable`.
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The labels passed to `disable`.
+    pub fn disabled(&self) -> Vec<String> {
+        self.disabled.lock().unwrap().clone()
     }
 }
 
 impl Launchctl for RecordingLaunchctl {
     fn enable(&self, label: &str) -> bool {
         self.calls.lock().unwrap().push(label.to_owned());
+        self.succeeds
+    }
+
+    fn disable(&self, label: &str) -> bool {
+        self.disabled.lock().unwrap().push(label.to_owned());
         self.succeeds
     }
 }

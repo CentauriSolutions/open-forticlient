@@ -6,7 +6,7 @@ arity, their output and their exit codes are a protocol: change them additively
 only. This page lists what is implemented in Rust (`app/core/host`, reached through
 `oftc_host_main` in `app/core/hostlib`); the golden table in
 `app/core/host/src/commands.rs` pins every line below, and a Rust test keeps the
-usage text and the Swift stub's verb list equal to the verb table there.
+usage text and the verbs `Host/main.swift` keeps equal to the verb table there.
 
 `OFTCAgent [--profile <id>] <verb> ...` The leading `--profile` selects a profile by
 id (1 to 32 of `a-z`, `0-9`, `-`, not starting or ending with `-`). Without it a verb
@@ -55,10 +55,56 @@ FortiClient profile for the same gateway, or the gateway itself.
 
 `start-live` and `start-profile` sign in once through the browser and start once;
 they never retry. The envelope's expiry is read from the clock after the sign-in
-returns, so a long login cannot age it out. `supervise-live` and `supervise-profile`
-are still Swift (a `supervise-profile` with no `--profile` and `OFTC_BUNDLED_AGENT=1`, as
-an agent plist from before multi-profile support runs it, is handed to
-`supervise-autostart`).
+returns, so a long login cannot age it out. A `supervise-profile` with no `--profile`
+and `OFTC_BUNDLED_AGENT=1`, as an agent plist from before multi-profile support runs
+it, is handed to `supervise-autostart`.
+
+## The reconnect supervisor
+
+`supervise-live <gateway> <saml-port> [flags]` and `supervise-profile [flags]` (the
+profile's own gateway, port and transport) take the profile's supervisor lease, sign
+in through the browser, start the tunnel once and keep it up. Before the lease they
+make `start-live`'s checks: `No OFTC configuration; run install-config`, `OFTC
+configuration unavailable or VPN already active`; a held lease is `Another OFTC
+supervisor is active`; all exit 1. It prints one line when it stops and exits with
+its code (`app/core/host/src/supervisor.rs`):
+
+| Exit 0 | Exit 1 |
+| --- | --- |
+| `Supervisor stopped` (a `stop` request, SIGINT or SIGTERM); `VPN disconnected without a recoverable error; staying down` (also runs `launchctl disable` on the login agent) | `Gateway certificate not trusted; supervisor stopped`, `Fresh SAML acquisition failed; supervisor stopped`, `OFTC status changed before supervised start`, `OFTC configuration or status changed before start`, `OFTC configuration changed during supervision`, `VPN start failed; no token retry`, `VPN start deadline expired`, `VPN disconnected before establishment; no token retry`, `VPN disconnected; automatic recovery unavailable` |
+
+A token is single-use, so only a gateway that was unreachable *before* the browser
+opened is retried without the user (waits of 5, 10, 20, then 30 s, or 1 s after the
+user just trusted its certificate, until 390 s after the first attempt). A drop of an
+established tunnel is recovered with a fresh sign-in after 2 s when its error is one of
+the provider's established-SA codes or an `NEVPNConnectionError` overslept, no network,
+unrecoverable network change, server not responding, dead or disconnected, at most
+three times in ten minutes. An untrusted gateway certificate is shown by the Swift
+prompt (`OFTCAgent review-certificate`), once, only after such an unreachable result.
+Diagnostics go to stderr as `OFTC supervisor: <event>`.
+
+Differences from the Swift supervisor (each deliberate):
+
+- The sign-in, the preference reload and the disconnect-error fetch block the
+  supervisor's own thread instead of running on queues; the sign-in polls for a stop
+  request and SIGINT/SIGTERM every 100 ms and abandons the browser wait, and the
+  loop notices a stop or signal within one second otherwise (up to 10 s while it waits
+  for the disconnect error, which has that timeout). Swift exited from the main queue.
+- Deadlines and the three-in-ten-minutes recovery window use a clock that keeps
+  counting while the Mac sleeps (`CLOCK_MONOTONIC`, as Swift's wall-clock `Date` did),
+  so a wake after a long sleep expires a pending deadline, and an `overslept` wake
+  does not leave old recoveries counted forever. `std::time::Instant` is not used: it
+  stops during sleep on macOS.
+- The "preference refresh timed out" diagnostic is gone: the reload carries its own
+  timeout. The heartbeat diagnostic prints status words, not raw numbers.
+- A missing or unusable PSK is the same failure as a failed sign-in (Swift's
+  catch-all did the same).
+- The disconnect error is read through the host's wrapper, so any failure to fetch
+  it, not only a timeout, counts as "no error".
+
+The certificate check no longer uses `URLSession`: it reads the chain from
+`/usr/bin/openssl s_client` and asks `SecTrust` (`trust.rs`), so a system proxy is not
+followed; the gateway's verdict must be compared live (see the PR for #46).
 
 `oftc` parses `id=` from the `save-profile` line with `rsplit_once("id=")` and the
 `list-profiles` tab-separated fields; the menu classifies failures by the substrings
@@ -142,5 +188,7 @@ supervisor phase and connect-at-login choice as JSON, for the menu to read in pr
 
 ## Still in Swift
 
-Every other verb in the usage text (`OFTCAgent` with a verb not listed above), and
-the menu with no arguments, are unchanged. This page grows as verbs move.
+`Host/main.swift` keeps only what needs AppKit, bookmarks or `URLSession`: the menu (no
+arguments, `--after-install`, `preview-menu`, `render-menu-previews`, `quit-menu`),
+`review-certificate` (the certificate prompt the supervisor starts), `launcher-alias`
+and `check-update`. Everything else, including a bad command line, is Rust's.

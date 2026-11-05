@@ -2,7 +2,7 @@
 
 The `oftc` CLI in [`client/`](../client/) invokes the signed host executable.
 The host owns the nonsecret profile, Keychain PSK, browser SAML, macOS VPN
-configuration, and reconnect supervisor. The NetworkExtension provider owns
+configuration, and reconnect supervisor, all in Rust. The NetworkExtension provider owns
 the outer UDP/TCP transport, IKEv2/EAP, ESP, packet flow, routes, and DNS.
 Rust code reaches the provider through an opaque C ABI; Swift handles
 NetworkExtension.
@@ -19,13 +19,13 @@ start and are not saved in VPN preferences, files, command arguments, or logs.
 
 | Source | Responsibility |
 | --- | --- |
-| [`app/Host/`](../app/Host/) | SAML orchestration, profile registry and Keychain access, per-profile VPN configuration, reconnection. |
-| [`app/core/host/`](../app/core/host/), [`app/core/hostlib/`](../app/core/hostlib/) | The host verbs moving from Swift to Rust ([list](host-verbs.md)): profiles, registry, PSK Keychain. `hostlib` is the static library `OFTCAgent` links; its `oftc_host_main` runs them. |
+| [`app/Host/`](../app/Host/) | The UI edge: the menu bar app, welcome and onboarding windows, the certificate prompt, launcher alias and update check. `main.swift` hands every other verb to Rust. |
+| [`app/core/host/`](../app/core/host/), [`app/core/hostlib/`](../app/core/hostlib/) | Every host verb ([list](host-verbs.md)): profiles, registry, PSK Keychain, VPN entries, gateway trust and the reconnect supervisor. `hostlib` is the static library `OFTCAgent` links (no dylib); its `oftc_host_main` runs them. |
 | [`app/Provider/`](../app/Provider/) | Packet tunnel lifecycle and Rust FFI adapter. |
 | [`app/core/`](../app/core/) | IKEv2, EAP-MSCHAPv2, ESP, transport, lifecycle, and C ABI. |
-| [`app/bootstrap/`](../app/bootstrap/) | Host SAML, TLS, and device identity. |
-| [`app/migration/`](../app/migration/) | FortiClient profile decryption for explicit one-time import. |
-| [`app/support/`](../app/support/) | Shared host/provider bootstrap and strict tunnel settings mapping. |
+| [`app/core/host-bootstrap/`](../app/core/host-bootstrap/) | Host SAML, TLS pins, and device identity, a library of `oftc-host`. |
+| [`app/core/migration/`](../app/core/migration/) | FortiClient profile decryption for explicit one-time import. |
+| [`app/support/`](../app/support/) | Strict tunnel settings mapping. |
 
 Each configured VPN is a peer profile under `profiles/<id>/` in the host's
 Application Support directory, with its own nonsecret profile, macOS VPN
@@ -41,7 +41,7 @@ layout is migrated on first run and adopts the VPN entry that has no profile
 key. Route and DNS policy across profiles is not yet enforced; see Issue 40.
 
 The host can reconnect after a recoverable provider drop using fresh SSO when
-needed. An explicit user stop stays down until the next connect and does not
+needed (`app/core/host/src/supervisor.rs`; rules in [host-verbs.md](host-verbs.md)). An explicit user stop stays down until the next connect and does not
 change connect-at-login.
 
 Opening the host without arguments runs the resident AppKit menu bar app.
