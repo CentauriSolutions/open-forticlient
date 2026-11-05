@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct HostEnv {
     bundle_id: String,
+    home: PathBuf,
     root: PathBuf,
 }
 
@@ -20,6 +21,7 @@ impl HostEnv {
         }
         Some(HostEnv {
             bundle_id: bundle_id.to_owned(),
+            home: home.to_owned(),
             root: home.join("Library/Application Support").join(bundle_id),
         })
     }
@@ -34,6 +36,17 @@ impl HostEnv {
     /// `~/Library/Application Support/<bundle id>`: profiles live under it.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The system extension's bundle identifier: `<bundle id>.provider`.
+    pub fn provider_id(&self) -> String {
+        format!("{}.provider", self.bundle_id)
+    }
+
+    /// `~/.config/oftc/gateways`: the trusted gateway certificates, one file per
+    /// `<host>_<port>.pem`.
+    pub fn pin_dir(&self) -> PathBuf {
+        self.home.join(".config/oftc/gateways")
     }
 
     /// The Keychain service that holds the PSKs: `<bundle id>.psk`.
@@ -54,6 +67,11 @@ mod tests {
             Path::new("/Users/test/Library/Application Support/com.example.oftc")
         );
         assert_eq!(env.keychain_service(), "com.example.oftc.psk");
+        assert_eq!(env.provider_id(), "com.example.oftc.provider");
+        assert_eq!(
+            env.pin_dir(),
+            Path::new("/Users/test/.config/oftc/gateways")
+        );
         assert!(HostEnv::new("", Path::new("/Users/test")).is_none());
     }
 }

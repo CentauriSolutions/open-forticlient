@@ -11,12 +11,15 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::thread;
 
+use oftc_apple::manager::{NeVpnControl, StartKeys};
+use oftc_host::acquire::{random_session_id, SamlAcquirer, SystemClock};
 use oftc_host::commands::{run, Backends, FortiClientProfile, FortiClientProfiles, Io};
 use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
 use oftc_host::out::Out;
 use oftc_host::registry::{forticlient_name_for_gateway, FORTICLIENT_VPN_PLIST};
 use oftc_host::TtyPrompt;
+use oftc_provider::envelope::{LIVE_KEY, MODE_KEY, PREFLIGHT_KEY};
 use zeroize::Zeroizing;
 
 // The C entry the Swift setup window still calls. Re-exported so the symbols are
@@ -49,6 +52,12 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
     let code = match HostEnv::from_process(bundle_id) {
         Some(env) => {
             let keychain = SecKeychain::new(&env.keychain_service());
+            let vpn = NeVpnControl::new(StartKeys {
+                live: LIVE_KEY.to_owned(),
+                preflight: PREFLIGHT_KEY.to_owned(),
+                mode: MODE_KEY.to_owned(),
+            });
+            let clock = SystemClock::new();
             let backends = Backends {
                 keychain: &keychain,
                 prompt: &TtyPrompt,
@@ -56,6 +65,10 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 legacy_name: &|gateway| {
                     forticlient_name_for_gateway(FORTICLIENT_VPN_PLIST.as_ref(), gateway)
                 },
+                vpn: &vpn,
+                acquirer: &SamlAcquirer,
+                clock: &clock,
+                session_id: &random_session_id,
             };
             let mut input = stdin().lock();
             let mut io = Io {

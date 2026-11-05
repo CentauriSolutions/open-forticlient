@@ -229,8 +229,10 @@ mod tests {
 
     #[test]
     fn acquire_rejects_invalid_input_before_any_network_or_browser() {
-        for (gateway, psk) in [("https://bad/", "PSK"), ("vpn.example.com", "")] {
-            let result = acquire(gateway.into(), psk.into(), 8443, false, TunnelProfile::default());
+        // Port 0 on loopback: if a guard were removed the call would fall through
+        // to a refused connection (BeforeBrowser), not a live network or browser.
+        for (gateway, psk) in [("https://bad/", "PSK"), ("127.0.0.1", "")] {
+            let result = acquire(gateway.into(), psk.into(), 0, false, TunnelProfile::default());
             assert_eq!(result.unwrap_err(), AcquireFailure::Other, "{gateway:?}");
         }
     }
