@@ -6,6 +6,8 @@
 
 use std::error::Error;
 use std::fs;
+use oftc_ui_edge::{ProfilesResult, StatusDocument, Transport};
+use crate::edge;
 use crate::out::{errln, out, outln};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ const DEFAULT_APP: &str = "/Applications/Open Forticlient.app";
 const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
 const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
 const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
+/// The installed app's bundle identifier; the host's files and socket live under
+/// `~/Library/Application Support/<bundle id>/`.
+const BUNDLE_ID: &str = "com.chris.openforticlient.oftc";
+const SOCKET_FILE: &str = "host.sock";
 
 /// One configured VPN, as reported by the host's `list-profiles`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,14 +109,15 @@ any command with --app /absolute/path/OFTC.app.";
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Setup(PathBuf, SetupSource),
-    Profiles(PathBuf),
+    Profiles(PathBuf, bool),
     Export(PathBuf, Vec<String>, Option<PathBuf>),
     Connect(PathBuf, Vec<String>),
     Disconnect(PathBuf, Vec<String>),
     Remove(PathBuf, Vec<String>),
-    Status(PathBuf, Vec<String>),
+    Status(PathBuf, Vec<String>, bool),
     Autostart(PathBuf, String, bool),
     Uninstall { erase_profile: bool },
+    Version(PathBuf, bool),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -331,8 +338,21 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
     if (command == "help" && tail.len() == 1 || tail.is_empty()) && !explicit_app {
         return Ok(None);
     }
-    let extra = &tail[1..];
+    // `--json` asks for the host protocol's own object; only the verbs that have one
+    // take it.
+    let json = tail[1..].iter().any(|arg| arg == "--json");
+    let without_json: Vec<String>;
+    let extra = if json {
+        if !matches!(command, "status" | "profiles" | "--version") {
+            return Err("--json is only for status, profiles and --version".into());
+        }
+        without_json = tail[1..].iter().filter(|a| *a != "--json").cloned().collect();
+        &without_json[..]
+    } else {
+        &tail[1..]
+    };
     match command {
+        "--version" if extra.is_empty() => Ok(Some(Action::Version(app, json))),
         "setup" => {
             let source = match extra {
                 [] => SetupSource::Existing,
@@ -376,7 +396,7 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
             };
             Ok(Some(Action::Setup(app, source)))
         }
-        "profiles" if extra.is_empty() => Ok(Some(Action::Profiles(app))),
+        "profiles" if extra.is_empty() => Ok(Some(Action::Profiles(app, json))),
         "export" => {
             let mut names = Vec::new();
             let mut output = None;
@@ -399,11 +419,14 @@ fn parse(args: &[String]) -> Result<Option<Action>, String> {
             if extra.iter().any(|name| name.is_empty() || name.starts_with('-')) {
                 return Err(format!("{command} takes profile names only; run `oftc help`"));
             }
+            if json && !extra.is_empty() {
+                return Err("status --json lists every profile; it takes no profile names".into());
+            }
             let names = extra.to_vec();
             Ok(Some(match command {
                 "connect" => Action::Connect(app, names),
                 "disconnect" => Action::Disconnect(app, names),
-                _ => Action::Status(app, names),
+                _ => Action::Status(app, names, json),
             }))
         }
         "remove" => {
@@ -748,23 +771,151 @@ fn run_connect(app: &Path, names: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_profiles(app: &Path) -> Result<(), Box<dyn Error>> {
+/// `profiles`: asks the host over its socket; with the host not running, runs the
+/// host executable directly, as before. `--json` has no direct form.
+fn profiles_output(app: &Path, json: bool, socket: Option<&Path>) -> Result<String, Box<dyn Error>> {
+    let answered = via_socket(socket, Some("profiles"), json, |reply| {
+        let listed: ProfilesResult = serde_json::from_str(&reply.result)
+            .map_err(|_| edge::Error::Protocol("a profile list this oftc cannot read".into()))?;
+        Ok(if json {
+            reply.result.clone()
+        } else if listed.profiles.is_empty() {
+            NO_PROFILES.to_owned()
+        } else {
+            let lines: Vec<String> = listed
+                .profiles
+                .iter()
+                .map(|p| {
+                    let transport = if p.transport == Transport::Tcp { "tcp" } else { "udp" };
+                    profile_line(&p.name, &p.id, &p.gateway, p.saml_port, transport)
+                })
+                .collect();
+            lines.join("\n")
+        })
+    })?;
+    if let Some(text) = answered {
+        return Ok(text);
+    }
     let host = host_executable(app)?;
     let profiles = list_profiles(&host)?;
     if profiles.is_empty() {
-        outln!("No OFTC profiles are configured; run `oftc setup`.");
+        return Ok(NO_PROFILES.to_owned());
     }
-    for profile in profiles {
-        outln!(
-            "{} ({}) — {} port {} {}",
-            profile.name,
-            profile.id,
-            profile.gateway,
-            profile.port,
-            profile.transport.to_uppercase()
-        );
+    let lines: Vec<String> = profiles
+        .iter()
+        .map(|p| profile_line(&p.name, &p.id, &p.gateway, u32::from(p.port), &p.transport))
+        .collect();
+    Ok(lines.join("\n"))
+}
+
+fn profile_line(name: &str, id: &str, gateway: &str, port: u32, transport: &str) -> String {
+    format!("{name} ({id}) — {gateway} port {port} {}", transport.to_uppercase())
+}
+
+const NO_PROFILES: &str = "No OFTC profiles are configured; run `oftc setup`.";
+
+/// A failure that carries its own exit code and, with `--json`, the object to print.
+#[derive(Debug)]
+pub struct Exit {
+    code: i32,
+    message: String,
+    json: Option<String>,
+}
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
-    Ok(())
+}
+
+impl Error for Exit {}
+
+/// The process exit code for an error `run` returned: its own when it carries one,
+/// `1` otherwise.
+pub fn exit_code(error: &(dyn Error + 'static)) -> i32 {
+    error.downcast_ref::<Exit>().map_or(1, |exit| exit.code)
+}
+
+/// Prints what a command produced; a `--json` failure prints its object on stdout
+/// first, and the message goes to stderr through `main`.
+fn emit(result: Result<String, Box<dyn Error>>) -> Result<(), Box<dyn Error>> {
+    match result {
+        Ok(text) => {
+            outln!("{text}");
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(json) = error.downcast_ref::<Exit>().and_then(|e| e.json.as_deref()) {
+                outln!("{json}");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Where the host's socket would be for `app`: `<home>/Library/Application
+/// Support/<bundle id>/host.sock`. The bundle id is the app's own, so a development
+/// build talks to its own host.
+fn socket_path(app: &Path, home: &Path) -> PathBuf {
+    let bundle = if app == Path::new(DEFAULT_APP) {
+        None
+    } else {
+        plist_raw(&app.join("Contents/Info.plist"), "CFBundleIdentifier")
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+    };
+    home.join("Library/Application Support")
+        .join(bundle.as_deref().unwrap_or(BUNDLE_ID))
+        .join(SOCKET_FILE)
+}
+
+/// Asks the host `op` (none: only say hello) and returns the text to print, `render` turning the reply into
+/// it. `None` means the host is not reachable and the caller may run the verb
+/// directly (human output only: `--json` has no direct form, so there it is the
+/// failure the protocol names, `host_unavailable`, exit 5). A failure the host
+/// reports is never answered by the direct path: it is the answer.
+fn via_socket(
+    socket: Option<&Path>,
+    op: Option<&str>,
+    json: bool,
+    render: impl FnOnce(&edge::Reply) -> Result<String, edge::Error>,
+) -> Result<Option<String>, Exit> {
+    let outcome = match socket {
+        Some(path) => edge::call(path, op, edge::REPLY_TIMEOUT),
+        None => Err(edge::Error::Unreachable("no home directory".into())),
+    }
+    .and_then(|reply| render(&reply));
+    match outcome {
+        Ok(text) => Ok(Some(text)),
+        Err(edge::Error::Unreachable(_)) if !json => Ok(None),
+        Err(error) => {
+            let failure = edge::failure(error);
+            Err(Exit {
+                code: failure.exit,
+                message: failure.message,
+                json: json.then_some(failure.json),
+            })
+        }
+    }
+}
+
+/// `status --json`: the host's status document. Human `status` also reads state the
+/// document does not carry (rekey counts, the legacy agent), so it stays direct.
+fn status_json(socket: Option<&Path>) -> Result<String, Box<dyn Error>> {
+    let text = via_socket(socket, Some("status"), true, |reply| {
+        serde_json::from_str::<StatusDocument>(&reply.result)
+            .map_err(|_| edge::Error::Protocol("a status document this oftc cannot read".into()))?;
+        Ok(reply.result.clone())
+    })?;
+    Ok(text.unwrap_or_default())
+}
+
+/// `--version`: this client's version; with `--json`, the host's `hello` result.
+fn version_output(json: bool, socket: Option<&Path>) -> Result<String, Box<dyn Error>> {
+    if !json {
+        return Ok(format!("oftc {}", env!("CARGO_PKG_VERSION")));
+    }
+    let text = via_socket(socket, None, true, |reply| Ok(reply.hello_result.clone()))?;
+    Ok(text.unwrap_or_default())
 }
 
 fn run_status(app: &Path, names: &[String]) -> Result<(), Box<dyn Error>> {
@@ -1047,13 +1198,29 @@ fn uninstall_legacy_agent() -> Result<(), Box<dyn Error>> {
 }
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
+    run_with(args, &|app| {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        home.is_absolute().then(|| socket_path(app, &home))
+    })
+}
+
+/// [`run`] with the host socket's location chosen by `socket_for` (given the app the
+/// command targets), so a test never reaches a real host.
+fn run_with(
+    args: &[String],
+    socket_for: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
     let Some(action) = parse(args)? else {
         outln!("{HELP}");
         return Ok(());
     };
     match action {
+        Action::Version(app, json) => emit(version_output(json, socket_for(&app).as_deref())),
+        Action::Status(app, _, true) => emit(status_json(socket_for(&app).as_deref())),
         Action::Setup(app, source) => run_setup(&app, source),
-        Action::Profiles(app) => run_profiles(&app),
+        Action::Profiles(app, json) => {
+            emit(profiles_output(&app, json, socket_for(&app).as_deref()))
+        }
         Action::Export(app, names, output) => run_export(&app, &names, output.as_deref()),
         Action::Connect(app, names) => run_connect(&app, &names),
         Action::Remove(app, names) => run_remove(&app.canonicalize()?, &names),
@@ -1085,7 +1252,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Action::Status(app, names) => run_status(&app, &names),
+        Action::Status(app, names, _) => run_status(&app, &names),
         Action::Autostart(app, name, enabled) => {
             let host = host_executable(&app)?;
             let profile = select_profiles(list_profiles(&host)?, &[name])?.remove(0);
@@ -1181,7 +1348,7 @@ mod tests {
         );
         assert_eq!(
             parse(&words("status")).unwrap(),
-            Some(Action::Status(DEFAULT_APP.into(), Vec::new()))
+            Some(Action::Status(DEFAULT_APP.into(), Vec::new(), false))
         );
         assert_eq!(
             parse(&words("autostart warehouse on")).unwrap(),
@@ -1190,7 +1357,7 @@ mod tests {
         assert!(parse(&words("autostart warehouse maybe")).is_err());
         assert_eq!(
             parse(&words("profiles")).unwrap(),
-            Some(Action::Profiles(DEFAULT_APP.into()))
+            Some(Action::Profiles(DEFAULT_APP.into(), false))
         );
         assert_eq!(
             parse(&words("uninstall")).unwrap(),
@@ -1334,5 +1501,174 @@ mod tests {
             }
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    // The socket-or-direct choice. Nothing here reaches a real host: the socket is a
+    // temp-dir double and the direct path is a script in a fake app bundle.
+
+    use crate::edge::testutil::{self as double, Act, TempDir};
+
+    /// A fake app whose host prints one tab-separated profile for `list-profiles`.
+    fn fake_app(dir: &TempDir) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let app = dir.0.join("Fake.app");
+        let bin = app.join(HOST_BINARY);
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = list-profiles ] && printf 'lab\\tLab\\tlab.example.com\\t8443\\ttcp\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        app
+    }
+
+    fn profiles_result(id: u64) -> String {
+        let reply: serde_json::Value = serde_json::from_str(double::PROFILES_REPLY).unwrap();
+        oftc_ui_edge::reply_ok(id, &reply["result"])
+    }
+
+    fn exit_of(error: Box<dyn Error>) -> i32 {
+        exit_code(error.as_ref())
+    }
+
+    #[test]
+    fn profiles_use_the_socket_when_the_host_answers() {
+        let dir = TempDir::new();
+        double::host(&dir, profiles_result);
+        // The app has no host executable, so only the socket can have answered.
+        let text = profiles_output(Path::new("/nonexistent/Fake.app"), false, Some(&dir.socket()));
+        assert_eq!(text.unwrap(), "Office VPN (c2) — vpn.example.com port 9443 UDP");
+    }
+
+    #[test]
+    fn profiles_fall_back_to_the_host_executable_when_no_host_runs() {
+        let dir = TempDir::new();
+        let app = fake_app(&dir);
+        let missing = dir.socket();
+        assert_eq!(
+            profiles_output(&app, false, Some(&missing)).unwrap(),
+            "Lab (lab) — lab.example.com port 8443 TCP"
+        );
+        // No home directory, so no socket path at all: the same fallback.
+        assert_eq!(
+            profiles_output(&app, false, None).unwrap(),
+            "Lab (lab) — lab.example.com port 8443 TCP"
+        );
+    }
+
+    /// `--json` prints the host's `result` untouched and has no direct form: without a
+    /// host it is `host_unavailable`, exit 5, with the protocol's error object.
+    #[test]
+    fn profiles_json_is_the_hosts_result_or_host_unavailable() {
+        let dir = TempDir::new();
+        let app = fake_app(&dir);
+        double::host(&dir, profiles_result);
+        let reply: serde_json::Value = serde_json::from_str(double::PROFILES_REPLY).unwrap();
+        assert_eq!(
+            profiles_output(&app, true, Some(&dir.socket())).unwrap(),
+            reply["result"].to_string()
+        );
+
+        let empty = TempDir::new();
+        let error = profiles_output(&app, true, Some(&empty.socket())).unwrap_err();
+        let exit = error.downcast_ref::<Exit>().unwrap();
+        assert_eq!(exit.code, 5);
+        let object: serde_json::Value = serde_json::from_str(exit.json.as_ref().unwrap()).unwrap();
+        assert_eq!(object["error"]["code"], "host_unavailable");
+        assert_eq!(object["error"]["exit"], 5);
+    }
+
+    /// A failure the host reports is the answer: the working direct path is not tried,
+    /// the exit code is the host's, and with `--json` its line is printed as it came.
+    #[test]
+    fn a_host_failure_is_not_answered_by_the_direct_path() {
+        let dir = TempDir::new();
+        let app = fake_app(&dir);
+        let line = |id: u64| {
+            format!(r#"{{"id":{id},"ok":false,"error":{{"code":"approval_required","detail":"allow oftc","exit":4}}}}"#)
+        };
+        double::host(&dir, line);
+        let human = profiles_output(&app, false, Some(&dir.socket())).unwrap_err();
+        assert_eq!(exit_of(human), 4);
+
+        let dir = TempDir::new();
+        double::host(&dir, line);
+        let json = profiles_output(&app, true, Some(&dir.socket())).unwrap_err();
+        assert_eq!(json.downcast_ref::<Exit>().unwrap().json.as_deref(), Some(line(2).as_str()));
+    }
+
+    #[test]
+    fn a_version_mismatch_exits_5_and_prints_the_hosts_line() {
+        let dir = TempDir::new();
+        double::serve(&dir, |_| Act::Say(vec![double::UNSUPPORTED.to_owned()]));
+        let error = status_json(Some(&dir.socket())).unwrap_err();
+        let exit = error.downcast_ref::<Exit>().unwrap();
+        assert_eq!(exit.code, 5);
+        assert_eq!(exit.json.as_deref(), Some(double::UNSUPPORTED.trim_end()));
+    }
+
+    #[test]
+    fn status_json_is_the_document_and_an_unreadable_one_is_refused() {
+        let dir = TempDir::new();
+        double::host(&dir, |id| {
+            let document: oftc_ui_edge::StatusDocument =
+                serde_json::from_str(double::STATUS).unwrap();
+            oftc_ui_edge::reply_ok(id, &document)
+        });
+        let printed = status_json(Some(&dir.socket())).unwrap();
+        let document: oftc_ui_edge::StatusDocument = serde_json::from_str(double::STATUS).unwrap();
+        assert_eq!(printed, serde_json::to_string(&document).unwrap());
+
+        let dir = TempDir::new();
+        double::host(&dir, |id| format!(r#"{{"id":{id},"ok":true,"result":{{"schema":1}}}}"#));
+        assert_eq!(exit_of(status_json(Some(&dir.socket())).unwrap_err()), 5);
+    }
+
+    #[test]
+    fn version_is_local_and_with_json_the_hosts_hello() {
+        assert_eq!(
+            version_output(false, None).unwrap(),
+            format!("oftc {}", env!("CARGO_PKG_VERSION"))
+        );
+        let dir = TempDir::new();
+        double::host(&dir, |_| unreachable!("--version asks only hello"));
+        assert_eq!(
+            version_output(true, Some(&dir.socket())).unwrap(),
+            r#"{"protocol":1,"host":{"version":"0.9.0","build":"24","provider_build":"24"}}"#
+        );
+    }
+
+    #[test]
+    fn json_is_accepted_only_where_the_host_has_an_object() {
+        let json = |s: &str| parse(&words(s));
+        assert_eq!(
+            json("status --json").unwrap(),
+            Some(Action::Status(DEFAULT_APP.into(), Vec::new(), true))
+        );
+        assert_eq!(
+            json("--app /tmp/OFTC.app profiles --json").unwrap(),
+            Some(Action::Profiles("/tmp/OFTC.app".into(), true))
+        );
+        assert_eq!(
+            json("--version --json").unwrap(),
+            Some(Action::Version(DEFAULT_APP.into(), true))
+        );
+        assert_eq!(
+            json("--version").unwrap(),
+            Some(Action::Version(DEFAULT_APP.into(), false))
+        );
+        for refused in ["connect --json", "export --json", "status --json warehouse", "--version now"] {
+            assert!(json(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// The socket is under the app's own bundle id: the installed app's by default.
+    #[test]
+    fn the_socket_path_is_in_the_apps_support_directory() {
+        assert_eq!(
+            socket_path(Path::new(DEFAULT_APP), Path::new("/Users/test")),
+            Path::new("/Users/test/Library/Application Support/com.chris.openforticlient.oftc/host.sock")
+        );
     }
 }
