@@ -1,8 +1,10 @@
 import Foundation
 
-// Nonsecret startup intent shared by the CLI, menu app, and bundled agent.
-// Registration alone is not permission to open SSO: an explicit Connect
-// request or the separate connect-at-login preference is required.
+// Nonsecret startup intent the menu app reads and writes. The bundled agent's
+// decision to start a supervisor (a fresh request, else the connect-at-login
+// preference) is made in Rust (core/host/src/intent.rs). Registration alone is not
+// permission to open SSO: an explicit Connect request or the separate
+// connect-at-login preference is required.
 struct AgentIntent {
     struct Preferences: Codable { var connectAtLogin: Bool }
     private struct Request: Codable {
@@ -45,16 +47,4 @@ struct AgentIntent {
     }
 
     func cancelRequest() { try? FileManager.default.removeItem(at: requestURL) }
-
-    func shouldStart(now: Date = Date(), legacyEnabled: Bool = true) -> Bool {
-        if let data = try? Data(contentsOf: requestURL), data.count <= 4096,
-           let request = try? JSONDecoder().decode(Request.self, from: data) {
-            cancelRequest()
-            let age = now.timeIntervalSince(request.created)
-            if age >= 0, age < 60 { return request.connect }
-        }
-        // Preserve an already registered pre-menu-bar agent on upgrade. New
-        // connections initialize the preference explicitly before registration.
-        return connectAtLogin(legacyEnabled: legacyEnabled)
-    }
 }

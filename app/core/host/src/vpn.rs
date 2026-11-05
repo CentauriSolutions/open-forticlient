@@ -129,6 +129,27 @@ pub(crate) fn status(ctx: &Ctx) -> Outcome {
     }
 }
 
+/// `stop`: asks the supervisor to stand down, then stops the tunnel. The supervisor
+/// is told first so an intentional disconnect cannot start another sign-in; if it
+/// cannot be told, the VPN is left running.
+pub(crate) fn stop(ctx: &Ctx) -> Outcome {
+    let entry = match ctx.entry() {
+        Ok(entry) => entry,
+        Err(outcome) => return outcome,
+    };
+    if !crate::lease::request_stop(&registry::entry_directory(ctx.env.root(), &entry.id)) {
+        return fail("Could not signal OFTC supervisor; VPN left running");
+    }
+    match ctx.load_manager(&entry) {
+        Err(outcome) => outcome,
+        Ok(None) => ok("OFTC configuration absent"),
+        Ok(Some(vpn)) => {
+            ctx.vpn().stop(&vpn);
+            ok("Stop requested")
+        }
+    }
+}
+
 /// Removes every OFTC VPN entry, with or without a profile key, so it needs no
 /// profile.
 pub(crate) fn remove_config(ctx: &Ctx) -> Outcome {

@@ -18,10 +18,13 @@ pub mod commands;
 pub mod env;
 pub mod intent;
 pub mod keychain;
+pub mod lease;
 pub mod out;
 pub mod profile;
 pub mod registry;
+pub mod snapshot;
 pub mod start;
+pub mod status;
 pub mod trust;
 mod vpn;
 

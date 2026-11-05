@@ -1,0 +1,146 @@
+//! The read the menu makes of the host's files: every profile with what its
+//! supervisor is doing and whether it connects at login.
+//!
+//! Rust owns these formats (`profile.json`, the status record, the connect-at-login
+//! choice), so the UI asks for one JSON document instead of decoding them itself:
+//!
+//! ```json
+//! {"profiles":[{"id":"office","name":"Office","gateway":"vpn.example.com",
+//!   "samlPort":9443,"transport":"udp","adoptsUnkeyedVPNEntry":false,
+//!   "phase":null,"connectAtLogin":false}]}
+//! ```
+//!
+//! `phase` is `null` when no supervisor stands behind a status record. The original
+//! single-profile layout is migrated first (idempotent), as the menu has always done
+//! at startup.
+
+use std::path::Path;
+use std::time::SystemTime;
+
+use serde::Serialize;
+
+use crate::intent;
+use crate::registry;
+use crate::status::{Phase, StatusStore};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Item {
+    id: String,
+    name: String,
+    gateway: String,
+    saml_port: u32,
+    transport: &'static str,
+    #[serde(rename = "adoptsUnkeyedVPNEntry")]
+    adopts_unkeyed_vpn_entry: bool,
+    phase: Option<Phase>,
+    connect_at_login: bool,
+}
+
+#[derive(Serialize)]
+struct Snapshot {
+    profiles: Vec<Item>,
+}
+
+/// The snapshot as JSON. `agent_enabled` says whether the login agent is registered
+/// and enabled; it is asked at most once per call, and only if a profile adopted
+/// the original layout (the one kind that inherits it).
+pub fn json(
+    root: &Path,
+    legacy_name: &dyn Fn(&str) -> Option<String>,
+    agent_enabled: &dyn Fn() -> bool,
+    now: SystemTime,
+) -> String {
+    registry::migrate_legacy(root, legacy_name);
+    let mut agent: Option<bool> = None;
+    let profiles = registry::entries(root)
+        .into_iter()
+        .map(|entry| {
+            let directory = registry::entry_directory(root, &entry.id);
+            let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
+            let legacy = adopted && *agent.get_or_insert_with(agent_enabled);
+            Item {
+                name: entry.name().to_owned(),
+                gateway: entry.profile.gateway.clone(),
+                saml_port: entry.profile.saml_port,
+                transport: entry.profile.transport.as_str(),
+                adopts_unkeyed_vpn_entry: adopted,
+                phase: StatusStore::new(&directory).read(now).map(|s| s.phase),
+                connect_at_login: intent::connect_at_login(&directory, legacy),
+                id: entry.id,
+            }
+        })
+        .collect();
+    serde_json::to_string(&Snapshot { profiles })
+        .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lease::SupervisorLease;
+    use crate::profile::testutil::{fixture, TempDir};
+    use crate::profile::{Profile, Transport};
+    use serde_json::{json, Value};
+    use std::cell::Cell;
+    use std::fs;
+
+    #[test]
+    fn lists_profiles_with_phase_and_login_choice() {
+        let dir = TempDir::new("snapshot");
+        let root = &dir.0;
+        // A legacy layout (adopted, stored choice on), migrated by the snapshot itself.
+        for file in ["profile.json", "connection-preferences.json"] {
+            fs::create_dir_all(root).unwrap();
+            fs::copy(fixture("swift/legacy-root").join(file), root.join(file)).unwrap();
+        }
+        let lab = Profile::new("lab.example.com", 8443, Transport::Tcp, Some("Lab"), None).unwrap();
+        let lab = registry::add(root, &lab, None).unwrap();
+        // The lab supervisor is live, so its phase is believed.
+        let lease = SupervisorLease::acquire(&registry::entry_directory(root, &lab.id)).unwrap();
+        let now = SystemTime::now();
+        StatusStore::new(&registry::entry_directory(root, &lab.id)).publish(
+            Phase::Connected,
+            lease.id(),
+            now,
+        );
+
+        let asked = Cell::new(0);
+        let office =
+            |gateway: &str| (gateway == "vpn.example.com").then(|| "Example Office".to_owned());
+        let agent = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        let text = json(root, &office, &agent, now);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value,
+            json!({"profiles": [
+                {"id": "example-office", "name": "Example Office", "gateway": "vpn.example.com",
+                 "samlPort": 9443, "transport": "tcp", "adoptsUnkeyedVPNEntry": true,
+                 "phase": null, "connectAtLogin": true},
+                {"id": "lab", "name": "Lab", "gateway": "lab.example.com",
+                 "samlPort": 8443, "transport": "tcp", "adoptsUnkeyedVPNEntry": false,
+                 "phase": "connected", "connectAtLogin": false},
+            ]}),
+            "{text}"
+        );
+        // The agent is asked once however many profiles adopted the original layout.
+        assert_eq!(asked.get(), 1);
+        let office_dir = registry::entry_directory(root, "example-office");
+        fs::remove_file(office_dir.join("connection-preferences.json")).unwrap();
+        let text = json(root, &office, &agent, now);
+        assert_eq!(asked.get(), 2);
+        assert!(
+            text.contains(r#""phase":null,"connectAtLogin":true"#),
+            "{text}"
+        );
+        // With no profiles the document is still well formed.
+        let empty = TempDir::new("snapshot-empty");
+        assert_eq!(
+            json(&empty.0, &|_| None, &|| false, now),
+            r#"{"profiles":[]}"#
+        );
+    }
+}
