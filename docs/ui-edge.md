@@ -68,7 +68,11 @@ Design of D:
   true, `KeepAlive` true, `ProcessType` `Interactive`, `AbandonProcessGroup` true
   (see the risk in section 15: supervisors it starts must outlive it). A hidden
   verb pair `host serve` / `host restart` follows the existing `hidden(...)`
-  rows in `commands.rs`, so the usage text stays byte for byte.
+  rows in `commands.rs`, so the usage text stays byte for byte (a test now pins
+  the text). `host serve` arms SIGINT and SIGTERM and serves until one arrives;
+  `host restart` is `launchctl kickstart -k` of the host label, so the
+  `Launchctl::kickstart` seam lands with the verb in PR 2, not PR 5; with no plist
+  registered (PR 5) it reports that the service is not registered and exits 1.
 - It is registered by the same `register-agent` path (`agent.rs` already wraps
   `SMAppService.agent`), by `oftc setup`, the installer's postinstall, or the UI's
   first run. macOS asks the user to allow background items once; the exact
@@ -91,10 +95,12 @@ Design of D:
 
 - Path: `~/Library/Application Support/<bundle id>/host.sock`. That directory
   is the host's existing per-user directory, created `0700` by `make_private_dir`
-  (`lease.rs`). The socket is created `0600`. `sun_path` allows 104 bytes; the
-  suffix is about 68 bytes, leaving about 29 characters for the user name, so the
-  server checks the length at startup and refuses to start with
-  `host_unavailable: path too long` rather than truncating. (Bundle id of a
+  (`lease.rs`). The socket is created `0600`. A directory that already exists with group or other bits is put back to `0700`
+  if it is ours and refused if it is not. `sun_path` holds 104 bytes including its
+  NUL, so the path may be at most 103 bytes; the suffix is about 68 bytes, leaving
+  about 29 characters for the user name, so the server checks the length before it
+  creates anything and refuses to start (`host serve` prints
+  `host_unavailable: path too long` and exits 1) rather than truncating. (Bundle id of a
   development variant counts too.)
 - Unix-domain only; no TCP or UDP listener, ever. Nothing is exposed to the
   network.
@@ -105,8 +111,8 @@ Design of D:
   displaced. A client `connect` that fails with `ECONNREFUSED` or `ENOENT`
   means "not running".
 - Peer check on every accepted connection: `getsockopt(SOL_LOCAL, LOCAL_PEERCRED)`
-  and require `cr_uid` equal to the server's uid; otherwise close without a
-  reply. This lives in the `os` module (the only `unsafe` in `core/host`).
+  and require `cr_uid` equal to the server's uid; otherwise, and when the system
+  will not say, close without a reply. This lives in the `os` module (the only `unsafe` in `core/host`).
   Same-uid code can already run `oftc` and the Keychain ACLs apply regardless,
   so the check is defence against other local users and a mis-set directory
   mode, not against the user's own malware. A code-signature check of the peer
@@ -121,7 +127,11 @@ Design of D:
 ### 4.1 Framing
 
 Newline-delimited JSON (NDJSON), UTF-8, one object per line, at most 64 KiB per
-line (longer: the receiver closes). One connection carries many requests; each
+line (longer: the receiver closes). A line that is not a JSON object with an unsigned integer `id` and
+a string `op` cannot be answered, so the server closes the connection without a
+reply; so it does when no `hello` has arrived within 10 s, when a write is not
+accepted for 5 s, and for a 17th simultaneous connection. Blank lines are
+skipped. One connection carries many requests; each
 request has a client-chosen integer `id` and every reply, progress and result
 echoes it. Events have no `id`. The server answers requests on a connection in
 order of completion, not of arrival; a client matches by `id`.
@@ -132,9 +142,11 @@ First line from the client:
 `{"id":1,"op":"hello","protocol":[1,1],"client":{"kind":"ui","version":"0.9.0","build":"24"}}`
 where `protocol` is `[min, max]` supported. Reply:
 `{"id":1,"ok":true,"result":{"protocol":1,"host":{"version":"0.9.0","build":"24","provider_build":"24"}}}`.
-The server picks the highest protocol both support. No overlap:
+The server picks the highest protocol both support. No overlap, a range
+with `min` above `max`, or no `protocol` at all:
 `{"ok":false,"error":{"code":"unsupported_schema","exit":5,...}}` and the server
-closes. Any other op before `hello` is rejected the same way. Within one
+closes. Any other op before `hello` is rejected the same way. A second `hello` on
+an open connection is answered again with the same result. Within one
 protocol number, changes are additive: unknown fields and unknown ops are
 ignored by the receiver (unknown ops get `unknown_op`), and unknown enum values map
 to `attention` for `state` and to "unavailable" elsewhere. A breaking change
@@ -147,7 +159,8 @@ release.
 | --- | --- | --- |
 | `hello` | section 4.2 | host block |
 | `status` | | the status document (4.5) |
-| `subscribe` | `topics`: any of `status`, `traffic` | `{}`, then events |
+| `profiles` | | `{ "profiles": [ { id, name, gateway, saml_port, transport, auto_start } ] }`: the settings only, nothing live (what `oftc profiles --json` prints; this table lacked it) |
+| `subscribe` | `topics`: any of `status`, `traffic` | `{}`, then events. It replaces the connection's topic set; unknown topic names are ignored; each `subscribe` is owed the current `status` again. Without `topics` the reply is `unknown_op` (there is no usage code) |
 | `unsubscribe` | | `{}` |
 | `connect`, `disconnect` | `profile` (optional: all) | `{}` once the host has started or stopped; later phase in events |
 | `remove` | `profile` | `{}` |
@@ -161,6 +174,9 @@ release.
 | `check_update` | | `{ "available": { "version", "page" } \| null }`; the host fetches |
 | `open_settings` | `pane`: `extensions` or `login_items` | `{}` |
 | `cancel` | `target`: an earlier request `id` | `{}` |
+
+PR 2 serves `hello`, `status`, `profiles`, `subscribe` and `unsubscribe`; every
+other op above answers `unknown_op` until PR 3.
 
 Not on the socket: `activate`, `install-config`, `supervise-*`, `rekey-*`,
 `uninstall`, `erase-profile`. The host composes them inside the ops above.
@@ -210,17 +226,18 @@ payload of `status` events.
 | Field | Type | Values and rules |
 | --- | --- | --- |
 | `schema` | int | equals the negotiated `protocol` |
-| `seq` | int | increases on every change; a reconnecting client ignores older |
+| `seq` | int | starts at 1 when the host first builds the document and increases by one on every change of the document, **not** counting `profiles[].traffic` (a change of `generated` alone is not a change). A reconnecting client ignores older. |
 | `host.version`, `host.build`, `host.provider_build` | string | marketing version, `CFBundleVersion`, bundled provider build. Feeds About. |
-| `component.state` | enum | `checking`, `ready`, `missing`, `update_required`, `approval`, `newer`, `unavailable` (`VPNComponentState.resolve`, computed in Rust) |
+| `component.state` | enum | `checking` until the first answer of the read-only system extension request (`properties`, 10 s timeout, repeated at most every 30 s), then `ready`, `missing`, `update_required`, `approval`, `newer` or `unavailable` (`VPNComponentState.resolve`, computed in Rust). `expected_build` is `host.build`; an unreadable bundle gives `null` and `unavailable`. |
 | `component.installed_build`, `expected_build` | string or null | for the "Details" line and the update view |
-| `login.*` | enum | `enabled`, `disabled`, `requires_approval`, `not_found` |
+| `login.*` | enum | `enabled`, `disabled` (`SMAppService` `notRegistered`), `requires_approval`, `not_found` (also an unknown status); read at most every 10 s |
 | `profiles[].id` | string | 1 to 32 of `[a-z0-9-]` |
 | `profiles[].state` | enum | `connected`, `disconnected`, `connecting`, `disconnecting`, `sign_in`, `reconnecting`, `attention`, `setup` (`MenuConnectionState.resolve`, computed in Rust from NE status, supervisor phase, a stopping flag and the component state). The UI maps it to localised text and does not recompute it. |
 | `profiles[].ne_status` | enum or null | raw NE status, for support output |
 | `profiles[].phase` | enum or null | `acquiring`, `connecting`, `connected`, `recovering`, `failed`, `stopped`; null without a live supervisor (the liveness rules of `StatusStore::read`) |
-| `profiles[].traffic` | object or null | present while connected and sampled. Rates are bytes per second derived in Rust; null while a sample is unavailable. `session` changes on a new provider connection; totals survive a rekey. |
-| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7 |
+| `profiles[].connected_since` | string or null | when this host first saw the profile connected (`NEVPNConnection.connectedDate` is not on the `VpnControl` seam), so `null` for a tunnel already up when the host started and for a profile that is not connected. A follow-up may add the date to `VpnControl`. |
+| `profiles[].traffic` | object or null | the newest sample while the profile is connected and some client subscribes to `traffic` (an idle host does not sample, so `null` otherwise). Rates are bytes per second derived in Rust; null until two samples of one session are 5 s or less apart, and after a missed sample (the totals stay). `session` is the first 8 hex digits, lower case, of the provider's session UUID and changes on a new provider connection; totals survive a rekey. `sample_seq` is one counter for the host, increasing with every sample of any profile. |
+| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7. Always `null` in PR 2; PR 3 fills it. |
 
 The profile fields (`id`, `name`, `gateway`, `saml_port`, `transport`,
 `auto_start`, `phase`) are exactly what `core/host/src/snapshot.rs` already
@@ -235,10 +252,14 @@ Events, server to client, only after `subscribe`:
 {"event":"traffic","profile":"c2","session":"9f1c","rx_bytes":842100000,"tx_bytes":96050000,"rx_rate":1100000.0,"tx_rate":80000.0,"sample_seq":1772}
 ```
 
-`status` is sent when the document changes, debounced to at most one per 100 ms;
-`traffic` once per second per connected profile, and only while some client
-subscribes to `traffic`, so an idle host does no sampling. A new subscriber gets
-the current `status` immediately. The UI therefore never polls. Progress for a
+`status` is sent when the document changes, debounced to at most one per 100 ms
+per connection; a new sample alone does not change the document, so traffic does
+not produce `status` events (the `traffic` inside a `status` event is the newest
+sample at that moment). `traffic` is sent once per second per connected profile,
+and only while some client subscribes to `traffic`, so an idle host does no
+sampling; the host measures profiles one after another, each with a 3 s reply
+timeout. A new subscriber gets the current `status` immediately, after the
+`subscribe` reply, and no old samples. The UI therefore never polls. Progress for a
 long op shares the request id:
 
 ```json
@@ -520,10 +541,10 @@ port), so no PR waits on it.
 | # | PR | Size | Needs |
 | --- | --- | ---: | --- |
 | 1 | `docs: UI edge contract` (this file) | ~700 doc | none |
-| 2 | **The host serves status**: `core/ui-edge` wire types and golden JSON; `core/host/src/serve/` skeleton (lock, socket, peer check, framing, `hello`); `status` and `profiles`; `subscribe`; state resolution (port of `MenuConnectionState.resolve` and `VPNComponentState`, their Swift cases moved to `cargo test`); host traffic sampling (`oftc.traffic.v1` once a second per connected profile, only with a `traffic` subscriber, plus a Rust port of `TrafficRates` and snapshot validation); the hidden `host serve` and `host restart` verb rows | ~2500 Rust, mostly tables and tests | 1 |
+| 2 | **The host serves status** (the PR text lists what differed from this row): `core/ui-edge` wire types and golden JSON; `core/host/src/serve/` skeleton (lock, socket, peer check, framing, `hello`); `status` and `profiles`; `subscribe`; state resolution (port of `MenuConnectionState.resolve` and `VPNComponentState`, their Swift cases moved to `cargo test`); host traffic sampling (`oftc.traffic.v1` once a second per connected profile, only with a `traffic` subscriber, plus a Rust port of `TrafficRates` and snapshot validation); the hidden `host serve` and `host restart` verb rows | ~2500 Rust, mostly tables and tests | 1 |
 | 3 | **Verbs and setup over the socket**: typed results shared with the verb printers, `busy`, error and exit codes, `connect`, `disconnect`, `remove`, `export`, `import_preview`, `import`, `settings_set`, `check_update`, `open_settings`, `cancel`, `add_profile`, `list_sources`, `component_update` with progress events | ~1700 Rust | 2 |
 | 4 | **CLI becomes a socket client** with the direct fallback: `status`, `profiles`, `--version`, `--json`, exit mapping | ~500 Rust | 2 |
-| 5 | **Host launch agent**: plist, `Launchctl::kickstart`, register path, detached supervisor spawn, postinstall `kickstart -k`, signing, operations doc | ~350 | 2 |
+| 5 | **Host launch agent**: plist, register path, detached supervisor spawn, postinstall `kickstart -k`, signing, operations doc | ~350 | 2 |
 | 6 | **`HostEdge.swift` and the ratchet**: the Swift client; `ui-files.txt`, `check-ui-edge.sh`, baseline and fixture, introduced here; `MenuBar`/`MenuModel` migrate onto it; the Swift readers, the C snapshot FFI and every `NetworkExtension` use are deleted | about +750, -1800 Swift and script | 2, 3, 5 |
 | 7 | **UI features on the new edge**: component-update view and Onboarding shrink onto `add_profile` (defect 1); About and shared options menu with the "Details" line (defect 2); update check to the host and the trust prompt taking pre-parsed fields; the ratchet baseline emptied | about -550 Swift, ~200 Rust | 3, 6 |
 
@@ -536,10 +557,10 @@ Serial spine: 2, 3 (or 5), 6, 7.
 | # | Files |
 | --- | --- |
 | 1 | `docs/ui-edge.md` |
-| 2 | new `app/core/ui-edge/**`; new `app/core/host/src/serve/**`; `host/src/lib.rs`; `host/src/os.rs` (`peer_uid`, the only new `unsafe`); `host/src/vpn.rs`; `host/src/commands.rs` (two hidden verb rows and the golden table); `docs/host-verbs.md`; `host/Cargo.toml`; `app/Cargo.toml`, `app/Cargo.lock` |
+| 2 | new `app/core/ui-edge/**`; new `app/core/host/src/serve/**`; `host/src/lib.rs`; `host/src/os.rs` (`peer_uid`, the only new `unsafe`); `host/src/vpn.rs` (`owns_key`); `host/src/commands.rs` (two hidden verb rows, the golden table and a pin on the usage text); `host/src/snapshot.rs` (a typed `facts`, the JSON unchanged); `host/src/agent.rs` (`Launchctl::kickstart`, the host label and plist name); `host/src/lease.rs` (`open_lock_file` visible to `serve`); `docs/host-verbs.md`; `docs/ui-edge.md`; `host/Cargo.toml`; `app/Cargo.toml`, `app/Cargo.lock` |
 | 3 | `serve/ops*.rs`; `host/src/{commands,start,bundle,intent,supervisor,sysext,keychain}.rs` (shared typed internals; no new verb rows); `docs/host-verbs.md` |
 | 4 | `client/src/**`; `client/Cargo.toml`; `client/man/oftc.1`; `client/README.md` |
-| 5 | new `app/Host/*.host.plist`; `host/src/agent.rs`; `app/build.sh`; `app/sign-developer-id.sh`; `app/package-scripts/postinstall`; `docs/operations.md` |
+| 5 | new `app/Host/*.host.plist`; `host/src/agent.rs` (register path, detached spawn); `app/build.sh`; `app/sign-developer-id.sh`; `app/package-scripts/postinstall`; `docs/operations.md` |
 | 6 | new `app/Host/HostEdge.swift`; a Swift check that decodes the golden files; new `app/ui-files.txt`, `app/check-ui-edge.sh`, `app/ui-edge-baseline.txt`, fixture; `app/build.sh`; `MenuBar.swift`, `MenuModel.swift`, `MenuCommand.swift`, `main.swift`, `check-menu*.swift`, `check-experience.swift`; deletes `ProfileScope`, `OFTCProfile`, `SupervisorStatus`, the `AgentService` readers; `core/hostlib/src/lib.rs` and `host/src/snapshot.rs` (the FFI) |
 | 7 | `Onboarding.swift`, `Welcome.swift`, `LaunchExperience.swift`, `UpdateCheck.swift` (deleted), `GatewayTrustPrompt.swift`, `MenuBar.swift` (menu section), `en.lproj`; new `host/src/update.rs`, `host/src/trust.rs`; `app/ui-edge-baseline.txt`, `app/ui-files.txt` |
 
@@ -590,6 +611,14 @@ Serial spine: 2, 3 (or 5), 6, 7.
   only while a client subscribes to `traffic`. An idle host sends none.
 
 ## 16. Evidence levels
+
+PR 2 adds the server and its wire types. It is covered offline by cargo tests with
+doubles (no real Network Extension, Keychain, launchd or user directory) and by an
+offline app build. Nothing is registered, signed, installed or run on a signed
+build, so the peer check against the kernel in a signed app, the real
+NetworkExtension notifications and provider replies, and the host across an
+upgrade are not verified. The rest of this section describes the proposal as first
+written.
 
 Reached by this proposal: **design and spike only.** The spike was built with
 the Rust toolchain and `swiftc` on the development Mac (macOS 27.0.1), rendered

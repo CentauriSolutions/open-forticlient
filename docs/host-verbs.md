@@ -115,8 +115,22 @@ first line of standard input. Either way it must be 1 to 1024 bytes of UTF-8 wit
 NUL. `--stdin` lets a caller with no terminal (the setup window) supply the PSK
 without handling the Keychain itself.
 
-`login-settings` and `unregister-menu-login` are not in the usage text (they never
-were); the verb table marks them hidden so the text stays byte-for-byte.
+## The host service
+
+`host serve` and `host restart` are hidden verbs for the UI edge (`docs/ui-edge.md`).
+`host serve` takes `host.lock` in the host's per-user directory, binds `host.sock`
+there (`0600`, directory `0700`, peers of another user refused) and serves the
+status socket until SIGINT or SIGTERM, then removes the socket; it prints nothing and
+exits 0, also when another host already holds the lock. If the socket path would not
+fit `sun_path` it prints `host_unavailable: path too long` and exits 1; other start
+failures print `host_unavailable: <reason>` and exit 1. `host restart` runs
+`launchctl kickstart -k gui/<uid>/com.chris.openforticlient.oftc.host` and prints
+`OFTC host restarted` (exit 0) or `Could not restart OFTC host; is its service
+registered?` (exit 1, also when no host plist is registered yet).
+
+`login-settings`, `unregister-menu-login`, `host serve` and `host restart` are not in
+the usage text (the first two never were); the verb table marks them hidden so the
+text stays byte-for-byte, and a test pins it.
 `set-autostart on` with the agent not yet enabled leaves a one-use
 `agent-request.json` (`connect: false`, valid for 60 s) so that registering the agent
 does not itself open a browser; the next `supervise-autostart` consumes it. A fresh

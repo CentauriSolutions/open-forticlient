@@ -1,0 +1,17 @@
+[package]
+name = "oftc-ui-edge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Wire types of the UI edge: the host's local socket API (docs/ui-edge.md)"
+
+[lib]
+name = "oftc_ui_edge"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+
+[lints]
+workspace = true

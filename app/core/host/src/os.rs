@@ -97,6 +97,38 @@ pub fn process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// The user id of the process on the other end of a connected Unix-domain socket
+/// (`getsockopt(SOL_LOCAL, LOCAL_PEERCRED)`, the credentials taken at `connect`), or
+/// `None` when the system will not say. A caller that gets `None` refuses the peer.
+#[cfg(target_os = "macos")]
+pub fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    let mut cred = MaybeUninit::<libc::xucred>::zeroed();
+    let mut len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+    // SAFETY: `stream` owns an open socket for the call; `cred` and `len` are valid
+    // out-pointers, and `len` tells the kernel how much it may write.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERCRED,
+            cred.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if status != 0 || len as usize != std::mem::size_of::<libc::xucred>() {
+        return None;
+    }
+    // SAFETY: the call succeeded and filled the whole struct.
+    let cred = unsafe { cred.assume_init() };
+    (cred.cr_version == libc::XUCRED_VERSION).then_some(cred.cr_uid)
+}
+
+/// Other systems have no `LOCAL_PEERCRED`: no peer is ever believed.
+#[cfg(not(target_os = "macos"))]
+pub fn peer_uid(_: &std::os::unix::net::UnixStream) -> Option<u32> {
+    None
+}
+
 /// Time since an arbitrary point, counting while the machine sleeps (macOS's
 /// `CLOCK_MONOTONIC`; `std::time::Instant` is `CLOCK_UPTIME_RAW` and does not).
 pub fn monotonic() -> std::time::Duration {
@@ -164,6 +196,16 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(OsSignals.raised());
+    }
+
+    /// A socket pair made by this process reports this process's own user id, and
+    /// nothing else (the only real caller of the kernel credential read).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn peer_uid_is_the_other_ends_user() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(peer_uid(&a), Some(euid()));
+        assert_eq!(peer_uid(&b), Some(euid()));
     }
 
     /// The reading moves with real time, and never backwards.

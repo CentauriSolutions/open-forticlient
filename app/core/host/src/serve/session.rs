@@ -1,0 +1,260 @@
+//! One client connection: the handshake, the request loop and the event pusher.
+
+use std::io::{BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::thread;
+use std::time::Duration;
+
+use oftc_ui_edge::{
+    reply_err, reply_ok, ErrorBody, ErrorCode, HelloArgs, HelloResult, HostBlock, Request,
+    SubscribeArgs, PROTOCOL, PROTOCOL_MIN,
+};
+
+use super::collect::Collector;
+use super::frame::{self, Line};
+use super::hub::{Cursor, Hub, Topics};
+
+/// A client that has not said `hello` by then is dropped.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// A client that does not read for this long is dropped.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// At most one `status` event per this interval on one connection.
+pub const STATUS_DEBOUNCE: Duration = Duration::from_millis(100);
+/// How long a pusher sleeps with nothing to send before it looks again.
+const IDLE: Duration = Duration::from_millis(250);
+
+pub struct Shared<'a> {
+    pub hub: &'a Hub,
+    pub collector: &'a Collector<'a>,
+    pub host: &'a HostBlock,
+}
+
+/// The write half and its state, shared by the request loop and the pusher.
+struct Conn {
+    writer: Mutex<UnixStream>,
+    /// A second handle on the socket, only to shut it down without the writer lock.
+    handle: UnixStream,
+    closed: AtomicBool,
+    topics: Mutex<Topics>,
+    /// Bumped by every `subscribe`, so a repeat subscription is owed the status again.
+    epoch: AtomicU64,
+    /// Where the newest subscription starts, taken before the sampler is woken so the
+    /// first sample after subscribing is not mistaken for an old one.
+    start: Mutex<Cursor>,
+}
+
+impl Conn {
+    fn send(&self, line: &str) -> bool {
+        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let sent = writer
+            .write_all(line.as_bytes())
+            .and_then(|()| writer.write_all(b"\n"))
+            .and_then(|()| writer.flush())
+            .is_ok();
+        drop(writer);
+        if !sent {
+            self.close();
+        }
+        sent
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _ = self.handle.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+fn error(id: u64, code: ErrorCode, detail: &str) -> String {
+    reply_err(id, &ErrorBody::new(code, detail))
+}
+
+/// The highest protocol both sides speak, if there is one.
+fn negotiate(client: [u32; 2]) -> Option<u32> {
+    let [min, max] = client;
+    let chosen = max.min(PROTOCOL);
+    // An inverted range (`min` above `max`) can never reach `chosen >= min`.
+    (chosen >= min.max(PROTOCOL_MIN)).then_some(chosen)
+}
+
+/// Serves `stream` until it closes. The request loop runs on this thread, the pusher
+/// on a second one that ends with it.
+pub fn serve(stream: UnixStream, shared: &Shared) {
+    let (Ok(reader), Ok(handle)) = (stream.try_clone(), stream.try_clone()) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let _ = reader.set_read_timeout(Some(HELLO_TIMEOUT));
+    let conn = Conn {
+        writer: Mutex::new(stream),
+        handle,
+        closed: AtomicBool::new(false),
+        topics: Mutex::new(Topics::default()),
+        epoch: AtomicU64::new(0),
+        start: Mutex::new(Cursor::default()),
+    };
+    thread::scope(|scope| {
+        scope.spawn(|| push(&conn, shared.hub));
+        requests(&conn, BufReader::new(reader), shared);
+        conn.close();
+        // The pusher may be asleep on the hub; it checks `closed` when it wakes.
+        shared.hub.poke();
+    });
+    let last = *conn.topics.lock().unwrap_or_else(PoisonError::into_inner);
+    shared.hub.subscribed(last, Topics::default());
+}
+
+fn requests(conn: &Conn, mut reader: BufReader<UnixStream>, shared: &Shared) {
+    let mut negotiated: Option<u32> = None;
+    loop {
+        let line = match frame::read_line(&mut reader) {
+            Ok(Line::Complete(line)) if line.is_empty() => continue,
+            Ok(Line::Complete(line)) => line,
+            // Too long, closed, timed out, or broken: nothing to answer.
+            _ => return,
+        };
+        // A line with no usable `id` and `op` cannot be answered.
+        let Some(request) = Request::parse(&line) else {
+            return;
+        };
+        let id = request.id;
+        let Some(protocol) = negotiated else {
+            if request.op != "hello" {
+                conn.send(&error(id, ErrorCode::UnsupportedSchema, "hello first"));
+                return;
+            }
+            let chosen = request
+                .args::<HelloArgs>()
+                .and_then(|h| negotiate(h.protocol));
+            let Some(chosen) = chosen else {
+                let detail = format!("host speaks protocol {PROTOCOL_MIN} to {PROTOCOL}");
+                conn.send(&error(id, ErrorCode::UnsupportedSchema, &detail));
+                return;
+            };
+            negotiated = Some(chosen);
+            let _ = conn.handle.set_read_timeout(None);
+            let result = HelloResult {
+                protocol: chosen,
+                host: shared.host.clone(),
+            };
+            if !conn.send(&reply_ok(id, &result)) {
+                return;
+            }
+            continue;
+        };
+        let reply = match request.op.as_str() {
+            "hello" => reply_ok(
+                id,
+                &HelloResult {
+                    protocol,
+                    host: shared.host.clone(),
+                },
+            ),
+            "status" => {
+                shared.collector.refresh();
+                match shared.hub.document() {
+                    Some(document) => reply_ok(id, &document),
+                    None => error(id, ErrorCode::Internal, "no status yet"),
+                }
+            }
+            "profiles" => reply_ok(id, &shared.collector.profiles()),
+            "subscribe" => match request.args::<SubscribeArgs>() {
+                Some(args) => {
+                    let topics = Topics {
+                        status: args.topics.iter().any(|t| t == "status"),
+                        traffic: args.topics.iter().any(|t| t == "traffic"),
+                    };
+                    // The reply goes out before the pusher may send the first event.
+                    if !conn.send(&reply_ok(id, &serde_json::json!({}))) {
+                        return;
+                    }
+                    shared.collector.refresh();
+                    set_topics(conn, shared.hub, topics);
+                    continue;
+                }
+                None => error(id, ErrorCode::UnknownOp, "subscribe needs topics"),
+            },
+            "unsubscribe" => {
+                if !conn.send(&reply_ok(id, &serde_json::json!({}))) {
+                    return;
+                }
+                set_topics(conn, shared.hub, Topics::default());
+                continue;
+            }
+            other => error(id, ErrorCode::UnknownOp, &format!("unknown op {other}")),
+        };
+        if !conn.send(&reply) {
+            return;
+        }
+    }
+}
+
+fn set_topics(conn: &Conn, hub: &Hub, topics: Topics) {
+    let was = std::mem::replace(
+        &mut *conn.topics.lock().unwrap_or_else(PoisonError::into_inner),
+        topics,
+    );
+    *conn.start.lock().unwrap_or_else(PoisonError::into_inner) = hub.fresh_cursor();
+    conn.epoch.fetch_add(1, Ordering::SeqCst);
+    hub.subscribed(was, topics);
+    hub.poke();
+}
+
+/// Sends what the connection is owed whenever the hub changes, until it closes.
+fn push(conn: &Conn, hub: &Hub) {
+    let mut cursor = hub.fresh_cursor();
+    let mut seen = conn.epoch.load(Ordering::SeqCst);
+    loop {
+        if conn.closed() || hub.closing() {
+            return;
+        }
+        let pokes = hub.pokes();
+        let topics = *conn.topics.lock().unwrap_or_else(PoisonError::into_inner);
+        let epoch = conn.epoch.load(Ordering::SeqCst);
+        if epoch != seen {
+            // A new subscription is owed the current status at once, and no old samples.
+            cursor = *conn.start.lock().unwrap_or_else(PoisonError::into_inner);
+            seen = epoch;
+        }
+        let mut sent_status = false;
+        for event in hub.events_since(&mut cursor, topics) {
+            sent_status |= matches!(event, oftc_ui_edge::Event::Status { .. });
+            let Ok(line) = serde_json::to_string(&event) else {
+                continue;
+            };
+            if !conn.send(&line) {
+                return;
+            }
+        }
+        if sent_status && hub.sleep(STATUS_DEBOUNCE) {
+            return;
+        }
+        hub.wait_for_change(&cursor, topics, pokes, IDLE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overlap rule: the highest protocol both support, nothing when the ranges
+    /// do not meet or the client's own range is inverted.
+    #[test]
+    fn protocol_negotiation() {
+        for (client, chosen) in [
+            ([1, 1], Some(1)),
+            ([1, 5], Some(1)),
+            ([0, 1], Some(1)),
+            ([2, 3], None),
+            ([0, 0], None),
+            ([2, 1], None),
+        ] {
+            assert_eq!(negotiate(client), chosen, "{client:?}");
+        }
+    }
+}

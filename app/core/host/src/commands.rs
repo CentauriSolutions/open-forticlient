@@ -26,6 +26,7 @@ use crate::keychain::{read_psk_line, Keychain, KeychainError};
 use crate::out::Out;
 use crate::profile::{Profile, Transport};
 use crate::registry::{self, ProfileEntry};
+use crate::serve;
 use crate::start::parse_start_flags;
 use crate::supervisor::Signals;
 use crate::trust::Outcome as Trust;
@@ -109,6 +110,8 @@ pub const VERBS: &[Verb] = &[
     rust("remove-config"),
     hidden("login-settings"),
     hidden("unregister-menu-login"),
+    hidden("host serve"),
+    hidden("host restart"),
 ];
 
 /// The usage text, as `OFTCAgent` prints it for a bad command line.
@@ -135,6 +138,10 @@ pub enum Command {
     UnregisterAgent,
     LoginSettings,
     UnregisterMenuLogin,
+    /// `host serve`: the socket service (`serve`).
+    HostServe,
+    /// `host restart`: `launchctl kickstart -k` of the host service.
+    HostRestart,
     ListProfiles,
     ShowProfile,
     HasPsk,
@@ -232,6 +239,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("unregister-agent", []) => Command::UnregisterAgent,
         ("login-settings", []) => Command::LoginSettings,
         ("unregister-menu-login", []) => Command::UnregisterMenuLogin,
+        ("host", [sub]) if sub == "serve" => Command::HostServe,
+        ("host", [sub]) if sub == "restart" => Command::HostRestart,
         ("list-profiles", []) => Command::ListProfiles,
         ("show-profile", []) => Command::ShowProfile,
         ("has-psk", []) => Command::HasPsk,
@@ -504,6 +513,32 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 return finish(io, "Could not unregister the OFTC menu login item", 1);
             }
             finish(io, "OFTC menu login item unregistered", 0)
+        }
+        Command::HostServe => {
+            let (text, code) = serve::run(
+                env,
+                env.root(),
+                backends.vpn,
+                backends.extensions,
+                backends.login,
+                backends.signals,
+            );
+            if text.is_empty() {
+                code
+            } else {
+                finish(io, &text, code)
+            }
+        }
+        Command::HostRestart => {
+            if backends.launchctl.kickstart(agent::HOST_LABEL) {
+                finish(io, "OFTC host restarted", 0)
+            } else {
+                finish(
+                    io,
+                    "Could not restart OFTC host; is its service registered?",
+                    1,
+                )
+            }
         }
         Command::LoginSettings => {
             let state = |on: bool| if on { "enabled" } else { "disabled" };
@@ -975,6 +1010,15 @@ mod tests {
                 vec!["supervise-profile"],
                 invocation(None, Command::SuperviseProfile { flags: vec![] }),
             ),
+            // The hidden service verbs take exactly one subverb.
+            (vec!["host", "serve"], invocation(None, Command::HostServe)),
+            (
+                vec!["--profile", "lab", "host", "restart"],
+                invocation(Some("lab"), Command::HostRestart),
+            ),
+            (vec!["host"], Err(ParseError::Usage)),
+            (vec!["host", "serve", "x"], Err(ParseError::Usage)),
+            (vec!["host", "stop"], Err(ParseError::Usage)),
             (vec!["stop"], invocation(None, Command::Stop)),
             (vec!["stop", "x"], Err(ParseError::Usage)),
             (
@@ -1407,6 +1451,37 @@ mod tests {
         fn expect(&self, args: &[&str], stdout: &str, code: i32) {
             assert_eq!(self.run(args, ""), (stdout.to_owned(), code), "{args:?}");
         }
+    }
+
+    /// The usage text is a protocol too (`oftc` and the install scripts print it): the
+    /// hidden verbs (`login-settings`, `unregister-menu-login`, `host serve`,
+    /// `host restart`) must never appear in it, and nothing else may change.
+    #[test]
+    fn usage_text_is_pinned() {
+        assert_eq!(
+            usage(),
+            "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent-status|register-agent|unregister-agent|install-config|list-profiles|check-update [url]|launcher-alias ensure|remove|export-profiles [id...]|import-profiles|save-profile <gateway> <saml-port> [--tcp] [--name <name>]|import-profile <FortiClient-profile>|show-profile|erase-profile|has-psk|set-autostart on|off|supervise-autostart|start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|provision-psk [--stdin] [gateway]|migrate-psk <FortiClient-profile> <gateway>|preflight <gateway> <32-hex-UID>|start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]|rekey-once|rekey-ike-once|rekey-counts|status|stop|remove-config"
+        );
+        for hidden in VERBS.iter().filter(|verb| verb.hidden) {
+            assert!(!usage().contains(hidden.synopsis), "{}", hidden.synopsis);
+        }
+        // `host` is claimed by Rust, so the Swift stub hands it over.
+        assert!(rust_verbs().any(|verb| verb == "host"));
+    }
+
+    /// `host restart` kickstarts the host service's launchd label, and says so when
+    /// launchd refuses (the service is not registered).
+    #[test]
+    fn host_restart_kickstarts_the_service() {
+        let mut h = Harness::new();
+        h.expect(&["host", "restart"], "OFTC host restarted\n", 0);
+        assert_eq!(h.launchctl.kicked(), [crate::agent::HOST_LABEL]);
+        h.launchctl = RecordingLaunchctl::new(false);
+        h.expect(
+            &["host", "restart"],
+            "Could not restart OFTC host; is its service registered?\n",
+            1,
+        );
     }
 
     /// The verb protocol: stdout bytes and exit code per verb and branch.

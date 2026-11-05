@@ -33,9 +33,18 @@ fn fail(text: &str) -> Outcome {
 /// Whether `vpn` is `entry`'s VPN entry under `provider_id`: keyed to the profile,
 /// or unkeyed and adopted by a profile migrated from the single-profile layout.
 pub(crate) fn owns(provider_id: &str, entry: &ProfileEntry, vpn: &VpnEntry) -> bool {
+    owns_key(
+        provider_id,
+        &entry.id,
+        entry.profile.adopts_unkeyed_vpn_entry == Some(true),
+        vpn,
+    )
+}
+
+/// [`owns`] for a profile known by its id and whether it adopted the unkeyed entry.
+pub(crate) fn owns_key(provider_id: &str, id: &str, adopted: bool, vpn: &VpnEntry) -> bool {
     vpn.provider_id == provider_id
-        && (vpn.profile_key.as_deref() == Some(entry.id.as_str())
-            || (vpn.profile_key.is_none() && entry.profile.adopts_unkeyed_vpn_entry == Some(true)))
+        && (vpn.profile_key.as_deref() == Some(id) || (vpn.profile_key.is_none() && adopted))
 }
 
 pub(crate) struct Ctx<'a> {
