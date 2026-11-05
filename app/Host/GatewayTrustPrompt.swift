@@ -3,14 +3,6 @@ import AppKit
 // The popup for a gateway certificate macOS does not trust. "Don't Trust" is
 // the default button and the fingerprint is visible without expanding anything.
 enum GatewayTrustPrompt {
-    private struct Request: Codable {
-        let profileName: String
-        let host: String
-        let port: UInt32
-        let certificate: Data
-        let previous: Data?
-    }
-
     // The popup runs in a short-lived child of this executable. Supervisors
     // drain their main queue on a worker thread, where AppKit cannot build a
     // window; the child's top-level code runs on the real main thread.
@@ -19,7 +11,7 @@ enum GatewayTrustPrompt {
               let executable = Bundle.main.executablePath else { return .unavailable }
         var previous: Data?
         if case .changed(let old) = review.reason { previous = old.der }
-        guard let request = try? JSONEncoder().encode(Request(
+        guard let request = try? JSONEncoder().encode(GatewayTrust.PromptRequest(
             profileName: review.profileName, host: review.host, port: review.port,
             certificate: review.certificate.der, previous: previous)) else { return .unavailable }
         let process = Process()
@@ -43,7 +35,7 @@ enum GatewayTrustPrompt {
     // 11 (decline) or 12 (nothing to show).
     static func runChild() -> Never {
         guard let request = try? JSONDecoder().decode(
-                Request.self, from: FileHandle.standardInput.readDataToEndOfFile()),
+                GatewayTrust.PromptRequest.self, from: FileHandle.standardInput.readDataToEndOfFile()),
               let certificate = GatewayCertificate(der: request.certificate) else { exit(12) }
         let reason: GatewayTrust.Review.Reason
         if let old = request.previous.flatMap({ GatewayCertificate(der: $0) }) {
