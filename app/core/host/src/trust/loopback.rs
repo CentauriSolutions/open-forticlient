@@ -18,6 +18,7 @@
 //! Marked `#[ignore]` like the other loopback tests: sandboxed agent environments deny
 //! local-network access, and CI runs `--include-ignored`.
 
+use std::cell::RefCell;
 use std::fs;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -82,10 +83,8 @@ struct Scratch(PathBuf);
 impl Scratch {
     /// One directory per test: the tests run in parallel in one process.
     fn new(test: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!(
-            "oftc-trust-loopback-{}-{test}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("oftc-trust-loopback-{}-{test}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
@@ -275,7 +274,7 @@ fn system_evaluator_rejects_every_untrusted_chain_and_a_closed_port_is_unreachab
     };
     let probe = ChainProbe {
         source: &source,
-        evaluator: &SystemTrustEvaluator,
+        evaluator: &SystemTrustEvaluator { log: &|_| {} },
         text: &OpensslText,
     };
     for (leaf, rest) in cases {
@@ -370,12 +369,29 @@ fn anchored_evaluation_trusts_a_good_chain_and_rejects_each_bad_one() {
         ),
     ];
     for (names, anchors, expected, label) in cases {
-        let got = evaluate_chain(&ders(names), &target, false, anchors);
+        let lines = RefCell::new(Vec::new());
+        let log = |line: &str| lines.borrow_mut().push(line.to_owned());
+        let got = evaluate_chain(&ders(names), &target, false, anchors, &log);
         assert_eq!(got, expected, "{label}");
+        // One line per evaluation that was not Trusted, none for a trusted one.
+        let lines = lines.into_inner();
+        assert_eq!(
+            lines.len(),
+            usize::from(expected != Evaluation::Trusted),
+            "{label}: {lines:?}"
+        );
+        for line in &lines {
+            assert!(
+                line.starts_with(
+                    "OFTC trust: evaluation Rejected domain=NSOSStatusErrorDomain code=-"
+                ) && line.ends_with(&format!("chain={}", names.len())),
+                "{label}: {line}"
+            );
+        }
     }
     // Not a certificate at all: the evaluation cannot be made.
     assert_eq!(
-        evaluate_chain(&[vec![0x30, 0x01, 0x00]], &target, false, &[]),
+        evaluate_chain(&[vec![0x30, 0x01, 0x00]], &target, false, &[], &|_| {}),
         Evaluation::Error
     );
 }

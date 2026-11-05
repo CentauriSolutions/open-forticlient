@@ -377,15 +377,34 @@ pub fn classify_failure(domain: &str, code: i64) -> Evaluation {
     }
 }
 
+/// The one diagnostic line for an evaluation that did not come out `Trusted`: the
+/// verdict it was mapped to, the `CFError` domain and code (`none` when the
+/// evaluation was not reached), and the chain length. No names, no certificate bytes.
+pub fn failure_line(
+    verdict: Evaluation,
+    domain: &str,
+    code: Option<i64>,
+    chain_len: usize,
+) -> String {
+    let code = code.map_or_else(|| "none".to_owned(), |code| code.to_string());
+    format!("OFTC trust: evaluation {verdict:?} domain={domain} code={code} chain={chain_len}")
+}
+
 /// `SecTrust` on `chain` (leaf first). Empty `anchors` means the system's own;
-/// otherwise only `anchors` are trusted (this is how a test supplies a root).
+/// otherwise only `anchors` are trusted (this is how a test supplies a root). A
+/// result other than `Trusted` is reported to `log` (see [`failure_line`]).
 #[cfg(target_os = "macos")]
 pub fn evaluate_chain(
     chain: &[Vec<u8>],
     target: &Target,
     allow_network_fetch: bool,
     anchors: &[Vec<u8>],
+    log: &dyn Fn(&str),
 ) -> Evaluation {
+    let setup_failed = || {
+        log(&failure_line(Evaluation::Error, "setup", None, chain.len()));
+        Evaluation::Error
+    };
     use security_framework::certificate::SecCertificate;
     use security_framework::policy::SecPolicy;
     use security_framework::secure_transport::SslProtocolSide;
@@ -401,46 +420,52 @@ pub fn evaluate_chain(
             .collect()
     };
     let (Some(certificates), Some(roots)) = (load(chain), load(anchors)) else {
-        return Evaluation::Error;
+        return setup_failed();
     };
     let policy = SecPolicy::create_ssl(SslProtocolSide::CLIENT, Some(&hostname));
     let Ok(mut trust) = SecTrust::create_with_certificates(&certificates, &[policy]) else {
-        return Evaluation::Error;
+        return setup_failed();
     };
     if trust
         .set_network_fetch_allowed(allow_network_fetch)
         .is_err()
     {
-        return Evaluation::Error;
+        return setup_failed();
     }
     if !roots.is_empty()
         && (trust.set_anchor_certificates(&roots).is_err()
             || trust.set_trust_anchor_certificates_only(true).is_err())
     {
-        return Evaluation::Error;
+        return setup_failed();
     }
     match trust.evaluate_with_error() {
         Ok(()) => Evaluation::Trusted,
-        Err(error) => match i64::try_from(error.code()) {
-            Ok(code) => classify_failure(&error.domain().to_string(), code),
-            Err(_) => Evaluation::Error,
-        },
+        Err(error) => {
+            let domain = error.domain().to_string();
+            let code = i64::try_from(error.code()).ok();
+            let verdict = code.map_or(Evaluation::Error, |code| classify_failure(&domain, code));
+            log(&failure_line(verdict, &domain, code, chain.len()));
+            verdict
+        }
     }
 }
 
 /// The system trust store through Security.framework's `SecTrust`.
 #[cfg(target_os = "macos")]
-pub struct SystemTrustEvaluator;
+pub struct SystemTrustEvaluator<'a> {
+    /// One line per evaluation that was not `Trusted` (the supervisor's diagnostic).
+    pub log: &'a dyn Fn(&str),
+}
 
 #[cfg(target_os = "macos")]
-impl Evaluator for SystemTrustEvaluator {
+impl Evaluator for SystemTrustEvaluator<'_> {
     fn evaluate(
         &self,
         chain: &[Vec<u8>],
         target: &Target,
         allow_network_fetch: bool,
     ) -> Evaluation {
-        evaluate_chain(chain, target, allow_network_fetch, &[])
+        evaluate_chain(chain, target, allow_network_fetch, &[], self.log)
     }
 }
 
