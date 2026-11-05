@@ -166,21 +166,47 @@ release.
 | `profiles` | | `{ "profiles": [ { id, name, gateway, saml_port, transport, auto_start } ] }`: the settings only, nothing live (what `oftc profiles --json` prints; this table lacked it) |
 | `subscribe` | `topics`: any of `status`, `traffic` | `{}`, then events. It replaces the connection's topic set; unknown topic names are ignored; each `subscribe` is owed the current `status` again. Without `topics` the reply is `unknown_op` (there is no usage code) |
 | `unsubscribe` | | `{}` |
-| `connect`, `disconnect` | `profile` (optional: all) | `{}` once the host has started or stopped; later phase in events |
-| `remove` | `profile` | `{}` |
-| `export` | `profiles` (optional), `path` | `{}`; the host writes the file, mode `0600`, refusing to overwrite (the UI keeps its scratch-then-copy step) |
-| `import_preview` | `path` | contents, `already_configured` per item, **no PSK** |
-| `import` | `path` | `{ "added": [ids] }` |
-| `add_profile` | `gateway`, `saml_port`, `transport`, `name`, `psk_source` | progress then result (4.6). `psk_source` is `"saved"`, `"forticlient"` plus `label`, or `"stdin_job"` (4.4) |
-| `list_sources` | | importable FortiClient profiles: `label`, `gateway`, `saml_port`, `already_configured`; never a PSK |
-| `component_update` | | progress then result; `tunnels_active` if any profile is up |
-| `settings_set` | `key`: `menu_login`, `auto_start:<id>`, `auto_update`; `value` | `{}` |
+| `connect`, `disconnect` | `profile` (optional: all) | `{}` once the host has started a supervisor (`connect`: one per profile that is down and has no supervisor yet; one already connecting or connected is left alone) or asked the supervisor and tunnel to stop (`disconnect`); later phase in events. A failure is also shown in that profile's `error` until the next such op on it starts. Without `profile`, every profile is tried and the first failure is the reply |
+| `remove` | `profile` | `{}`: stops the profile, waits up to 20 s for its tunnel, then erases it, its VPN entry and PSK (`tunnels_active` if the tunnel stays up and nothing is removed). A profile that is not there is already removed, so the reply is `{}` |
+| `export` | `profiles` (optional), `path` (absolute) | `{}`; the host writes the file, mode `0600`, never over an existing file or through a symlink (the UI keeps its scratch-then-copy step). The bundle holds PSKs; the reply does not |
+| `import_preview` | `path` (absolute) | `{ "profiles": [ { name, gateway, saml_port, transport, already_configured } ] }`, **no PSK** |
+| `import` | `path` (absolute) | `{ "added": [ids] }`; a gateway that already has a profile is skipped, so repeating it adds nothing |
+| `add_profile` | `gateway`, `saml_port`, `transport`, `name`, `psk_source`, `label` | progress then `{ "profile_id" }` (4.6). `psk_source` is `"saved"` (the PSK was stored first by the stdin child, 4.4) or `"forticlient"` plus `label`; the earlier draft's `"stdin_job"` is gone, it duplicated `saved` |
+| `list_sources` | | `{ "sources": [ { label, gateway, saml_port, already_configured } ] }`: importable FortiClient profiles, never a PSK |
+| `component_update` | | progress then `{}`; `tunnels_active` if any profile is up |
+| `settings_set` | `key`: `menu_login`, `auto_start:<id>`, `auto_update`; `value`: a boolean | `{}` |
 | `check_update` | | `{ "available": { "version", "page" } \| null }`; the host fetches |
 | `open_settings` | `pane`: `extensions` or `login_items` | `{}` |
-| `cancel` | `target`: an earlier request `id` | `{}` |
+| `cancel` | `target`: an earlier request `id` of this connection | `{}`; see 4.6 |
 
-PR 2 serves `hello`, `status`, `profiles`, `subscribe` and `unsubscribe`; every
-other op above answers `unknown_op` until PR 3.
+PR 2 serves `hello`, `status`, `profiles`, `subscribe` and `unsubscribe`; PR 3 serves
+the rest. Arguments that are missing or of the wrong type are `bad_request`.
+
+Details PR 3 settled where this document was silent:
+
+- `add_profile` runs the steps of `oftc setup` in this order: `keychain` (the PSK must be
+  in the Keychain; with `forticlient` it is copied there inside the host), `profile`,
+  `extension_approval` (skipped when the system extension is already current), `vpn_entry`.
+  It is **resumable**: a gateway whose profile exists but has no VPN entry yet (an earlier
+  call stopped at the extension step) is finished by the next call, and only a gateway
+  that is fully set up answers `already_configured` with `profile_id`. Two calls for one
+  gateway, or an `import` that includes it, are `busy`.
+- `settings_set auto_update` is stored by the host in `host-settings.json` in its own
+  directory. Nothing reads it back over the socket yet (`UpdateStore` stays UI-private,
+  4.5 has no field for it); the UI keeps its own value as the source of truth until a
+  field is added.
+- `check_update` needs an HTTP fetch, which the host did not have. It runs
+  `/usr/bin/curl` (https only, 15 s, 256 KiB) against the feed in `OFTCUpdateFeedURL` of
+  the app's Info.plist, the same child-process edge as the certificate check, and ports
+  the Swift `UpdateFeed` and `AppVersion` rules. No feed configured is `available: null`.
+  The per-user `defaults write ... updateFeedURL` override of the Swift code is not
+  ported (the host reads no `UserDefaults`). This lives in `serve/ops_update.rs`, so PR 7
+  has no `update.rs` to add.
+- `migration_needed` is not produced by any op: the "different app" and "legacy login
+  agent" checks are in the CLI's `run_connect` (PR 4's client), not in the host.
+- `approval_required` comes from `settings_set` (a login item left pending), and from
+  `add_profile` and `component_update` when the extension request itself reports it;
+  the usual wait for approval is a `waiting` progress line, not an error.
 
 Not on the socket: `activate`, `install-config`, `supervise-*`, `rekey-*`,
 `uninstall`, `erase-profile`. The host composes them inside the ops above.
@@ -241,7 +267,7 @@ payload of `status` events.
 | `profiles[].phase` | enum or null | `acquiring`, `connecting`, `connected`, `recovering`, `failed`, `stopped`; null without a live supervisor (the liveness rules of `StatusStore::read`) |
 | `profiles[].connected_since` | string or null | when this host first saw the profile connected (`NEVPNConnection.connectedDate` is not on the `VpnControl` seam), so `null` for a tunnel already up when the host started and for a profile that is not connected. A follow-up may add the date to `VpnControl`. |
 | `profiles[].traffic` | object or null | the newest sample while the profile is connected and some client subscribes to `traffic` (an idle host does not sample, so `null` otherwise). Rates are bytes per second derived in Rust; null until two samples of one session are 5 s or less apart, and after a missed sample (the totals stay). `session` is the first 8 hex digits, lower case, of the provider's session UUID and changes on a new provider connection; totals survive a rekey. `sample_seq` is one counter for the host, increasing with every sample of any profile. |
-| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7. Always `null` in PR 2; PR 3 fills it. |
+| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7: the failure of the last `connect` or `disconnect` of that profile. Cleared when the next `connect`, `disconnect` or `remove` of that profile starts. |
 
 The profile fields (`id`, `name`, `gateway`, `saml_port`, `transport`,
 `auto_start`, `phase`) are exactly what `core/host/src/snapshot.rs` already
@@ -271,11 +297,23 @@ long op shares the request id:
 {"id":9,"ok":true,"result":{"profile_id":"c2"}}
 ```
 
-`step` is an enum (`keychain`, `profile`, `extension_approval`, `vpn_entry`,
-`sign_in`, ...); the UI owns the wording. `waiting` means "needs the user" and is
-not a failure. Closing the connection does not cancel an op; the host's ops are
-idempotent (`install-config`, `remove` of an absent profile) so finishing is
-safe, and `cancel` is explicit.
+`step` is an enum (`keychain`, `profile`, `extension_approval`, `vpn_entry`; an
+unknown one decodes as `other`), and `state` is `running`, `waiting` or `done`: each step
+of `add_profile` and `component_update` says `running`, may say `waiting`, and ends
+`done` (there is no step named `done`; the final reply is the end of the op, and a
+setup step that is skipped reports nothing). The UI owns the wording. `waiting` means
+"needs the user" and is not a failure. `sign_in` is not a step of any op: signing in
+belongs to the supervisor and shows in `state` and `phase`. Closing the connection does
+not cancel an op; the host's ops are idempotent (`install-config`, `remove` of an
+absent profile) so finishing is safe, and `cancel` is explicit.
+
+`cancel` sets the target's flag, which an op looks at between steps, and answers the
+target at once with `cancelled` (exit 1); the target's own answer, when it ends, is
+dropped. The system extension request cannot be withdrawn, so a `cancel` during
+`waiting` leaves that request open: the op stops when it ends, and its profile key stays
+`busy` until then. A `cancel` for an id that is not running (never started, or ended)
+is a success. A request `id` still running on the connection cannot be reused
+(`bad_request`).
 
 ### 4.7 Errors and exit codes
 
@@ -298,7 +336,14 @@ stable part and replaces the substring match in `MenuCommandFailure.classify`:
 | `tunnels_active` | 3 | new |
 | `busy` | 6 | new; another op holds that profile's lock |
 | `unknown_op` | 2 | new |
+| `bad_request` | 2 | new (PR 3): arguments missing or malformed, a relative path, an export over an existing file, an unknown setting |
+| `invalid_file` | 3 | new (PR 3): a `.oftc` file that cannot be read or decoded, including one from a newer OFTC |
+| `cancelled` | 1 | new (PR 3): the client sent `cancel` |
 | `internal` | 1 | everything else; `detail` is for the log, never shown verbatim |
+
+`already_configured` carries `profile_id` beside `detail`. The verbs and the ops return
+the same typed failure (`typed::Failure`): a verb prints its text and its own exit code,
+the socket sends its code, so no code is recovered from text.
 
 `timeout` and `launch` stay UI-side. The user-facing messages stay in Swift and
 `en.lproj`.
@@ -566,7 +611,7 @@ Serial spine: 2, 3 (or 5), 6, 7.
 | 4 | `client/src/**`; `client/Cargo.toml`; `client/man/oftc.1`; `client/README.md` |
 | 5 | new `app/Host/*.host.plist`; `host/src/agent.rs` (register path, detached spawn); `app/build.sh`; `app/sign-developer-id.sh`; `app/package-scripts/postinstall`; `docs/operations.md` |
 | 6 | new `app/Host/HostEdge.swift`; a Swift check that decodes the golden files; new `app/ui-files.txt`, `app/check-ui-edge.sh`, `app/ui-edge-baseline.txt`, fixture; `app/build.sh`; `MenuBar.swift`, `MenuModel.swift`, `MenuCommand.swift`, `main.swift`, `check-menu*.swift`, `check-experience.swift`; deletes `ProfileScope`, `OFTCProfile`, `SupervisorStatus`, the `AgentService` readers; `core/hostlib/src/lib.rs` and `host/src/snapshot.rs` (the FFI) |
-| 7 | `Onboarding.swift`, `Welcome.swift`, `LaunchExperience.swift`, `UpdateCheck.swift` (deleted), `GatewayTrustPrompt.swift`, `MenuBar.swift` (menu section), `en.lproj`; new `host/src/update.rs`, `host/src/trust.rs`; `app/ui-edge-baseline.txt`, `app/ui-files.txt` |
+| 7 | `Onboarding.swift`, `Welcome.swift`, `LaunchExperience.swift`, `UpdateCheck.swift` (deleted), `GatewayTrustPrompt.swift`, `MenuBar.swift` (menu section), `en.lproj`; `host/src/trust.rs` (the update check itself landed in PR 3, `serve/ops_update.rs`); `app/ui-edge-baseline.txt`, `app/ui-files.txt` |
 
 ### Serial constraints
 

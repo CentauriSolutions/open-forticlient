@@ -10,7 +10,7 @@ use oftc_apple::login::{LoginItem, LoginStatus};
 use oftc_apple::manager::{Subscription, VpnEntry, VpnStatus};
 use oftc_ui_edge::{
     rfc3339, Component, ConnectionState, Login, LoginState, NeStatus, Phase, ProfileInfo,
-    ProfileStatus, ProfilesResult, StatusDocument, Transport, PROTOCOL,
+    ProfileError, ProfileStatus, ProfilesResult, StatusDocument, Transport, PROTOCOL,
 };
 
 use super::hub::Hub;
@@ -24,6 +24,8 @@ use crate::vpn::owns_key;
 
 /// VPN entries are reloaded at least this often, and whenever the profile set changes.
 const ENTRY_TTL: Duration = Duration::from_secs(15);
+/// A stopping flag that the tunnel never confirms is dropped after this long.
+const STOPPING_MAX: Duration = Duration::from_secs(30);
 /// Login item states are read at most this often.
 const LOGIN_TTL: Duration = Duration::from_secs(10);
 
@@ -45,6 +47,11 @@ struct Inner {
     login: Option<(Instant, Login)>,
     /// When this host first saw each profile connected.
     since: HashMap<String, String>,
+    /// Profiles a `disconnect` or `remove` is stopping, and since when. The flag ends
+    /// when the tunnel is down, or after [`STOPPING_MAX`] whatever it shows.
+    stopping: HashMap<String, Instant>,
+    /// The last op failure of each profile; the next op on it clears it.
+    errors: HashMap<String, ProfileError>,
 }
 
 fn login_state(status: LoginStatus) -> LoginState {
@@ -92,6 +99,34 @@ impl<'a> Collector<'a> {
             hub,
             wake,
             inner: Mutex::new(Inner::default()),
+        }
+    }
+
+    /// Marks `id` as being stopped, so its row shows `disconnecting` until the tunnel
+    /// is down.
+    pub fn set_stopping(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.stopping.insert(id.to_owned(), Instant::now());
+        drop(inner);
+        let _ = self.wake.send(());
+    }
+
+    /// Takes the stopping mark off `id` again, for a stop that did not happen.
+    pub fn clear_stopping(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.stopping.remove(id);
+    }
+
+    /// Records (or, with `None`, clears) the last failure shown on `id`'s row.
+    pub fn set_error(&self, id: &str, error: Option<ProfileError>) {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = match error {
+            Some(error) => inner.errors.insert(id.to_owned(), error.clone()) != Some(error),
+            None => inner.errors.remove(id).is_some(),
+        };
+        drop(inner);
+        if changed {
+            let _ = self.wake.send(());
         }
     }
 
@@ -171,11 +206,29 @@ impl<'a> Collector<'a> {
             } else {
                 inner.since.remove(&facts.id);
             }
-            profiles.push(self.profile(facts, vpn, ne, inner.since.get(&facts.id)));
+            let down = matches!(
+                ne,
+                None | Some(VpnStatus::Disconnected) | Some(VpnStatus::Invalid)
+            );
+            if down || inner.stopping.get(&facts.id).is_some_and(|at| at.elapsed() > STOPPING_MAX)
+            {
+                inner.stopping.remove(&facts.id);
+            }
+            let mut row = self.profile(
+                facts,
+                vpn,
+                ne,
+                inner.since.get(&facts.id),
+                inner.stopping.contains_key(&facts.id),
+            );
+            row.error = inner.errors.get(&facts.id).cloned();
+            profiles.push(row);
         }
         inner
             .since
             .retain(|id, _| facts.iter().any(|p| &p.id == id));
+        inner.stopping.retain(|id, _| facts.iter().any(|p| &p.id == id));
+        inner.errors.retain(|id, _| facts.iter().any(|p| &p.id == id));
         self.hub.set_entries(tunnels);
         let (state, installed) = self.hub.component();
         let expected = &services.host.build;
@@ -200,11 +253,11 @@ impl<'a> Collector<'a> {
         vpn: Option<&VpnEntry>,
         ne: Option<VpnStatus>,
         since: Option<&String>,
+        stopping: bool,
     ) -> ProfileStatus {
         let phase = facts.phase.map(phase);
-        // PR 3 adds the `stopping` flag the disconnect op sets; nothing sets it yet.
         let state: ConnectionState =
-            resolve_connection(ne, vpn.is_some_and(|v| v.enabled), phase, false);
+            resolve_connection(ne, vpn.is_some_and(|v| v.enabled), phase, stopping);
         ProfileStatus {
             id: facts.id.clone(),
             name: facts.name.clone(),

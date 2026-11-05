@@ -27,6 +27,7 @@ pub mod snapshot;
 pub mod start;
 pub mod status;
 pub mod supervisor;
+pub mod typed;
 pub mod trust;
 mod vpn;
 

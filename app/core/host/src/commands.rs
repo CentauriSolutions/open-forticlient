@@ -25,7 +25,9 @@ use crate::intent;
 use crate::keychain::{read_psk_line, Keychain, KeychainError};
 use crate::out::Out;
 use crate::profile::{Profile, Transport};
-use crate::registry::{self, ProfileEntry};
+use crate::registry::{self, FortiClientSource, ProfileEntry};
+use crate::typed::Failure;
+use oftc_ui_edge::ErrorCode;
 use crate::serve;
 use crate::start::parse_start_flags;
 use crate::supervisor::Signals;
@@ -350,7 +352,12 @@ pub trait SecretPrompt {
 
 /// What an installed FortiClient profile provides, for `import-profile` and
 /// `migrate-psk`. `None` when the profile is missing or unusable.
-pub trait FortiClientProfiles {
+pub trait FortiClientProfiles: Send + Sync {
+    /// The installed profiles that could be imported, without their PSKs (the
+    /// `list_sources` op). The default reads FortiClient's own property list.
+    fn list(&self) -> Vec<FortiClientSource> {
+        registry::forticlient_sources(std::path::Path::new(registry::FORTICLIENT_VPN_PLIST))
+    }
     fn import(&self, name: &str) -> Option<FortiClientProfile>;
     /// The PSK of profile `name`, only when it is for exactly `gateway`.
     fn psk(&self, name: &str, gateway: &str) -> Option<Zeroizing<Vec<u8>>>;
@@ -515,6 +522,11 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             finish(io, "OFTC menu login item unregistered", 0)
         }
         Command::HostServe => {
+            let spawner = serve::ops_system::ProcessSpawner {
+                exe: env.exe().map(Into::into),
+                logs: env.logs_dir(),
+            };
+            let updates = serve::ops_update::CurlUpdates::from_bundle(env.exe());
             let (text, code) = serve::run(
                 env,
                 env.root(),
@@ -522,6 +534,15 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 backends.extensions,
                 backends.login,
                 backends.signals,
+                serve::ops::OpsDeps {
+                    keychain: backends.keychain,
+                    forticlient: backends.forticlient,
+                    launchctl: backends.launchctl,
+                    spawner: &spawner,
+                    updates: &updates,
+                    opener: &serve::ops_system::SystemOpener,
+                    pause: &std::thread::sleep,
+                },
             );
             if text.is_empty() {
                 code
@@ -657,9 +678,9 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             let Ok(psk) = psk else {
                 return finish(io, &format!("Could not read a valid PSK from {source}"), 1);
             };
-            match backends.keychain.set(&gateway, &psk) {
+            match save_psk(backends.keychain, &gateway, &psk) {
                 Ok(()) => finish(io, "OFTC PSK stored in Keychain", 0),
-                Err(_) => finish(io, "Could not save OFTC Keychain PSK", 1),
+                Err(failure) => failure_line(io, failure),
             }
         }
         Command::ExportProfiles { ids } => export_profiles(io, backends, root, &ids),
@@ -676,36 +697,56 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 "Could not obtain plaintext PSK for that profile and gateway",
                 1,
             ),
-            Some(psk) => match backends.keychain.set(&gateway, &psk) {
+            Some(psk) => match save_psk(backends.keychain, &gateway, &psk) {
                 Ok(()) => finish(
                     io,
                     "Existing local profile PSK migrated into OFTC Keychain",
                     0,
                 ),
-                Err(_) => finish(io, "Could not save OFTC Keychain PSK", 1),
+                Err(failure) => failure_line(io, failure),
             },
         },
         Command::SaveProfile { profile } => {
-            if registry::entries(root)
-                .iter()
-                .any(|entry| entry.profile.gateway == profile.gateway)
-            {
-                return finish(
-                    io,
-                    &format!("OFTC already has a profile for {}", profile.gateway),
-                    1,
-                );
-            }
-            match registry::add(root, &profile, selected.as_deref()) {
+            match save_profile(root, &profile, selected.as_deref()) {
                 Ok(entry) => finish(io, &format!("OFTC profile saved: id={}", entry.id), 0),
-                Err(_) => finish(
-                    io,
-                    "Could not save OFTC profile (a profile with that id may already exist)",
-                    1,
-                ),
+                Err(failure) => failure_line(io, failure),
             }
         }
     }
+}
+
+fn failure_line(io: &mut Io, failure: Failure) -> i32 {
+    let (text, code) = failure.outcome();
+    finish(io, &text, code)
+}
+
+/// Stores `psk` as the Keychain item of `gateway`.
+pub(crate) fn save_psk(keychain: &dyn Keychain, gateway: &str, psk: &[u8]) -> Result<(), Failure> {
+    keychain
+        .set(gateway, psk)
+        .map_err(|_| Failure::internal("Could not save OFTC Keychain PSK"))
+}
+
+/// Creates a profile (under `requested`, or an id derived from its name). A gateway
+/// that already has a profile is refused with that profile's id.
+pub(crate) fn save_profile(
+    root: &std::path::Path,
+    profile: &Profile,
+    requested: Option<&str>,
+) -> Result<ProfileEntry, Failure> {
+    if let Some(existing) = registry::entries(root)
+        .iter()
+        .find(|entry| entry.profile.gateway == profile.gateway)
+    {
+        return Err(Failure::new(
+            ErrorCode::AlreadyConfigured,
+            &format!("OFTC already has a profile for {}", profile.gateway),
+        )
+        .for_profile(&existing.id));
+    }
+    registry::add(root, profile, requested).map_err(|_| {
+        Failure::internal("Could not save OFTC profile (a profile with that id may already exist)")
+    })
 }
 
 /// `set-autostart on|off`: the selected profile's connect-at-login choice. Stopping
@@ -722,12 +763,11 @@ fn set_autostart(
         Err(message) => return finish(io, &message, 1),
     };
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(backends.clock.unix_secs());
-    let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
-    match agent::set_connect_at_login(
+    match change_autostart(
         backends.login,
         backends.launchctl,
-        &registry::entry_directory(env.root(), &entry.id),
-        adopted,
+        env.root(),
+        &entry,
         enabled,
         now,
     ) {
@@ -740,12 +780,40 @@ fn set_autostart(
             ),
             0,
         ),
-        Err(error) => finish(
-            io,
-            &format!("Could not change automatic connection: {error}"),
-            1,
-        ),
+        Err(failure) => failure_line(io, failure),
     }
+}
+
+/// Sets `entry`'s connect-at-login choice. A refused registration is typed from the
+/// agent's state afterwards: approval pending, or the agent not found.
+pub(crate) fn change_autostart(
+    login: &dyn LoginItems,
+    launchctl: &dyn Launchctl,
+    root: &std::path::Path,
+    entry: &ProfileEntry,
+    enabled: bool,
+    now: SystemTime,
+) -> Result<(), Failure> {
+    let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
+    agent::set_connect_at_login(
+        login,
+        launchctl,
+        &registry::entry_directory(root, &entry.id),
+        adopted,
+        enabled,
+        now,
+    )
+    .map_err(|error| {
+        let code = match agent::status(login) {
+            "requires-approval" => ErrorCode::ApprovalRequired,
+            "not-found" => ErrorCode::AgentUnavailable,
+            _ => ErrorCode::Internal,
+        };
+        Failure::new(
+            code,
+            &format!("Could not change automatic connection: {error}"),
+        )
+    })
 }
 
 /// `supervise-autostart`, run by the login agent: one supervisor process per
@@ -791,14 +859,13 @@ fn has_gateway(root: &std::path::Path, gateway: &str) -> bool {
         .any(|entry| entry.profile.gateway == gateway)
 }
 
-/// Writes a bundle of the named profile ids (all when none) to stdout, with each
-/// PSK from the Keychain. Nothing is written unless every profile has its PSK.
-fn export_profiles(
-    io: &mut Io,
-    backends: &Backends,
+/// The `.oftc` bundle of the profiles with `ids` (all when none), each with its PSK
+/// from the Keychain. Nothing is produced unless every profile has its PSK.
+pub(crate) fn export_bundle(
     root: &std::path::Path,
+    keychain: &dyn Keychain,
     ids: &[String],
-) -> i32 {
+) -> Result<Zeroizing<Vec<u8>>, Failure> {
     let all = registry::entries(root);
     let chosen: Vec<&ProfileEntry> = if ids.is_empty() {
         all.iter().collect()
@@ -808,27 +875,33 @@ fn export_profiles(
             match all.iter().find(|entry| &entry.id == id) {
                 Some(entry) => chosen.push(entry),
                 None => {
-                    let message = format!("OFTC profile unavailable: no profile named {id}");
-                    return finish(io, &message, 1);
+                    return Err(Failure::new(
+                        ErrorCode::NotConfigured,
+                        &format!("OFTC profile unavailable: no profile named {id}"),
+                    ))
                 }
             }
         }
         chosen
     };
     if chosen.is_empty() {
-        return finish(io, "No OFTC profiles to export", 1);
+        return Err(Failure::new(
+            ErrorCode::NotConfigured,
+            "No OFTC profiles to export",
+        ));
     }
     let mut items = Vec::with_capacity(chosen.len());
     for entry in chosen {
         let p = &entry.profile;
-        let psk = backends
-            .keychain
+        let psk = keychain
             .get(&p.gateway)
             .ok()
             .and_then(|psk| String::from_utf8(psk.to_vec()).ok());
         let Some(psk) = psk else {
-            let message = format!("PSK unavailable for {}; nothing exported", entry.name());
-            return finish(io, &message, 1);
+            return Err(Failure::new(
+                ErrorCode::PskUnavailable,
+                &format!("PSK unavailable for {}; nothing exported", entry.name()),
+            ));
         };
         items.push(bundle::Item {
             gateway: p.gateway.clone(),
@@ -838,17 +911,92 @@ fn export_profiles(
             transport: p.transport,
         });
     }
-    match bundle::encode(items) {
-        Some(data) => {
+    bundle::encode(items).ok_or_else(|| Failure::internal("Could not write the profile file"))
+}
+
+/// `export-profiles`: [`export_bundle`] to standard output.
+fn export_profiles(
+    io: &mut Io,
+    backends: &Backends,
+    root: &std::path::Path,
+    ids: &[String],
+) -> i32 {
+    match export_bundle(root, backends.keychain, ids) {
+        Ok(data) => {
             io.out.bytes(&data);
             0
         }
-        None => finish(io, "Could not write the profile file", 1),
+        Err(failure) => failure_line(io, failure),
     }
 }
 
-/// Reads a bundle from standard input. A gateway that already has a profile is
-/// skipped, so importing never changes an existing profile or its PSK.
+/// A `.oftc` file's bytes (at most [`bundle::MAX_BYTES`] of them) as profiles.
+pub(crate) fn decode_bundle(data: &[u8]) -> Result<Vec<bundle::Incoming>, Failure> {
+    bundle::decode(data).map_err(|error| Failure::new(ErrorCode::InvalidFile, &error.message()))
+}
+
+/// What importing one profile of a bundle did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Imported {
+    Added { name: String, id: String },
+    /// The gateway already has a profile; it and its PSK are left alone.
+    Skipped { name: String },
+}
+
+impl Imported {
+    fn line(&self) -> String {
+        match self {
+            Imported::Added { name, id } => format!("Imported {name}: id={id}"),
+            Imported::Skipped { name } => format!("Skipped {name}: already configured"),
+        }
+    }
+}
+
+/// The profiles imported before a failure, and the failure if there was one.
+pub(crate) struct ImportReport {
+    pub done: Vec<Imported>,
+    pub failure: Option<Failure>,
+}
+
+/// Imports `incoming`. A gateway that already has a profile is skipped, so importing
+/// never changes an existing profile or its PSK.
+pub(crate) fn import_bundle(
+    root: &std::path::Path,
+    keychain: &dyn Keychain,
+    incoming: Vec<bundle::Incoming>,
+) -> ImportReport {
+    let mut done = Vec::new();
+    for item in incoming {
+        let name = item.profile.display_name().to_owned();
+        if has_gateway(root, &item.profile.gateway) {
+            done.push(Imported::Skipped { name });
+            continue;
+        }
+        if let Err(failure) = save_psk(keychain, &item.profile.gateway, &item.psk) {
+            return ImportReport {
+                done,
+                failure: Some(failure),
+            };
+        }
+        match registry::add(root, &item.profile, None) {
+            Ok(entry) => done.push(Imported::Added { name, id: entry.id }),
+            Err(_) => {
+                return ImportReport {
+                    done,
+                    failure: Some(Failure::internal(&format!(
+                        "Could not save the profile \"{name}\""
+                    ))),
+                }
+            }
+        }
+    }
+    ImportReport {
+        done,
+        failure: None,
+    }
+}
+
+/// Reads a bundle from standard input and imports it.
 fn import_profiles(io: &mut Io, backends: &Backends, root: &std::path::Path) -> i32 {
     let mut input = Zeroizing::new(Vec::new());
     // A read error is an empty (so unreadable) file, as before.
@@ -856,34 +1004,19 @@ fn import_profiles(io: &mut Io, backends: &Backends, root: &std::path::Path) -> 
         .stdin
         .take(bundle::MAX_BYTES as u64 + 1)
         .read_to_end(&mut input);
-    let incoming = match bundle::decode(&input) {
+    let incoming = match decode_bundle(&input) {
         Ok(incoming) => incoming,
-        Err(error) => return finish(io, &error.message(), 1),
+        Err(failure) => return failure_line(io, failure),
     };
-    let mut lines = Vec::new();
-    for item in incoming {
-        let name = item.profile.display_name().to_owned();
-        if has_gateway(root, &item.profile.gateway) {
-            lines.push(format!("Skipped {name}: already configured"));
-            continue;
-        }
-        if backends
-            .keychain
-            .set(&item.profile.gateway, &item.psk)
-            .is_err()
-        {
-            lines.push("Could not save OFTC Keychain PSK".to_owned());
-            return finish(io, &lines.join("\n"), 1);
-        }
-        match registry::add(root, &item.profile, None) {
-            Ok(entry) => lines.push(format!("Imported {name}: id={}", entry.id)),
-            Err(_) => {
-                lines.push(format!("Could not save the profile \"{name}\""));
-                return finish(io, &lines.join("\n"), 1);
-            }
+    let report = import_bundle(root, backends.keychain, incoming);
+    let mut lines: Vec<String> = report.done.iter().map(Imported::line).collect();
+    match report.failure {
+        None => finish(io, &lines.join("\n"), 0),
+        Some(failure) => {
+            lines.push(failure.text);
+            finish(io, &lines.join("\n"), failure.exit)
         }
     }
-    finish(io, &lines.join("\n"), 0)
 }
 
 /// Creates a profile from an installed FortiClient profile and stores its PSK.
@@ -916,12 +1049,8 @@ fn import_profile(
     if requested_id.is_some_and(|id| registry::entries(root).iter().any(|e| e.id == id)) {
         return finish(io, refused, 1);
     }
-    if backends
-        .keychain
-        .set(&profile.gateway, &imported.psk)
-        .is_err()
-    {
-        return finish(io, "Could not save OFTC Keychain PSK", 1);
+    if let Err(failure) = save_psk(backends.keychain, &profile.gateway, &imported.psk) {
+        return failure_line(io, failure);
     }
     match registry::add(root, &profile, requested_id) {
         Ok(entry) => {

@@ -1,21 +1,25 @@
 //! One client connection: the handshake, the request loop and the event pusher.
 
+use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use oftc_ui_edge::{
-    reply_err, reply_ok, ErrorBody, ErrorCode, HelloArgs, HelloResult, HostBlock, Request,
-    SubscribeArgs, PROTOCOL, PROTOCOL_MIN,
+    progress_line, reply_err, reply_ok, CancelArgs, ErrorBody, ErrorCode, HelloArgs, HelloResult,
+    HostBlock, Request, SubscribeArgs, PROTOCOL, PROTOCOL_MIN,
 };
 
 use super::collect::Collector;
 use super::frame::{self, Line};
 use super::hub::{Cursor, Hub, Topics};
+use super::ops::{self, Busy, OpCx};
+use super::Services;
 
 /// A client that does not read for this long is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,6 +33,16 @@ pub struct Shared<'a> {
     pub collector: &'a Collector<'a>,
     pub host: &'a HostBlock,
     pub hello_timeout: Duration,
+    pub services: &'a Services<'a>,
+    pub busy: &'a Busy,
+}
+
+/// A running op: whether `cancel` was asked, and whether its request has been
+/// answered (by the op, or by `cancel` on its behalf, whichever came first).
+#[derive(Default)]
+struct Flight {
+    cancel: AtomicBool,
+    answered: AtomicBool,
 }
 
 /// The write half and its state, shared by the request loop and the pusher.
@@ -43,9 +57,18 @@ struct Conn {
     /// Where the newest subscription starts, taken before the sampler is woken so the
     /// first sample after subscribing is not mistaken for an old one.
     start: Mutex<Cursor>,
+    /// Ops of this connection that have not ended, by request id.
+    flights: Mutex<HashMap<u64, Arc<Flight>>>,
 }
 
 impl Conn {
+    /// Sends the answer of a flight unless `cancel` already answered for it.
+    fn answer(&self, flight: &Flight, line: &str) {
+        if !flight.answered.swap(true, Ordering::SeqCst) {
+            self.send(line);
+        }
+    }
+
     fn send(&self, line: &str) -> bool {
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let sent = writer
@@ -96,6 +119,7 @@ pub fn serve(stream: UnixStream, shared: &Shared) {
         topics: Mutex::new(Topics::default()),
         epoch: AtomicU64::new(0),
         start: Mutex::new(Cursor::default()),
+        flights: Mutex::new(HashMap::new()),
     };
     // However this ends, the connection's topics stop counting as subscribers.
     let _subscribers = super::OnDrop(|| {
@@ -119,14 +143,15 @@ pub fn serve(stream: UnixStream, shared: &Shared) {
             // The pusher may be asleep on the hub; it checks `closed` when it wakes.
             shared.hub.poke();
         });
-        requests(conn, BufReader::new(reader), shared, hello_done);
+        requests(scope, conn, BufReader::new(reader), shared, hello_done);
     });
 }
 
-fn requests(
-    conn: &Conn,
+fn requests<'scope, 'env>(
+    scope: &'scope thread::Scope<'scope, 'env>,
+    conn: &'env Conn,
     mut reader: BufReader<UnixStream>,
-    shared: &Shared,
+    shared: &'env Shared<'env>,
     hello_done: mpsc::Sender<()>,
 ) {
     let mut hello_done = Some(hello_done);
@@ -207,12 +232,76 @@ fn requests(
                 set_topics(conn, shared.hub, Topics::default());
                 continue;
             }
+            "cancel" => match request.args::<CancelArgs>() {
+                Some(args) => {
+                    let flight = conn
+                        .flights
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&args.target)
+                        .cloned();
+                    // A target that is not running, or has ended, is already as cancelled
+                    // as it can be.
+                    if let Some(flight) = flight {
+                        flight.cancel.store(true, Ordering::SeqCst);
+                        conn.answer(&flight, &error(args.target, ErrorCode::Cancelled, "cancelled"));
+                    }
+                    reply_ok(id, &serde_json::json!({}))
+                }
+                None => error(id, ErrorCode::BadRequest, "cancel needs a target"),
+            },
+            other if ops::OPS.contains(&other) => {
+                let flight = Arc::new(Flight::default());
+                let mut flights = conn.flights.lock().unwrap_or_else(PoisonError::into_inner);
+                if flights.contains_key(&id) {
+                    drop(flights);
+                    let reply = error(id, ErrorCode::BadRequest, "request id already running");
+                    if !conn.send(&reply) {
+                        return;
+                    }
+                    continue;
+                }
+                flights.insert(id, flight.clone());
+                drop(flights);
+                // The worker answers when the op ends; a slow op blocks nothing else.
+                scope.spawn(move || worker(conn, shared, request, &flight));
+                continue;
+            }
             other => error(id, ErrorCode::UnknownOp, &format!("unknown op {other}")),
         };
         if !conn.send(&reply) {
             return;
         }
     }
+}
+
+/// Runs one op and sends its answer. A panic in the op is an `internal` failure of
+/// this request only.
+fn worker(conn: &Conn, shared: &Shared, request: Request, flight: &Flight) {
+    let id = request.id;
+    let progress = |step, state| {
+        if !flight.answered.load(Ordering::SeqCst) {
+            conn.send(&progress_line(id, step, state));
+        }
+    };
+    let cx = OpCx {
+        services: shared.services,
+        busy: shared.busy,
+        collector: shared.collector,
+        cancel: &flight.cancel,
+        progress: &progress,
+    };
+    let line = match catch_unwind(AssertUnwindSafe(|| ops::run(&request, &cx))) {
+        Ok(Some(Ok(result))) => reply_ok(id, &result),
+        Ok(Some(Err(failure))) => reply_err(id, &failure.body()),
+        Ok(None) => error(id, ErrorCode::UnknownOp, "unknown op"),
+        Err(_) => error(id, ErrorCode::Internal, "internal failure"),
+    };
+    conn.answer(flight, &line);
+    conn.flights
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&id);
 }
 
 fn set_topics(conn: &Conn, hub: &Hub, topics: Topics) {

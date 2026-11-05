@@ -73,3 +73,71 @@ fn replies() {
     assert_eq!(listed.profiles[0].id, "c2");
     assert_eq!(reply_ok(3, &listed), wire("profiles_reply.json"));
 }
+
+/// The PR 3 documents: requests decode into their argument types, results and
+/// progress encode to exactly the pinned lines, and the error body carries
+/// `profile_id` only when there is one.
+#[test]
+fn setup_documents() {
+    let wire = |file: &str| -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/golden/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+        .trim()
+        .to_owned()
+    };
+    let add = Request::parse(wire("add_profile_request.json").as_bytes()).unwrap();
+    let args = add.args::<AddProfileArgs>().unwrap();
+    assert_eq!(args.psk_source, PskSource::Forticlient);
+    assert_eq!(args.label.as_deref(), Some("Example Office"));
+    assert_eq!(args.transport, Transport::Udp);
+    // A PSK source this protocol does not have does not decode.
+    let odd = r#"{"id":1,"op":"add_profile","gateway":"g","saml_port":1,"transport":"udp","psk_source":"typed"}"#;
+    assert_eq!(
+        Request::parse(odd.as_bytes())
+            .unwrap()
+            .args::<AddProfileArgs>(),
+        None
+    );
+
+    assert_eq!(
+        progress_line(9, Step::ExtensionApproval, StepState::Waiting),
+        wire("event_progress.json")
+    );
+    assert_eq!(
+        reply_err(
+            10,
+            &ErrorBody::new(ErrorCode::AlreadyConfigured, "vpn.example.com is already set up")
+                .for_profile("c2")
+        ),
+        wire("error_already_configured.json")
+    );
+    let preview = PreviewResult {
+        profiles: vec![PreviewItem {
+            name: "Office VPN".into(),
+            gateway: "vpn.example.com".into(),
+            saml_port: 9443,
+            transport: Transport::Tcp,
+            already_configured: true,
+        }],
+    };
+    assert_eq!(reply_ok(11, &preview), wire("import_preview_reply.json"));
+    let sources = SourcesResult {
+        sources: vec![SourceInfo {
+            label: "Example Office".into(),
+            gateway: "vpn.example.com".into(),
+            saml_port: 9443,
+            already_configured: false,
+        }],
+    };
+    assert_eq!(reply_ok(12, &sources), wire("list_sources_reply.json"));
+    let update = UpdateResult {
+        available: Some(UpdateOffer {
+            version: "0.9.1".into(),
+            page: "https://example.com/oftc/releases/tag/v0.9.1".into(),
+        }),
+    };
+    assert_eq!(reply_ok(13, &update), wire("check_update_reply.json"));
+}
