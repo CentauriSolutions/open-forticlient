@@ -8,13 +8,19 @@
 
 use std::io::Read;
 
+use oftc_apple::error::AppleError;
+use oftc_apple::login::LoginItems;
+use oftc_apple::login::{LoginItem, LoginStatus};
 use oftc_apple::manager::VpnControl;
+use oftc_apple::sysext::{EventSink, ExtensionControl, ExtensionEvent, Finish};
 use oftc_provider::envelope::ConnectMode;
 use zeroize::Zeroizing;
 
 use crate::acquire::{Acquirer, Clock};
+use crate::agent::{self, Launchctl};
 use crate::bundle;
 use crate::env::HostEnv;
+use crate::intent;
 use crate::keychain::{read_psk_line, Keychain, KeychainError};
 use crate::out::Out;
 use crate::profile::{Profile, Transport};
@@ -27,6 +33,9 @@ pub struct Verb {
     pub synopsis: &'static str,
     /// True when `oftc_host_main` handles it; false while Swift still does.
     pub rust: bool,
+    /// Not in the usage text: a verb the scripts and the menu run that the
+    /// shipped usage never listed. Kept out so the text stays byte-for-byte.
+    pub hidden: bool,
 }
 
 impl Verb {
@@ -39,6 +48,15 @@ const fn rust(synopsis: &'static str) -> Verb {
     Verb {
         synopsis,
         rust: true,
+        hidden: false,
+    }
+}
+
+const fn hidden(synopsis: &'static str) -> Verb {
+    Verb {
+        synopsis,
+        rust: true,
+        hidden: true,
     }
 }
 
@@ -46,17 +64,18 @@ const fn swift(synopsis: &'static str) -> Verb {
     Verb {
         synopsis,
         rust: false,
+        hidden: false,
     }
 }
 
 /// Every verb, in the order the usage text lists them. Each later change moves
 /// verbs from `swift` to `rust` here and in `Host/main.swift`.
 pub const VERBS: &[Verb] = &[
-    swift("activate"),
-    swift("deactivate"),
-    swift("agent-status"),
-    swift("register-agent"),
-    swift("unregister-agent"),
+    rust("activate"),
+    rust("deactivate"),
+    rust("agent-status"),
+    rust("register-agent"),
+    rust("unregister-agent"),
     rust("install-config"),
     rust("list-profiles"),
     swift("check-update [url]"),
@@ -85,11 +104,17 @@ pub const VERBS: &[Verb] = &[
     rust("status"),
     swift("stop"),
     rust("remove-config"),
+    hidden("login-settings"),
+    hidden("unregister-menu-login"),
 ];
 
 /// The usage text, as `OFTCAgent` prints it for a bad command line.
 pub fn usage() -> String {
-    let verbs: Vec<&str> = VERBS.iter().map(|verb| verb.synopsis).collect();
+    let verbs: Vec<&str> = VERBS
+        .iter()
+        .filter(|verb| !verb.hidden)
+        .map(|verb| verb.synopsis)
+        .collect();
     format!("Usage: OFTCAgent [--profile <id>] {}", verbs.join("|"))
 }
 
@@ -100,6 +125,13 @@ pub fn rust_verbs() -> impl Iterator<Item = &'static str> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Activate,
+    Deactivate,
+    AgentStatus,
+    RegisterAgent,
+    UnregisterAgent,
+    LoginSettings,
+    UnregisterMenuLogin,
     ListProfiles,
     ShowProfile,
     HasPsk,
@@ -175,6 +207,13 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
     };
     let rest = &args[1..];
     let command = match (verb.as_str(), rest) {
+        ("activate", []) => Command::Activate,
+        ("deactivate", []) => Command::Deactivate,
+        ("agent-status", []) => Command::AgentStatus,
+        ("register-agent", []) => Command::RegisterAgent,
+        ("unregister-agent", []) => Command::UnregisterAgent,
+        ("login-settings", []) => Command::LoginSettings,
+        ("unregister-menu-login", []) => Command::UnregisterMenuLogin,
         ("list-profiles", []) => Command::ListProfiles,
         ("show-profile", []) => Command::ShowProfile,
         ("has-psk", []) => Command::HasPsk,
@@ -282,6 +321,9 @@ pub struct Backends<'a> {
     pub forticlient: &'a dyn FortiClientProfiles,
     /// The FortiClient profile name for a gateway, to name a migrated profile.
     pub legacy_name: &'a dyn Fn(&str) -> Option<String>,
+    pub extensions: &'a dyn ExtensionControl,
+    pub login: &'a dyn LoginItems,
+    pub launchctl: &'a dyn Launchctl,
     pub vpn: &'a dyn VpnControl,
     pub acquirer: &'a dyn Acquirer,
     pub clock: &'a dyn Clock,
@@ -327,6 +369,47 @@ pub(crate) fn require_entry(
     }
 }
 
+/// `activate` and `deactivate`: submit the request and narrate it, as the Swift
+/// delegate did. The events print as they happen, while the request waits on
+/// the user.
+fn change_extension(activate: bool, env: &HostEnv, backends: &Backends, io: &mut Io) -> i32 {
+    let provider = env.provider_id();
+    let sink: EventSink = {
+        let out = io.out.clone();
+        let provider = provider.clone();
+        std::sync::Arc::new(move |event| {
+            match event {
+                ExtensionEvent::NeedsApproval => {
+                    out.line(&format!("macOS approval required for {provider}"));
+                    out.line("In System Settings → General → Login Items & Extensions, click ⓘ next to OFTC under Extensions and turn on Network Extension.");
+                }
+                ExtensionEvent::Replacing { from, to } => out.line(&format!(
+                    "System extension replacement: {}/{} -> {}/{}",
+                    from.short, from.build, to.short, to.build
+                )),
+            }
+            out.flush();
+        })
+    };
+    let result = if activate {
+        backends.extensions.activate(&provider, sink)
+    } else {
+        backends.extensions.deactivate(&provider, sink)
+    };
+    match result {
+        Ok(Finish::Completed) => finish(io, "System extension request completed", 0),
+        Ok(Finish::WillCompleteAfterReboot) => {
+            finish(io, "Extension replacement accepted; reboot required", 3)
+        }
+        Err(AppleError::Ns { domain, code, .. }) => finish(
+            io,
+            &format!("System extension request failed: domain={domain} code={code}"),
+            1,
+        ),
+        Err(other) => finish(io, &format!("System extension request failed: {other}"), 1),
+    }
+}
+
 pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> i32 {
     let invocation = match parse(args) {
         Ok(invocation) => invocation,
@@ -350,6 +433,49 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
     };
     let vpn_verb = |(text, code): (String, i32), io: &mut Io| finish(io, &text, code);
     match invocation.command {
+        Command::Activate => change_extension(true, env, backends, io),
+        Command::Deactivate => change_extension(false, env, backends, io),
+        Command::AgentStatus => finish(io, agent::status(backends.login), 0),
+        Command::RegisterAgent => match agent::register(backends.login, backends.launchctl) {
+            Ok(()) => finish(io, "OFTC login agent registered", 0),
+            Err(e) => finish(io, &format!("Could not register OFTC login agent: {e}"), 1),
+        },
+        Command::UnregisterAgent => match agent::unregister(backends.login) {
+            Ok(()) => finish(io, "OFTC login agent unregistered", 0),
+            Err(e) => finish(
+                io,
+                &format!("Could not unregister OFTC login agent: {e}"),
+                1,
+            ),
+        },
+        Command::UnregisterMenuLogin => {
+            let main = LoginItem::MainApp;
+            let registered = matches!(
+                backends.login.status(&main),
+                LoginStatus::Enabled | LoginStatus::RequiresApproval
+            );
+            if registered && backends.login.unregister(&main).is_err() {
+                return finish(io, "Could not unregister the OFTC menu login item", 1);
+            }
+            finish(io, "OFTC menu login item unregistered", 0)
+        }
+        Command::LoginSettings => {
+            let state = |on: bool| if on { "enabled" } else { "disabled" };
+            let menu = backends.login.status(&LoginItem::MainApp) == LoginStatus::Enabled;
+            let mut lines = vec![format!("Menu launch at login: {}", state(menu))];
+            let agent_enabled = agent::status(backends.login) == "enabled";
+            for entry in registry::entries(root) {
+                let legacy = entry.profile.adopts_unkeyed_vpn_entry == Some(true) && agent_enabled;
+                let on =
+                    intent::connect_at_login(&registry::entry_directory(root, &entry.id), legacy);
+                lines.push(format!(
+                    "VPN connect at login ({}): {}",
+                    entry.id,
+                    state(on)
+                ));
+            }
+            finish(io, &lines.join("\n"), 0)
+        }
         Command::InstallConfig => vpn_verb(vpn::install_config(&ctx), io),
         Command::Status => vpn_verb(vpn::status(&ctx), io),
         Command::RemoveConfig => vpn_verb(vpn::remove_config(&ctx), io),
@@ -631,11 +757,14 @@ fn import_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{agent_item, RecordingLaunchctl};
     use crate::keychain::MemoryKeychain;
     use crate::out::Capture;
     use crate::profile::testutil::{fixture, TempDir};
     use oftc_apple::error::AppleError;
+    use oftc_apple::login::MockLoginItems;
     use oftc_apple::manager::{MockEntry, MockVpn, StartKind, VpnStatus};
+    use oftc_apple::sysext::{ExtensionVersion, MockExtensions};
     use oftc_host_bootstrap::{AcquireFailure, TunnelProfile};
     use oftc_provider::envelope::{
         consume, encode_hbr1, OptionValue, Secret, StartMode, StartOptions as ProviderOptions,
@@ -689,7 +818,13 @@ mod tests {
             (vec!["has-psk", "x"], Err(ParseError::Usage)),
             (vec!["show-profile", "x"], Err(ParseError::Usage)),
             (vec![], Err(ParseError::Usage)),
-            (vec!["activate"], Err(ParseError::Usage)), // still Swift's
+            (vec!["activate"], invocation(None, Command::Activate)),
+            (vec!["activate", "x"], Err(ParseError::Usage)),
+            (
+                vec!["--profile", "lab", "unregister-menu-login"],
+                invocation(Some("lab"), Command::UnregisterMenuLogin),
+            ),
+            (vec!["stop"], Err(ParseError::Usage)), // still Swift's
             (vec!["nonsense"], Err(ParseError::Usage)),
             // --profile needs a valid id and a verb after it.
             (vec!["--profile"], Err(ParseError::ProfileFlag)),
@@ -1025,6 +1160,9 @@ mod tests {
         env: HostEnv,
         keychain: Flaky,
         prompt: Scripted,
+        extensions: MockExtensions,
+        login: MockLoginItems,
+        launchctl: RecordingLaunchctl,
         vpn: MockVpn,
         clock: Rc<FakeClock>,
         acquirer: FakeAcquirer,
@@ -1052,6 +1190,9 @@ mod tests {
                 env,
                 keychain: Flaky::default(),
                 prompt: Scripted(RefCell::new(None)),
+                extensions: MockExtensions::new(),
+                login: MockLoginItems::new(),
+                launchctl: RecordingLaunchctl::new(true),
                 vpn: MockVpn::new(),
                 clock,
                 acquirer,
@@ -1068,6 +1209,9 @@ mod tests {
                 legacy_name: &|gateway| {
                     (gateway == "vpn.example.com").then(|| "Example Office".to_owned())
                 },
+                extensions: &self.extensions,
+                login: &self.login,
+                launchctl: &self.launchctl,
                 vpn: &self.vpn,
                 acquirer: &self.acquirer,
                 clock: &*self.clock,
@@ -2056,5 +2200,199 @@ mod tests {
         );
         assert!(!Path::new(&root.join("profile.json")).exists());
         let _ = &h.dir;
+    }
+
+    fn version(short: &str, build: &str) -> ExtensionVersion {
+        ExtensionVersion {
+            short: short.into(),
+            build: build.into(),
+        }
+    }
+
+    /// `activate` and `deactivate`: the narration and exit code of each way a
+    /// request can end, and which request was made for which identifier.
+    #[test]
+    fn extension_requests() {
+        let h = Harness::new();
+        let provider = "com.example.oftc.provider";
+        h.extensions
+            .script_activate(Vec::new(), Ok(Finish::Completed));
+        h.expect(&["activate"], "System extension request completed\n", 0);
+        h.extensions.script_activate(
+            vec![
+                ExtensionEvent::NeedsApproval,
+                ExtensionEvent::Replacing {
+                    from: version("1.0", "7"),
+                    to: version("1.1", "8"),
+                },
+            ],
+            Ok(Finish::WillCompleteAfterReboot),
+        );
+        h.expect(
+            &["activate"],
+            &format!(
+                "macOS approval required for {provider}\n\
+                 In System Settings → General → Login Items & Extensions, click ⓘ next to OFTC under Extensions and turn on Network Extension.\n\
+                 System extension replacement: 1.0/7 -> 1.1/8\n\
+                 Extension replacement accepted; reboot required\n"
+            ),
+            3,
+        );
+        h.extensions.script_deactivate(
+            Vec::new(),
+            Err(AppleError::from_nserror(
+                "OSSystemExtensionErrorDomain",
+                8,
+                "bad",
+            )),
+        );
+        h.expect(
+            &["deactivate"],
+            "System extension request failed: domain=OSSystemExtensionErrorDomain code=8\n",
+            1,
+        );
+        // A request the system never answers is not an NSError.
+        h.expect(
+            &["deactivate"],
+            "System extension request failed: timed out waiting for the system\n",
+            1,
+        );
+        let kinds: Vec<_> = h.extensions.requests();
+        assert_eq!(
+            kinds,
+            [
+                ("activate", provider.to_owned()),
+                ("activate", provider.to_owned()),
+                ("deactivate", provider.to_owned()),
+                ("deactivate", provider.to_owned()),
+            ]
+        );
+    }
+
+    /// The login verbs over every status the system reports.
+    #[test]
+    fn login_verbs() {
+        let h = Harness::new();
+        let agent = agent_item();
+        for (status, text) in [
+            (LoginStatus::NotRegistered, "not-registered"),
+            (LoginStatus::RequiresApproval, "requires-approval"),
+            (LoginStatus::NotFound, "not-found"),
+            (LoginStatus::Enabled, "enabled"),
+        ] {
+            h.login.set_status(&agent, status);
+            h.expect(&["agent-status"], &format!("{text}\n"), 0);
+        }
+
+        h.login.set_status(&agent, LoginStatus::NotRegistered);
+        h.expect(&["register-agent"], "OFTC login agent registered\n", 0);
+        assert_eq!(h.launchctl.calls(), [crate::agent::AGENT_LABEL]);
+        h.expect(&["unregister-agent"], "OFTC login agent unregistered\n", 0);
+        assert_eq!(h.login.status(&agent), LoginStatus::NotRegistered);
+        h.login
+            .script_register(&agent, Err(AppleError::from_nserror("d", 1, "denied")));
+        h.expect(
+            &["register-agent"],
+            "Could not register OFTC login agent: denied\n",
+            1,
+        );
+        h.login.set_status(&agent, LoginStatus::Unknown);
+        h.expect(
+            &["unregister-agent"],
+            "Could not unregister OFTC login agent: OFTC login agent is unknown\n",
+            1,
+        );
+
+        // The menu login item: only a registered one is touched.
+        let main = LoginItem::MainApp;
+        h.expect(
+            &["unregister-menu-login"],
+            "OFTC menu login item unregistered\n",
+            0,
+        );
+        assert!(h.login.calls().iter().all(|(_, item)| item != &main));
+        h.login.set_status(&main, LoginStatus::RequiresApproval);
+        h.expect(
+            &["unregister-menu-login"],
+            "OFTC menu login item unregistered\n",
+            0,
+        );
+        assert_eq!(h.login.status(&main), LoginStatus::NotRegistered);
+        h.login.set_status(&main, LoginStatus::Enabled);
+        h.login
+            .script_unregister(&main, Err(AppleError::from_nserror("d", 1, "no")));
+        h.expect(
+            &["unregister-menu-login"],
+            "Could not unregister the OFTC menu login item\n",
+            1,
+        );
+    }
+
+    /// `login-settings` lists the menu item, then each profile's preference; a
+    /// migrated profile inherits an already registered agent.
+    #[test]
+    fn login_settings_reads_each_profile() {
+        let h = Harness::new();
+        h.expect(&["login-settings"], "Menu launch at login: disabled\n", 0);
+        let root = h.env.root();
+        std::fs::create_dir_all(root).unwrap();
+        for file in ["profile.json", "connection-preferences.json"] {
+            std::fs::copy(fixture("swift/legacy-root").join(file), root.join(file)).unwrap();
+        }
+        // Migration moves the stored preference (true) with the profile.
+        h.run(&["list-profiles"], "");
+        h.run(
+            &[
+                "--profile",
+                "lab",
+                "save-profile",
+                "lab.example.com",
+                "8443",
+            ],
+            "",
+        );
+        // A menu item waiting for approval is not enabled.
+        h.login
+            .set_status(&LoginItem::MainApp, LoginStatus::RequiresApproval);
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: disabled\n\
+             VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
+        h.login
+            .set_status(&LoginItem::MainApp, LoginStatus::Enabled);
+        // An enabled agent does not switch on a profile that did not adopt it.
+        h.login.set_status(&agent_item(), LoginStatus::Enabled);
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: enabled\n\
+             VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
+        // With no stored preference the adopting profile inherits the agent, and
+        // only while the agent is enabled.
+        std::fs::remove_file(
+            registry::entry_directory(root, "example-office").join("connection-preferences.json"),
+        )
+        .unwrap();
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: enabled\n\
+             VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
+        h.login
+            .set_status(&agent_item(), LoginStatus::RequiresApproval);
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: enabled\n\
+             VPN connect at login (example-office): disabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
     }
 }

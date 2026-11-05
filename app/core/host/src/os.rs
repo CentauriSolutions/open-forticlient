@@ -1,4 +1,4 @@
-//! The host's `unsafe` code. Currently only the terminal secret prompt; the
+//! The host's `unsafe` code: the terminal secret prompt and the user id. The
 //! file-lock, signal and process calls land here with the supervisor.
 
 use std::fs::OpenOptions;
@@ -62,4 +62,10 @@ impl SecretPrompt for TtyPrompt {
         let _ = tty.write_all(b"\n");
         psk
     }
+}
+
+/// The real user id, for `launchctl`'s `gui/<uid>` domain.
+pub fn uid() -> u32 {
+    // SAFETY: `getuid` takes no arguments, cannot fail and touches no memory.
+    unsafe { libc::getuid() }
 }

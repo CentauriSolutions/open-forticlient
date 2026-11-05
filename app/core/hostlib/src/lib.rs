@@ -11,8 +11,11 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::thread;
 
+use oftc_apple::login::ServiceLoginItems;
 use oftc_apple::manager::{NeVpnControl, StartKeys};
+use oftc_apple::sysext::SystemExtensions;
 use oftc_host::acquire::{random_session_id, SamlAcquirer, SystemClock};
+use oftc_host::agent::SystemLaunchctl;
 use oftc_host::commands::{run, Backends, FortiClientProfile, FortiClientProfiles, Io};
 use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
@@ -69,6 +72,9 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 acquirer: &SamlAcquirer,
                 clock: &clock,
                 session_id: &random_session_id,
+                extensions: &SystemExtensions,
+                login: &ServiceLoginItems,
+                launchctl: &SystemLaunchctl,
             };
             let mut input = stdin().lock();
             let mut io = Io {
