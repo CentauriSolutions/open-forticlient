@@ -220,6 +220,19 @@ or
 .B \-\-version
 to target a signed development build. Its bundled login agent is registered
 from that app. Do not register two OFTC apps with the same bundle identifier.
+.PP
+.BR profiles ,
+.BR "status \-\-json" ,
+and
+.B "\-\-version \-\-json"
+ask the host service at the socket named after the bundle identifier in that app's
+.IR Info.plist .
+A development build that shares the installed app's bundle identifier therefore
+asks whichever host holds that socket, which may be the installed app's, not the
+build's. Without
+.B \-\-json
+.B profiles
+answers from the build's own host executable only when no host service is running.
 .SH FILES
 .TP
 .I "/Applications/Open Forticlient.app"

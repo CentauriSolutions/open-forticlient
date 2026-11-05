@@ -6,7 +6,7 @@
 
 use std::error::Error;
 use std::fs;
-use oftc_ui_edge::{ProfilesResult, StatusDocument, Transport};
+use oftc_ui_edge::{ProfilesResult, StatusDocument, Transport, SOCKET_FILE};
 use crate::edge;
 use crate::out::{errln, out, outln};
 use std::io::{self, IsTerminal, Write};
@@ -22,7 +22,6 @@ const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
 /// The installed app's bundle identifier; the host's files and socket live under
 /// `~/Library/Application Support/<bundle id>/`.
 const BUNDLE_ID: &str = "com.chris.openforticlient.oftc";
-const SOCKET_FILE: &str = "host.sock";
 
 /// One configured VPN, as reported by the host's `list-profiles`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1670,5 +1669,35 @@ mod tests {
             socket_path(Path::new(DEFAULT_APP), Path::new("/Users/test")),
             Path::new("/Users/test/Library/Application Support/com.chris.openforticlient.oftc/host.sock")
         );
+    }
+
+    /// A development build's socket is under its own bundle id, read from its
+    /// `Info.plist`; an unreadable or path-like id falls back to the installed app's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_development_apps_socket_uses_its_own_bundle_id() {
+        let dir = TempDir::new();
+        let home = Path::new("/Users/test");
+        let app_with = |name: &str, id: &str| {
+            let app = dir.0.join(name);
+            fs::create_dir_all(app.join("Contents")).unwrap();
+            fs::write(
+                app.join("Contents/Info.plist"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{id}</string></dict></plist>"#
+                ),
+            )
+            .unwrap();
+            app
+        };
+        assert_eq!(
+            socket_path(&app_with("Dev.app", "com.example.oftc.dev"), home),
+            Path::new("/Users/test/Library/Application Support/com.example.oftc.dev/host.sock")
+        );
+        let slash = socket_path(&app_with("Bad.app", "../evil"), home);
+        assert_eq!(slash, socket_path(Path::new(DEFAULT_APP), home));
+        // No Info.plist at all: the same fallback.
+        assert_eq!(socket_path(&dir.0.join("None.app"), home), slash);
     }
 }

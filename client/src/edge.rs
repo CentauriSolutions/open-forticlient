@@ -11,7 +11,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oftc_ui_edge::{ErrorBody, ErrorCode, HelloResult, MAX_LINE, PROTOCOL, PROTOCOL_MIN};
 use serde::Deserialize;
@@ -57,7 +57,25 @@ struct Line<'a> {
 
 struct Connection {
     writer: UnixStream,
-    reader: BufReader<UnixStream>,
+    reader: BufReader<Deadline>,
+}
+
+/// The read half, with one deadline for the whole exchange: every read, however many
+/// a trickling host makes one line of, gets only the time that is left.
+struct Deadline {
+    stream: UnixStream,
+    end: Instant,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
 }
 
 impl Connection {
@@ -130,19 +148,36 @@ impl ReadError {
     }
 }
 
+/// `sun_path` holds 104 bytes including its NUL.
+const MAX_SOCKET_PATH: usize = 103;
+
 /// Connects to `socket`, says `hello`, sends `op` (none: the handshake is the whole
-/// call, and `result` is empty) and returns the result.
+/// call, and `result` is empty) and returns the result. `timeout` is the total for
+/// the exchange after the connection is made.
+///
+/// There is no connect timeout: `connect(2)` on a Unix socket does not wait for the
+/// peer to accept; it returns at once, or fails with `ECONNREFUSED` or `ENOENT`, and
+/// only a full backlog (16 connections, then the host refuses) would block it.
 pub fn call(socket: &Path, op: Option<&str>, timeout: Duration) -> Result<Reply, Error> {
+    use std::os::unix::ffi::OsStrExt;
+    let length = socket.as_os_str().as_bytes().len();
+    if length > MAX_SOCKET_PATH {
+        return Err(Error::Unreachable(format!(
+            "path too long: the host socket path is {length} bytes, at most {MAX_SOCKET_PATH} fit"
+        )));
+    }
     let stream = UnixStream::connect(socket).map_err(|error| {
         Error::Unreachable(format!("could not connect to {}: {error}", socket.display()))
     })?;
     let setup = stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .set_write_timeout(Some(timeout))
         .and_then(|()| stream.try_clone());
     let writer = setup.map_err(|error| Error::Unreachable(error.to_string()))?;
     let mut connection = Connection {
-        reader: BufReader::new(stream),
+        reader: BufReader::new(Deadline {
+            stream,
+            end: Instant::now() + timeout,
+        }),
         writer,
     };
 
@@ -303,6 +338,10 @@ pub(crate) mod testutil {
         Close,
         /// Says nothing and keeps the connection open.
         Hang,
+        /// Sends these bytes as they are (no newline is added).
+        Raw(Vec<u8>),
+        /// Sends one byte of a line that never ends, 40 times, 50 ms apart.
+        Drip,
     }
 
     /// Serves one connection: each request line, parsed, goes to `handler`. Returns
@@ -331,6 +370,15 @@ pub(crate) mod testutil {
                     }
                     Act::Close => return,
                     Act::Hang => thread::sleep(Duration::from_secs(5)),
+                    Act::Raw(bytes) => writer.write_all(&bytes).unwrap(),
+                    Act::Drip => {
+                        for _ in 0..40 {
+                            if writer.write_all(b"x").is_err() {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                    }
                 }
             }
         });
@@ -403,13 +451,57 @@ mod tests {
         let refused = call(&dir.socket(), Some("status"), SHORT);
         assert!(matches!(refused, Err(Error::Unreachable(_))), "{refused:?}");
         std::fs::remove_file(dir.socket()).unwrap();
-        // Closed without a word (the host's peer check does this), and silent.
-        for act in [|_: &_| Act::Close, |_: &_| Act::Hang] {
+        // Closed without a word: the host's peer check does this.
+        let dir = TempDir::new();
+        serve(&dir, |_| Act::Close);
+        let got = call(&dir.socket(), Some("status"), SHORT);
+        assert!(matches!(got, Err(Error::Unreachable(_))), "{got:?}");
+    }
+
+    /// Runs `call` on a thread so that a missing deadline fails the test (after
+    /// `limit`) instead of hanging it.
+    fn call_within(dir: &TempDir, timeout: Duration, limit: Duration) -> Result<Reply, Error> {
+        let (done, result) = std::sync::mpsc::channel();
+        let socket = dir.socket();
+        std::thread::spawn(move || {
+            let _ = done.send(call(&socket, Some("status"), timeout));
+        });
+        result.recv_timeout(limit).expect("call outlived its deadline")
+    }
+
+    /// One deadline covers the whole exchange: a host that is silent, and one that
+    /// keeps a line going a byte at a time, are both given up on in time.
+    #[test]
+    fn a_silent_or_dripping_host_hits_the_total_deadline() {
+        for act in [|_: &_| Act::Hang, |_: &_| Act::Drip] {
             let dir = TempDir::new();
             serve(&dir, act);
-            let got = call(&dir.socket(), Some("status"), SHORT);
+            let got = call_within(&dir, SHORT, Duration::from_secs(3));
             assert!(matches!(got, Err(Error::Unreachable(_))), "{got:?}");
         }
+    }
+
+    /// More than the protocol's 64 KiB with no newline is refused, as the host does
+    /// to a client: unsupported_schema, exit 5.
+    #[test]
+    fn an_oversized_line_is_refused() {
+        let dir = TempDir::new();
+        serve(&dir, |_| Act::Raw(vec![b'x'; oftc_ui_edge::MAX_LINE + 100]));
+        let error = call_within(&dir, REPLY_TIMEOUT, Duration::from_secs(5)).unwrap_err();
+        assert!(matches!(error, Error::Protocol(_)), "{error:?}");
+        let failure = failure(error);
+        assert_eq!(failure.exit, 5);
+        assert!(failure.json.contains(r#""code":"unsupported_schema""#));
+    }
+
+    /// A path `sun_path` cannot hold is named, not reported as an OS error.
+    #[test]
+    fn a_path_too_long_for_a_socket_is_named() {
+        let long = Path::new("/tmp").join("x".repeat(MAX_SOCKET_PATH));
+        let Err(Error::Unreachable(why)) = call(&long, None, SHORT) else {
+            panic!("expected unreachable");
+        };
+        assert!(why.starts_with("path too long"), "{why}");
     }
 
     /// A version mismatch is the host's answer, not an absence: it is reported with

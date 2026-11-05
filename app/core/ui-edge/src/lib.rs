@@ -25,6 +25,10 @@ pub const PROTOCOL_MIN: u32 = 1;
 /// At most this many bytes in one line, newline excluded; a longer line closes the
 /// connection.
 pub const MAX_LINE: usize = 64 * 1024;
+/// The socket's file name, in the host's per-user directory
+/// (`~/Library/Application Support/<bundle id>/`). The server binds it and the CLI
+/// connects to it.
+pub const SOCKET_FILE: &str = "host.sock";
 /// Connections the host serves at once.
 pub const MAX_CONNECTIONS: usize = 16;
 
