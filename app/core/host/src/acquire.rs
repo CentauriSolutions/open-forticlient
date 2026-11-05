@@ -8,7 +8,8 @@ use oftc_host_bootstrap::{AcquireFailure, TunnelProfile};
 use zeroize::Zeroizing;
 
 /// The browser sign-in: blocks until the user finishes, then returns the `HBR1`
-/// record the start envelope carries.
+/// record the start envelope carries. `cancelled` is polled while it waits for the
+/// browser; once it says true the sign-in is abandoned with `Other`.
 pub trait Acquirer {
     fn acquire(
         &self,
@@ -17,6 +18,7 @@ pub trait Acquirer {
         saml_port: u32,
         insecure: bool,
         profile: TunnelProfile,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure>;
 }
 
@@ -31,11 +33,18 @@ impl Acquirer for SamlAcquirer {
         saml_port: u32,
         insecure: bool,
         profile: TunnelProfile,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure> {
         // A Keychain item can hold any bytes; the sign-in takes text.
         let psk = String::from_utf8(psk.to_vec()).map_err(|_| AcquireFailure::Other)?;
-        let wire =
-            oftc_host_bootstrap::acquire(gateway.to_owned(), psk, saml_port, insecure, profile)?;
+        let wire = oftc_host_bootstrap::acquire(
+            gateway.to_owned(),
+            psk,
+            saml_port,
+            insecure,
+            profile,
+            cancelled,
+        )?;
         Ok(Zeroizing::new(wire.as_bytes().to_vec()))
     }
 }

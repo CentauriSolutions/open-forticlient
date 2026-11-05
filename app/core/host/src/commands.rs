@@ -27,6 +27,8 @@ use crate::out::Out;
 use crate::profile::{Profile, Transport};
 use crate::registry::{self, ProfileEntry};
 use crate::start::parse_start_flags;
+use crate::supervisor::Signals;
+use crate::trust::Outcome as Trust;
 use crate::vpn::{self, Ctx, Rekey};
 
 /// One line of the usage text: how a verb is spelled, and who implements it.
@@ -91,12 +93,12 @@ pub const VERBS: &[Verb] = &[
     rust("set-autostart on|off"),
     rust("supervise-autostart"),
     rust("start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
-    swift("supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
+    rust("supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     rust("provision-psk [--stdin] [gateway]"),
     rust("migrate-psk <FortiClient-profile> <gateway>"),
     rust("preflight <gateway> <32-hex-UID>"),
     rust("start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
-    swift(
+    rust(
         "supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]",
     ),
     rust("rekey-once"),
@@ -167,6 +169,16 @@ pub enum Command {
     },
     /// The flags are checked after the profile is found, as the Swift verb did.
     StartProfile {
+        flags: Vec<String>,
+    },
+    SuperviseLive {
+        gateway: String,
+        port: u32,
+        mode: ConnectMode,
+        insecure: bool,
+    },
+    /// Like `StartProfile`, the flags are checked after the profile is found.
+    SuperviseProfile {
         flags: Vec<String>,
     },
     ExportProfiles {
@@ -266,7 +278,23 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
                 insecure,
             }
         }
+        ("supervise-live", [gateway, port, flags @ ..]) => {
+            let port: u32 = port.parse().map_err(|_| ParseError::Usage)?;
+            let (mode, insecure) = parse_start_flags(flags).ok_or(ParseError::Usage)?;
+            if !(1..=65535).contains(&port) || gateway.is_empty() {
+                return Err(ParseError::Usage);
+            }
+            Command::SuperviseLive {
+                gateway: gateway.clone(),
+                port,
+                mode,
+                insecure,
+            }
+        }
         ("start-profile", flags) => Command::StartProfile {
+            flags: flags.to_vec(),
+        },
+        ("supervise-profile", flags) => Command::SuperviseProfile {
             flags: flags.to_vec(),
         },
         ("export-profiles", ids) => Command::ExportProfiles { ids: ids.to_vec() },
@@ -340,6 +368,13 @@ pub struct Backends<'a> {
     pub clock: &'a dyn Clock,
     /// A fresh single-use session id for each start envelope.
     pub session_id: &'a dyn Fn() -> [u8; 16],
+    /// SIGINT and SIGTERM, for the supervisor.
+    pub signals: &'a dyn Signals,
+    /// Asks the user about an untrusted gateway certificate (host, port, profile
+    /// name); the host builds it from `trust`.
+    pub review: &'a dyn Fn(&str, u32, &str) -> Trust,
+    /// One diagnostic line from the supervisor (stderr in the host).
+    pub diagnostic: &'a dyn Fn(&str),
 }
 
 pub struct Io<'a> {
@@ -505,6 +540,26 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             insecure,
         } => vpn_verb(vpn::start_live(&ctx, &gateway, port, mode, insecure), io),
         Command::StartProfile { flags } => vpn_verb(vpn::start_profile(&ctx, &flags), io),
+        Command::SuperviseLive {
+            gateway,
+            port,
+            mode,
+            insecure,
+        } => vpn_verb(
+            vpn::supervise_live(&ctx, &gateway, port, mode, insecure),
+            io,
+        ),
+        // An agent property list from before multi-profile support runs this verb
+        // with no profile; it now means "start the autostart set".
+        Command::SuperviseProfile { .. } if env.bundled_agent() && selected.is_none() => {
+            supervise_autostart(io, env, backends)
+        }
+        Command::SuperviseProfile { flags } => {
+            if let Err(message) = agent::redirect_output(env) {
+                return finish(io, &message, 1);
+            }
+            vpn_verb(vpn::supervise_profile(&ctx, &flags), io)
+        }
         Command::ListProfiles => {
             let lines: Vec<String> = registry::entries(root)
                 .iter()
@@ -852,6 +907,7 @@ mod tests {
     use crate::keychain::MemoryKeychain;
     use crate::out::Capture;
     use crate::profile::testutil::{fixture, TempDir};
+    use crate::supervisor::ManualSignals;
     use oftc_apple::error::AppleError;
     use oftc_apple::login::MockLoginItems;
     use oftc_apple::manager::{MockEntry, MockVpn, StartKind, VpnStatus};
@@ -915,7 +971,10 @@ mod tests {
                 vec!["--profile", "lab", "unregister-menu-login"],
                 invocation(Some("lab"), Command::UnregisterMenuLogin),
             ),
-            (vec!["supervise-profile"], Err(ParseError::Usage)), // still Swift's
+            (
+                vec!["supervise-profile"],
+                invocation(None, Command::SuperviseProfile { flags: vec![] }),
+            ),
             (vec!["stop"], invocation(None, Command::Stop)),
             (vec!["stop", "x"], Err(ParseError::Usage)),
             (
@@ -1101,27 +1160,31 @@ mod tests {
         }
     }
 
-    /// Host/main.swift is the other copy of the usage text and the list of verbs it
-    /// delegates; neither may drift from `VERBS`.
+    /// `Host/main.swift` keeps only the verbs that need AppKit, bookmarks or URLSession;
+    /// everything else must reach this crate. The two lists may not drift, or a verb
+    /// would fall through to Rust's usage text (or never reach it).
     #[test]
     fn swift_stub_agrees_with_the_verb_table() {
         let swift = include_str!("../../../Host/main.swift");
-        let literal = swift
+        let mut stub: Vec<&str> = swift
             .lines()
-            .find_map(|line| line.strip_prefix("private let usage = \""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .expect("usage literal in main.swift");
-        assert_eq!(literal, usage());
-        let list = swift
-            .lines()
-            .find_map(|line| line.strip_prefix("private let rustVerbs: Set<String> = ["))
-            .and_then(|rest| rest.strip_suffix(']'))
-            .expect("rustVerbs in main.swift");
-        let mut stub: Vec<&str> = list
-            .split(',')
-            .map(|v| v.trim().trim_matches('"'))
+            .filter_map(|line| line.strip_prefix("case (\""))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|verb| !verb.is_empty())
             .collect();
-        let mut table: Vec<&str> = rust_verbs().collect();
+        // Not in the usage text: the menu's own entry points.
+        let mut table: Vec<&str> = VERBS
+            .iter()
+            .filter(|verb| !verb.rust)
+            .map(Verb::name)
+            .chain([
+                "--after-install",
+                "preview-menu",
+                "render-menu-previews",
+                "review-certificate",
+                "quit-menu",
+            ])
+            .collect();
         stub.sort_unstable();
         table.sort_unstable();
         assert_eq!(stub, table);
@@ -1129,8 +1192,10 @@ mod tests {
         for verb in rust_verbs() {
             assert_ne!(parse(&strings(&[verb])), Err(ParseError::ProfileFlag));
             let args = strings(&[verb, "a", "b", "c", "d"]);
-            let known = matches!(verb, "save-profile" | "start-profile" | "export-profiles")
-                || parse(&args) == Err(ParseError::Usage);
+            let known = matches!(
+                verb,
+                "save-profile" | "start-profile" | "supervise-profile" | "export-profiles"
+            ) || parse(&args) == Err(ParseError::Usage);
             assert!(known, "{verb}");
         }
     }
@@ -1190,6 +1255,7 @@ mod tests {
             saml_port: u32,
             insecure: bool,
             profile: TunnelProfile,
+            _cancelled: &dyn Fn() -> bool,
         ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure> {
             self.calls.borrow_mut().push((
                 gateway.to_owned(),
@@ -1325,6 +1391,9 @@ mod tests {
                 acquirer: &self.acquirer,
                 clock: &*self.clock,
                 session_id: &unique_session_id,
+                signals: &ManualSignals::default(),
+                review: &|_, _, _| Trust::NotACertificateProblem,
+                diagnostic: &|_| {},
             };
             let mut stdin = stdin.as_bytes();
             let mut io = Io {
@@ -1421,7 +1490,12 @@ mod tests {
             &format!("{}\n", usage()),
             2,
         );
-        h.expect(&["supervise-profile"], &format!("{}\n", usage()), 2); // still Swift's
+        // A supervisor needs one profile before anything else.
+        h.expect(
+            &["supervise-profile"],
+            "Several OFTC profiles are configured; choose one with --profile <id> (example-office, lab)\n",
+            1,
+        );
     }
 
     #[test]
@@ -1551,6 +1625,9 @@ mod tests {
             &["start-live", "vpn.example.com", "65536"],
             &["start-live", "", "9443"],
             &["start-live", "vpn.example.com", "9443", "--bogus"],
+            &["supervise-live", "vpn.example.com"],
+            &["supervise-live", "vpn.example.com", "65536"],
+            &["supervise-live", "vpn.example.com", "9443", "--bogus"],
         ] {
             assert_eq!(cmd(args), Err(ParseError::Usage), "{args:?}");
         }

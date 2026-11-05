@@ -13,9 +13,11 @@ use oftc_provider::envelope::ConnectMode;
 
 use crate::commands::{require_entry, Backends};
 use crate::env::HostEnv;
+use crate::lease::SupervisorLease;
 use crate::profile::Transport;
 use crate::registry::{self, ProfileEntry};
 use crate::start::{live_options, parse_start_flags, preflight_options};
+use crate::supervisor::{Deps, Job, Supervisor};
 
 /// What a verb prints and returns.
 pub(crate) type Outcome = (String, i32);
@@ -26,6 +28,14 @@ fn ok(text: &str) -> Outcome {
 
 fn fail(text: &str) -> Outcome {
     (text.to_owned(), 1)
+}
+
+/// Whether `vpn` is `entry`'s VPN entry under `provider_id`: keyed to the profile,
+/// or unkeyed and adopted by a profile migrated from the single-profile layout.
+pub(crate) fn owns(provider_id: &str, entry: &ProfileEntry, vpn: &VpnEntry) -> bool {
+    vpn.provider_id == provider_id
+        && (vpn.profile_key.as_deref() == Some(entry.id.as_str())
+            || (vpn.profile_key.is_none() && entry.profile.adopts_unkeyed_vpn_entry == Some(true)))
 }
 
 pub(crate) struct Ctx<'a> {
@@ -47,7 +57,7 @@ impl Ctx<'_> {
         self.backends.vpn
     }
 
-    fn entry(&self) -> Result<ProfileEntry, Outcome> {
+    pub(crate) fn entry(&self) -> Result<ProfileEntry, Outcome> {
         require_entry(self.selected, self.env.root()).map_err(|message| (message, 1))
     }
 
@@ -55,14 +65,11 @@ impl Ctx<'_> {
     /// profile, or unkeyed and adopted by a profile migrated from the
     /// single-profile layout.
     fn belongs(&self, entry: &ProfileEntry, vpn: &VpnEntry) -> bool {
-        vpn.provider_id == self.env.provider_id()
-            && (vpn.profile_key.as_deref() == Some(entry.id.as_str())
-                || (vpn.profile_key.is_none()
-                    && entry.profile.adopts_unkeyed_vpn_entry == Some(true)))
+        owns(&self.env.provider_id(), entry, vpn)
     }
 
     /// The profile's one VPN entry, if any.
-    fn load_manager(&self, entry: &ProfileEntry) -> Result<Option<VpnEntry>, Outcome> {
+    pub(crate) fn load_manager(&self, entry: &ProfileEntry) -> Result<Option<VpnEntry>, Outcome> {
         let all = self
             .vpn()
             .load_all()
@@ -78,7 +85,12 @@ impl Ctx<'_> {
     /// Rechecks the entry just before acting: another process may have changed
     /// it, for instance while a browser sign-in was open. `Some` only if it is
     /// still enabled, ours, and in `status`.
-    fn recheck(&self, entry: &ProfileEntry, vpn: &VpnEntry, status: VpnStatus) -> Option<VpnEntry> {
+    pub(crate) fn recheck(
+        &self,
+        entry: &ProfileEntry,
+        vpn: &VpnEntry,
+        status: VpnStatus,
+    ) -> Option<VpnEntry> {
         let fresh = self.vpn().reload(vpn).ok()?;
         (fresh.enabled && self.belongs(entry, &fresh) && self.vpn().status(&fresh) == status)
             .then_some(fresh)
@@ -447,6 +459,7 @@ fn start_live_for(
         insecure,
         profile,
         mode,
+        &|| false,
     ) {
         Ok(options) => options,
         Err(_) => return fail("SAML bootstrap failed"),
@@ -474,13 +487,95 @@ pub(crate) fn start_profile(ctx: &Ctx, flags: &[String]) -> Outcome {
         Ok(entry) => entry,
         Err(outcome) => return outcome,
     };
-    let mut flags = flags.to_vec();
-    if entry.profile.transport == Transport::Tcp && !flags.iter().any(|f| f == "--tcp") {
-        flags.insert(0, "--tcp".to_owned());
-    }
+    let flags = profile_flags(&entry, flags);
     let Some((mode, insecure)) = parse_start_flags(&flags) else {
         return (crate::commands::usage(), 2);
     };
     let (gateway, port) = (entry.profile.gateway.clone(), entry.profile.saml_port);
     start_live_for(ctx, &entry, &gateway, port, mode, insecure)
+}
+
+/// Takes the profile's supervisor lease and supervises until it stops. The checks
+/// before it are `start-live`'s, and the browser's confirmation page names the tunnel
+/// from `entry`, not from the environment.
+fn supervise_for(
+    ctx: &Ctx,
+    entry: &ProfileEntry,
+    gateway: &str,
+    port: u32,
+    mode: ConnectMode,
+    insecure: bool,
+) -> Outcome {
+    let vpn = match ctx.load_manager(entry) {
+        Err(outcome) => return outcome,
+        Ok(None) => return fail("No OFTC configuration; run install-config"),
+        Ok(Some(vpn)) => vpn,
+    };
+    let Some(vpn) = ctx.recheck(entry, &vpn, VpnStatus::Disconnected) else {
+        return fail("OFTC configuration unavailable or VPN already active");
+    };
+    let Ok(lease) = SupervisorLease::acquire(&registry::entry_directory(ctx.env.root(), &entry.id))
+    else {
+        return fail("Another OFTC supervisor is active");
+    };
+    let b = ctx.backends;
+    let deps = Deps {
+        vpn: b.vpn,
+        keychain: b.keychain,
+        acquirer: b.acquirer,
+        clock: b.clock,
+        session_id: b.session_id,
+        launchctl: b.launchctl,
+        signals: b.signals,
+        review: b.review,
+        diagnostic: b.diagnostic,
+    };
+    let job = Job {
+        entry,
+        provider_id: ctx.env.provider_id(),
+        vpn_entry: vpn,
+        gateway: gateway.to_owned(),
+        saml_port: port,
+        mode,
+        insecure,
+        root: ctx.env.root(),
+    };
+    Supervisor::new(&deps, job, lease).run()
+}
+
+pub(crate) fn supervise_live(
+    ctx: &Ctx,
+    gateway: &str,
+    port: u32,
+    mode: ConnectMode,
+    insecure: bool,
+) -> Outcome {
+    match ctx.entry() {
+        Ok(entry) => supervise_for(ctx, &entry, gateway, port, mode, insecure),
+        Err(outcome) => outcome,
+    }
+}
+
+/// `supervise-profile`: `supervise-live` for the selected profile's own gateway, port
+/// and transport.
+pub(crate) fn supervise_profile(ctx: &Ctx, flags: &[String]) -> Outcome {
+    let entry = match ctx.entry() {
+        Ok(entry) => entry,
+        Err(outcome) => return outcome,
+    };
+    let flags = profile_flags(&entry, flags);
+    let Some((mode, insecure)) = parse_start_flags(&flags) else {
+        return (crate::commands::usage(), 2);
+    };
+    let (gateway, port) = (entry.profile.gateway.clone(), entry.profile.saml_port);
+    supervise_for(ctx, &entry, &gateway, port, mode, insecure)
+}
+
+/// The flags with `--tcp` added when the profile's transport is TCP.
+fn profile_flags(entry: &ProfileEntry, flags: &[String]) -> Vec<String> {
+    let mut flags = flags.to_vec();
+    if entry.profile.transport == Transport::Tcp && !flags.iter().any(|f| f == "--tcp") {
+        flags.insert(0, "--tcp".to_owned());
+    }
+    flags
 }

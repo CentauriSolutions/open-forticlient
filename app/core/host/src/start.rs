@@ -92,8 +92,9 @@ pub fn live_options(
     insecure: bool,
     profile: TunnelProfile,
     mode: ConnectMode,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<StartOptions, AcquireFailure> {
-    let wire = acquirer.acquire(gateway, psk, saml_port, insecure, profile)?;
+    let wire = acquirer.acquire(gateway, psk, saml_port, insecure, profile, cancelled)?;
     let now = clock.unix_secs();
     let mode = mode.encode().map_err(|_| AcquireFailure::Other)?;
     envelope_options(

@@ -2,35 +2,10 @@ import AppKit
 
 // The popup for a gateway certificate macOS does not trust. "Don't Trust" is
 // the default button and the fingerprint is visible without expanding anything.
+// It runs in a short-lived child of this executable that the Rust supervisor starts:
+// supervisors drain their main queue on a worker thread, where AppKit cannot build
+// a window, and the child's top-level code runs on the real main thread.
 enum GatewayTrustPrompt {
-    // The popup runs in a short-lived child of this executable. Supervisors
-    // drain their main queue on a worker thread, where AppKit cannot build a
-    // window; the child's top-level code runs on the real main thread.
-    static func present(_ review: GatewayTrust.Review) -> GatewayTrust.Decision {
-        guard CGSessionCopyCurrentDictionary() != nil,
-              let executable = Bundle.main.executablePath else { return .unavailable }
-        var previous: Data?
-        if case .changed(let old) = review.reason { previous = old.der }
-        guard let request = try? JSONEncoder().encode(GatewayTrust.PromptRequest(
-            profileName: review.profileName, host: review.host, port: review.port,
-            certificate: review.certificate.der, previous: previous)) else { return .unavailable }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["review-certificate"]
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return .unavailable }
-        input.fileHandleForWriting.write(request)
-        try? input.fileHandleForWriting.close()
-        process.waitUntilExit()
-        switch process.terminationStatus {
-        case 10: return .trust
-        case 11: return .decline
-        default: return .unavailable
-        }
-    }
-
     // Child entry point: read the request from stdin, ask, exit 10 (trust),
     // 11 (decline) or 12 (nothing to show).
     static func runChild() -> Never {

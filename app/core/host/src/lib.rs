@@ -25,9 +25,10 @@ pub mod registry;
 pub mod snapshot;
 pub mod start;
 pub mod status;
+pub mod supervisor;
 pub mod trust;
 mod vpn;
 
 #[allow(unsafe_code)]
 mod os;
-pub use os::TtyPrompt;
+pub use os::{OsSignals, TtyPrompt};

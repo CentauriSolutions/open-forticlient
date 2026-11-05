@@ -84,6 +84,8 @@ pub enum SamlError {
     Unreachable(String),
     /// The browser opened but nobody completed SSO before the timeout.
     Timeout,
+    /// The caller stopped waiting (a stop request or signal).
+    Cancelled,
 }
 
 impl std::fmt::Display for SamlError {
@@ -91,6 +93,7 @@ impl std::fmt::Display for SamlError {
         match self {
             SamlError::Unreachable(e) => write!(f, "{e}"),
             SamlError::Timeout => f.write_str("SAML: timed out waiting for the browser callback"),
+            SamlError::Cancelled => f.write_str("SAML: sign-in cancelled"),
         }
     }
 }
@@ -98,7 +101,7 @@ impl std::fmt::Display for SamlError {
 impl Error for SamlError {}
 
 /// Run the full SAML flow and return the EAP identity + OTP.
-pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
+pub fn obtain(cfg: &SamlConfig, cancelled: &dyn Fn() -> bool) -> Result<Credentials, Box<dyn Error>> {
     if cfg.server.is_empty() {
         return Err("SAML: empty server".into());
     }
@@ -117,7 +120,10 @@ pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
     let saml_url = extract_saml_url(&html)
         .ok_or("SAML: could not find the window.location redirect in the gateway response")?;
 
-    // 3. open the SAML URL in the system browser
+    // 3. open the SAML URL in the system browser (not if the caller already stopped)
+    if cancelled() {
+        return Err(SamlError::Cancelled.into());
+    }
     // The URL can carry a short-lived login handle; do not persist it in logs.
     log!("Opening browser for SSO");
     open_browser(&saml_url)?;
@@ -125,7 +131,7 @@ pub fn obtain(cfg: &SamlConfig) -> Result<Credentials, Box<dyn Error>> {
         cfg.timeout.as_secs());
 
     // 4/5. catch the redirect
-    let mut creds = wait_for_callback(&listener, cfg.timeout, &cfg.profile)?;
+    let mut creds = wait_for_callback(&listener, cfg.timeout, &cfg.profile, cancelled)?;
     creds.uid = uid;
     Ok(creds)
 }
@@ -201,6 +207,7 @@ fn wait_for_callback(
     listener: &TcpListener,
     timeout: Duration,
     profile: &TunnelProfile,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Credentials, Box<dyn Error>> {
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + timeout;
@@ -241,6 +248,9 @@ fn wait_for_callback(
                 // not the callback (e.g. a favicon request) — keep waiting
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if cancelled() {
+                    return Err(SamlError::Cancelled.into());
+                }
                 if Instant::now() >= deadline {
                     return Err(SamlError::Timeout.into());
                 }
@@ -389,6 +399,14 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_wait_gives_up_before_the_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let error = wait_for_callback(&listener, Duration::from_secs(300),
+            &TunnelProfile::default(), &|| true).err().unwrap();
+        assert!(matches!(error.downcast_ref::<SamlError>(), Some(SamlError::Cancelled)));
+    }
 
     #[test]
     fn callback_page_escapes_username_and_sets_state() {

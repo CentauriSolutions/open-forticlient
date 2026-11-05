@@ -17,12 +17,11 @@ if [[ -e "$build" || -L "$build" ]]; then
 fi
 app="$build/OFTC.app"
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
-app_frameworks="$app/Contents/Frameworks"
 agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.agent.plist"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources" "$app_frameworks" \
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources" \
     "${agent_plist:h}" \
     "$extension/Contents/MacOS" "$build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$build/module-cache"
@@ -44,18 +43,13 @@ cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 # The provider is the Rust OFTCTunnel executable from this workspace build; it
 # statically links the engine, provider logic and preflight.
 cp "$CARGO_TARGET_DIR/release/OFTCTunnel" "$extension/Contents/MacOS/OFTCTunnel"
-cp "$CARGO_TARGET_DIR/release/liboftc_host_bootstrap.dylib" "$app_frameworks/"
 cp "$CARGO_TARGET_DIR/release/liboftc_hostlib.a" "$build/liboftc_hostlib.a"
 unset CARGO_TARGET_DIR
 
 xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
     -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \
-    -L "$app_frameworks" -l oftc_host_bootstrap \
     "$build/liboftc_hostlib.a" \
-    -Xlinker -rpath -Xlinker '@executable_path/../Frameworks' \
-    "$root/support/Bootstrap.swift" \
-    "$root/Host/CandidateHostBridge.swift" \
     "$root/Host/MigrationBridge.swift" \
     "$root/Host/OFTCProfile.swift" \
     "$root/Host/ProfileScope.swift" \
@@ -78,36 +72,13 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/RateSparklineView.swift" \
     "$root/Host/MenuBar.swift" \
     "$root/support/TrafficStatistics.swift" \
-    "$root/Host/ReconnectSupervisor.swift" \
-    "$root/Provider/BootstrapInput.swift" "$root/Host/main.swift" \
+    "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"
 xcrun swiftc -swift-version 5 -target "$target" \
-    -framework Foundation -framework NetworkExtension \
-    -L "$app_frameworks" -l oftc_host_bootstrap \
-    -Xlinker -rpath -Xlinker "$app_frameworks" \
-    "$root/support/Bootstrap.swift" \
-    "$root/Host/CandidateHostBridge.swift" \
-    "$root/Provider/BootstrapInput.swift" "$root/Provider/check.swift" \
-    -o "$build/bootstrap-check"
-"$build/bootstrap-check"
-xcrun swiftc -swift-version 5 -target "$target" \
-    -framework Foundation -framework NetworkExtension \
-    -L "$app_frameworks" -l oftc_host_bootstrap \
-    -Xlinker -rpath -Xlinker "$app_frameworks" \
-    "$root/support/Bootstrap.swift" \
-    "$root/Host/CandidateHostBridge.swift" \
-    "$root/Provider/BootstrapInput.swift" \
-    "$root/Host/ReconnectSupervisor.swift" \
-    "$root/Host/SupervisorStatus.swift" \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" \
-    "$root/Host/AgentIntent.swift" \
-    "$root/Host/ProfileBundle.swift" \
-    "$root/Host/LauncherAlias.swift" \
-    "$root/Host/UpdateCheck.swift" \
-    "$root/Host/GatewayTrust.swift" \
-    "$root/Host/check-supervisor.swift" \
-    -o "$build/supervisor-check"
-"$build/supervisor-check"
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/AgentIntent.swift" \
+    "$root/Host/ProfileBundle.swift" "$root/Host/LauncherAlias.swift" "$root/Host/UpdateCheck.swift" \
+    "$root/Host/check-misc.swift" -o "$build/misc-check"
+"$build/misc-check"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
     -o "$build/profile-check"
@@ -143,7 +114,10 @@ CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"
 cp "$build/oftc" "$app/Contents/Helpers/oftc"
-otool -L "$app/Contents/MacOS/OFTCAgent" | grep -E 'liboftc_host_bootstrap'
+# The host links no OFTC dylib: the Rust host is static in the executable.
+if otool -L "$app/Contents/MacOS/OFTCAgent" | grep -E '@rpath|liboftc'; then
+    print -u2 'OFTCAgent must not depend on an OFTC dylib or an @rpath library'; exit 1
+fi
 # The provider carries no OFTC dylib and no unresolved @rpath dependency.
 if otool -L "$extension/Contents/MacOS/OFTCTunnel" | grep -E '@rpath|liboftc'; then
     print -u2 'The provider must not depend on an OFTC dylib or an @rpath library'; exit 1

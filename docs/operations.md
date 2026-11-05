@@ -148,7 +148,9 @@ Connect is requested. `autostart` registers the bundled agent, which starts a
 supervisor for each profile with connect-at-login on. It leaves the menu app
 running. `status` shows each profile's state, the agent, login settings, and
 CHILD SA rekey counts when connected. Supervisor logs are in
-`~/Library/Logs/OFTC/<profile>.log`. Do not share raw SAML callbacks, PSKs, or
+`~/Library/Logs/OFTC/<profile>.log`; each line the supervisor writes there starts
+`OFTC supervisor:`. A supervisor ends cleanly on SIGINT or SIGTERM, and when the
+gateway's certificate is not trusted it asks once in a window (decline stops it). Do not share raw SAML callbacks, PSKs, or
 packet captures.
 
 A profile is identified by a short id, such as `office-vpn`, made from its name.
