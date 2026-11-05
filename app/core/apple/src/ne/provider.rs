@@ -5,14 +5,21 @@
 //! entry point copies its completion block, hands the work to a thread and
 //! returns; the thread posts the completion back to the main queue.
 //!
-//! One engine per start: NetworkExtension keeps the process across a stop and
-//! creates a new provider object for the next start, but an engine is one
-//! tunnel's worth of state and refuses to start after a stop. The latest engine
-//! lives in a static; the one it replaces is dropped on the new start's thread
-//! (its `Drop` blocks, so it must not run on the main thread).
+//! One engine per provider object: NetworkExtension keeps the process across a
+//! stop and creates a new provider object for every start, and runs several
+//! profiles' provider objects in that one process at the same time. An engine
+//! is one tunnel's worth of state and refuses to start after a stop, so each
+//! `startTunnel` builds a fresh engine and stores it in a static map keyed by
+//! the identity of the provider object that started it. Stop and app messages
+//! go to the engine of the provider object they were sent to, never to "the
+//! latest": another profile's start must not touch this profile's tunnel.
+//! Dropping an engine stops it and blocks, so it only ever runs on a worker
+//! thread, and only for a provider object whose key is reused (a freed object's
+//! address) or after its stop.
 
+use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use objc2::rc::{Retained, Weak};
@@ -64,15 +71,18 @@ type Shared = Arc<dyn Engine>;
 type Replaced = (Shared, Option<Shared>);
 type Build<A> = Box<dyn Fn(A) -> Box<dyn Engine> + Send + Sync>;
 
-/// The factory, and the engine of the latest start (what stop and messages are
-/// routed to).
+/// Identity of a provider object (its address), for as long as it is alive.
+pub type Key = usize;
+
+/// The factory, and the engine of every provider object that has started and
+/// not yet been stopped (what stop and messages are routed to).
 struct Engines<A> {
     factory: OnceLock<Build<A>>,
-    current: Mutex<Option<Shared>>,
+    live: Mutex<BTreeMap<Key, Shared>>,
 }
 
 static ENGINES: Engines<Weak<NEPacketTunnelProvider>> =
-    Engines { factory: OnceLock::new(), current: Mutex::new(None) };
+    Engines { factory: OnceLock::new(), live: Mutex::new(BTreeMap::new()) };
 
 /// Register how to build the engine. Hands the factory back if one is already
 /// registered.
@@ -80,28 +90,31 @@ pub fn install_factory(factory: Factory) -> Result<(), Factory> {
     ENGINES.factory.set(factory)
 }
 
-fn current() -> Option<Shared> {
-    ENGINES.current()
-}
-
 impl<A> Engines<A> {
-    fn current(&self) -> Option<Shared> {
-        self.current.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    fn live(&self) -> MutexGuard<'_, BTreeMap<Key, Shared>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Build the engine for a new start and make it the current one. Returns it
-    /// with the engine it replaced, which the caller drops off the main queue
-    /// (dropping a provider stops it). `None` if no factory was registered or
-    /// building the engine panicked; the previous engine is then left in place.
-    fn replace(&self, arg: A) -> Option<Replaced> {
+    /// The engine of the provider object `key`, if it started and has not stopped.
+    fn get(&self, key: Key) -> Option<Shared> {
+        self.live().get(&key).cloned()
+    }
+
+    /// Forget the engine of `key` once it is stopped.
+    fn remove(&self, key: Key) {
+        self.live().remove(&key);
+    }
+
+    /// Build the engine for a new start of provider object `key`. Returns it
+    /// with the engine it replaced, which only exists if the key was reused by
+    /// a new object after the old one was freed, and which the caller drops off
+    /// the main queue (dropping a provider stops it). Other keys' engines are
+    /// never touched. `None` if no factory was registered or building the
+    /// engine panicked.
+    fn replace(&self, key: Key, arg: A) -> Option<Replaced> {
         let factory = self.factory.get()?;
-        let built: Arc<dyn Engine> =
-            catch_unwind(AssertUnwindSafe(|| factory(arg))).ok()?.into();
-        let old = self
-            .current
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(Arc::clone(&built));
+        let built: Arc<dyn Engine> = catch_unwind(AssertUnwindSafe(|| factory(arg))).ok()?.into();
+        let old = self.live().insert(key, Arc::clone(&built));
         Some((built, old))
     }
 }
@@ -209,15 +222,20 @@ pub fn fail_start(done: StartDone) {
     complete_start(&sys::MainDispatch, done, Err(PANICKED));
 }
 
-pub fn begin_start(provider: Weak<NEPacketTunnelProvider>, options: StartOptions, done: StartDone) {
+pub fn begin_start(
+    key: Key,
+    provider: Weak<NEPacketTunnelProvider>,
+    options: StartOptions,
+    done: StartDone,
+) {
     let queue = &sys::MainDispatch;
-    let Some((engine, old)) = ENGINES.replace(provider) else {
+    let Some((engine, old)) = ENGINES.replace(key, provider) else {
         complete_start(queue, done, Err(PANICKED));
         return;
     };
     if let Err((done, _)) = spawn_owning("oftc-start", (done, old), move |(done, old)| {
         sys::pooled(|| {
-            // The previous start's engine is already stopped; drop it here.
+            // Only a freed provider object's engine can be here; drop it here.
             drop(old);
             start_body(queue, &*engine, &options, move |result| {
                 complete_start_now(done, result);
@@ -237,15 +255,16 @@ fn complete_start_now(done: StartDone, result: Result<(), Failure>) {
     done.block().call((pointer,));
 }
 
-pub fn begin_stop(done: StopDone) {
+pub fn begin_stop(key: Key, done: StopDone) {
     let queue = &sys::MainDispatch;
-    let Some(engine) = current() else {
+    let Some(engine) = ENGINES.get(key) else {
         complete_stop(queue, done);
         return;
     };
     if let Err(done) = spawn_owning("oftc-stop", done, move |done| {
         sys::pooled(|| {
             let _ = catch_unwind(AssertUnwindSafe(|| engine.stop()));
+            ENGINES.remove(key);
             complete_stop(queue, done);
         });
     }) {
@@ -253,9 +272,9 @@ pub fn begin_stop(done: StopDone) {
     }
 }
 
-pub fn begin_message(message: Vec<u8>, done: Option<ReplyDone>) {
+pub fn begin_message(key: Key, message: Vec<u8>, done: Option<ReplyDone>) {
     let queue = &sys::MainDispatch;
-    let Some(engine) = current() else {
+    let Some(engine) = ENGINES.get(key) else {
         complete_reply(queue, done, None);
         return;
     };
@@ -429,25 +448,75 @@ mod tests {
     #[test]
     fn a_start_after_a_stop_gets_a_fresh_engine() {
         let engines: Engines<()> =
-            Engines { factory: OnceLock::new(), current: Mutex::new(None) };
+            Engines { factory: OnceLock::new(), live: Mutex::new(BTreeMap::new()) };
         assert!(engines.factory.set(Box::new(|()| Box::new(OneShot::default()))).is_ok());
         let queue = FakeQueue::new();
         let options = StartOptions::default();
 
-        let (first, old) = engines.replace(()).unwrap();
+        let (first, old) = engines.replace(1, ()).unwrap();
         assert!(old.is_none());
         start_body(&*queue, &*first, &options, |r| assert_eq!(r, Ok(())));
-        engines.current().unwrap().stop();
+        engines.get(1).unwrap().stop();
+        engines.remove(1);
+        assert!(engines.get(1).is_none());
 
-        let (second, old) = engines.replace(()).unwrap();
-        assert!(Arc::ptr_eq(&old.unwrap(), &first));
+        let (second, old) = engines.replace(2, ()).unwrap();
+        assert!(old.is_none());
         start_body(&*queue, &*second, &options, |r| assert_eq!(r, Ok(())));
-        assert!(Arc::ptr_eq(&engines.current().unwrap(), &second));
+        assert!(Arc::ptr_eq(&engines.get(2).unwrap(), &second));
 
         // The engine that was reused would have refused, with its real code.
         let (code, done) = mpsc::channel();
         start_body(&*queue, &*first, &options, move |r| code.send(r).unwrap());
         assert_eq!(done.recv().unwrap(), Err(Failure(1)));
+    }
+
+    /// Counts stops, to see which engine a call reached.
+    #[derive(Default)]
+    struct Counting {
+        stops: Mutex<u32>,
+    }
+
+    impl Engine for Counting {
+        fn start(&self, _options: &StartOptions) -> Result<(), Failure> {
+            Ok(())
+        }
+        fn stop(&self) {
+            *self.stops.lock().unwrap() += 1;
+        }
+        fn handle_message(&self, _message: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// Issue #86: two profiles run two provider objects in this one process.
+    /// Starting the second must neither stop nor replace the first (a dropped
+    /// provider stops its tunnel), and stop and messages must reach the engine
+    /// of the object they were sent to, not the latest one.
+    #[test]
+    fn a_second_provider_object_leaves_the_first_one_running_and_addressable() {
+        let engines: Engines<()> =
+            Engines { factory: OnceLock::new(), live: Mutex::new(BTreeMap::new()) };
+        assert!(engines.factory.set(Box::new(|()| Box::new(Counting::default()))).is_ok());
+
+        let (a, old) = engines.replace(10, ()).unwrap();
+        assert!(old.is_none());
+        let (b, old) = engines.replace(20, ()).unwrap();
+        // Nothing came back to be dropped, so A's engine was not stopped.
+        assert!(old.is_none());
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&engines.get(10).unwrap(), &a));
+        assert!(Arc::ptr_eq(&engines.get(20).unwrap(), &b));
+
+        // Stopping A reaches A only, and leaves B routable.
+        engines.get(10).unwrap().stop();
+        engines.remove(10);
+        assert!(engines.get(10).is_none());
+        assert!(Arc::ptr_eq(&engines.get(20).unwrap(), &b));
+
+        // A reused key (a freed object's address) hands back the stale engine.
+        let (_c, old) = engines.replace(20, ()).unwrap();
+        assert!(Arc::ptr_eq(&old.unwrap(), &b));
     }
 
     struct TestEngine {
