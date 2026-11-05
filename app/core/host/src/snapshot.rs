@@ -20,8 +20,47 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use crate::intent;
+use crate::profile::Transport;
 use crate::registry;
 use crate::status::{Phase, StatusStore};
+
+/// One profile as the host reads it from its files.
+pub struct ProfileFacts {
+    pub id: String,
+    pub name: String,
+    pub gateway: String,
+    pub saml_port: u32,
+    pub transport: Transport,
+    pub adopts_unkeyed_vpn_entry: bool,
+    pub phase: Option<Phase>,
+    pub connect_at_login: bool,
+}
+
+/// Every profile with what its supervisor is doing and whether it connects at
+/// login. `agent_enabled` is asked at most once per call, and only if a profile
+/// adopted the original layout (the one kind that inherits it). The original layout
+/// is not migrated here; [`json`] does that first.
+pub fn facts(root: &Path, agent_enabled: &dyn Fn() -> bool, now: SystemTime) -> Vec<ProfileFacts> {
+    let mut agent: Option<bool> = None;
+    registry::entries(root)
+        .into_iter()
+        .map(|entry| {
+            let directory = registry::entry_directory(root, &entry.id);
+            let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
+            let legacy = adopted && *agent.get_or_insert_with(agent_enabled);
+            ProfileFacts {
+                name: entry.name().to_owned(),
+                gateway: entry.profile.gateway.clone(),
+                saml_port: entry.profile.saml_port,
+                transport: entry.profile.transport,
+                adopts_unkeyed_vpn_entry: adopted,
+                phase: StatusStore::new(&directory).read(now).map(|s| s.phase),
+                connect_at_login: intent::connect_at_login(&directory, legacy),
+                id: entry.id,
+            }
+        })
+        .collect()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,8 +82,7 @@ struct Snapshot {
 }
 
 /// The snapshot as JSON. `agent_enabled` says whether the login agent is registered
-/// and enabled; it is asked at most once per call, and only if a profile adopted
-/// the original layout (the one kind that inherits it).
+/// and enabled (see [`facts`]).
 pub fn json(
     root: &Path,
     legacy_name: &dyn Fn(&str) -> Option<String>,
@@ -52,23 +90,17 @@ pub fn json(
     now: SystemTime,
 ) -> String {
     registry::migrate_legacy(root, legacy_name);
-    let mut agent: Option<bool> = None;
-    let profiles = registry::entries(root)
+    let profiles = facts(root, agent_enabled, now)
         .into_iter()
-        .map(|entry| {
-            let directory = registry::entry_directory(root, &entry.id);
-            let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
-            let legacy = adopted && *agent.get_or_insert_with(agent_enabled);
-            Item {
-                name: entry.name().to_owned(),
-                gateway: entry.profile.gateway.clone(),
-                saml_port: entry.profile.saml_port,
-                transport: entry.profile.transport.as_str(),
-                adopts_unkeyed_vpn_entry: adopted,
-                phase: StatusStore::new(&directory).read(now).map(|s| s.phase),
-                connect_at_login: intent::connect_at_login(&directory, legacy),
-                id: entry.id,
-            }
+        .map(|facts| Item {
+            id: facts.id,
+            name: facts.name,
+            gateway: facts.gateway,
+            saml_port: facts.saml_port,
+            transport: facts.transport.as_str(),
+            adopts_unkeyed_vpn_entry: facts.adopts_unkeyed_vpn_entry,
+            phase: facts.phase,
+            connect_at_login: facts.connect_at_login,
         })
         .collect();
     serde_json::to_string(&Snapshot { profiles })

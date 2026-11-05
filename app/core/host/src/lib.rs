@@ -22,6 +22,7 @@ pub mod lease;
 pub mod out;
 pub mod profile;
 pub mod registry;
+pub mod serve;
 pub mod snapshot;
 pub mod start;
 pub mod status;

@@ -23,6 +23,11 @@ pub const AGENT_PLIST: &str = "com.chris.openforticlient.oftc.agent.plist";
 /// The agent's launchd label.
 pub const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
 
+/// The host service's property list (`host serve`), by file name.
+pub const HOST_PLIST: &str = "com.chris.openforticlient.oftc.host.plist";
+/// The host service's launchd label.
+pub const HOST_LABEL: &str = "com.chris.openforticlient.oftc.host";
+
 pub fn agent_item() -> LoginItem {
     LoginItem::Agent(AGENT_PLIST.to_owned())
 }
@@ -34,15 +39,18 @@ pub trait Launchctl {
     /// `launchctl disable gui/<uid>/<label>`; true when it exited 0. The supervisor
     /// uses it to keep the login agent from reconnecting after an unexplained drop.
     fn disable(&self, label: &str) -> bool;
+    /// `launchctl kickstart -k gui/<uid>/<label>`: starts the service, or kills and
+    /// restarts it if it runs; true when it exited 0.
+    fn kickstart(&self, label: &str) -> bool;
 }
 
 /// `/bin/launchctl` in the current user's GUI domain.
 pub struct SystemLaunchctl;
 
 impl SystemLaunchctl {
-    fn run(verb: &str, label: &str) -> bool {
+    fn run(verbs: &[&str], label: &str) -> bool {
         Command::new("/bin/launchctl")
-            .arg(verb)
+            .args(verbs)
             .arg(format!("gui/{}/{label}", crate::os::uid()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -53,11 +61,15 @@ impl SystemLaunchctl {
 
 impl Launchctl for SystemLaunchctl {
     fn enable(&self, label: &str) -> bool {
-        SystemLaunchctl::run("enable", label)
+        SystemLaunchctl::run(&["enable"], label)
     }
 
     fn disable(&self, label: &str) -> bool {
-        SystemLaunchctl::run("disable", label)
+        SystemLaunchctl::run(&["disable"], label)
+    }
+
+    fn kickstart(&self, label: &str) -> bool {
+        SystemLaunchctl::run(&["kickstart", "-k"], label)
     }
 }
 
@@ -66,6 +78,7 @@ pub struct RecordingLaunchctl {
     succeeds: bool,
     calls: Mutex<Vec<String>>,
     disabled: Mutex<Vec<String>>,
+    kicked: Mutex<Vec<String>>,
 }
 
 impl RecordingLaunchctl {
@@ -74,12 +87,18 @@ impl RecordingLaunchctl {
             succeeds,
             calls: Mutex::new(Vec::new()),
             disabled: Mutex::new(Vec::new()),
+            kicked: Mutex::new(Vec::new()),
         }
     }
 
     /// The labels passed to `enable`.
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The labels passed to `kickstart`.
+    pub fn kicked(&self) -> Vec<String> {
+        self.kicked.lock().unwrap().clone()
     }
 
     /// The labels passed to `disable`.
@@ -96,6 +115,11 @@ impl Launchctl for RecordingLaunchctl {
 
     fn disable(&self, label: &str) -> bool {
         self.disabled.lock().unwrap().push(label.to_owned());
+        self.succeeds
+    }
+
+    fn kickstart(&self, label: &str) -> bool {
+        self.kicked.lock().unwrap().push(label.to_owned());
         self.succeeds
     }
 }

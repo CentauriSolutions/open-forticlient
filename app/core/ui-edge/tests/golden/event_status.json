@@ -1,0 +1,1 @@
+{"event":"status","seq":1772,"status":{"schema":1,"generated":"2026-11-04T12:00:01Z","seq":1772,"host":{"version":"0.9.0","build":"24","provider_build":"24"},"component":{"state":"checking","installed_build":null,"expected_build":"24"},"login":{"menu_item":"disabled","agent":"requires_approval","host_agent":"not_found"},"profiles":[]}}

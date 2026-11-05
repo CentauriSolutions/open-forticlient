@@ -484,6 +484,7 @@ dependencies = [
  "oftc-engine",
  "oftc-host-bootstrap",
  "oftc-provider",
+ "oftc-ui-edge",
  "security-framework",
  "serde",
  "serde_json",
@@ -553,6 +554,14 @@ version = "0.1.0"
 dependencies = [
  "oftc-apple",
  "oftc-provider",
+]
+
+[[package]]
+name = "oftc-ui-edge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
