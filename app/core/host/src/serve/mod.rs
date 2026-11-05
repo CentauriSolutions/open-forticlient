@@ -17,7 +17,9 @@ pub mod traffic;
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, PoisonError};
 use std::thread;
@@ -44,6 +46,8 @@ pub struct Services<'a> {
     /// The bundle's versions; empty strings when the bundle could not be read.
     pub host: HostBlock,
     pub now: &'a (dyn Fn() -> SystemTime + Sync),
+    /// How long a new connection has, in total, to say `hello`.
+    pub hello_timeout: Duration,
 }
 
 /// How often the provider is asked for a traffic reading while someone listens.
@@ -57,15 +61,26 @@ const POLL: Duration = Duration::from_secs(1);
 const IDLE_POLL: Duration = Duration::from_secs(30);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
-/// Serves `listener` until `stop` says so. A connection whose peer user is not
-/// `uid` (per `peer`) is closed without a word.
+/// Runs `body`, and calls `then` when it ends however it ends, a panic included.
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+/// Serves `listener` until `stop` says so, or until the document or sampling loop dies
+/// (then false: a host that can no longer refresh must not keep answering with stale
+/// documents, so the caller exits non-zero and launchd restarts it). A connection
+/// whose peer user is not `uid` (per `peer`) is closed without a word.
 pub fn serve(
     listener: &std::os::unix::net::UnixListener,
     services: &Services,
     uid: u32,
     peer: &dyn Fn(&UnixStream) -> Option<u32>,
     stop: &dyn Fn() -> bool,
-) {
+) -> bool {
     let hub = Hub::new();
     let (wake, woken) = mpsc::channel();
     let collector = Collector::new(services, &hub, wake.clone());
@@ -73,13 +88,31 @@ pub fn serve(
         hub: &hub,
         collector: &collector,
         host: &services.host,
+        hello_timeout: services.hello_timeout,
     };
     let open: Mutex<HashMap<u64, UnixStream>> = Mutex::new(HashMap::new());
+    let failed = AtomicBool::new(false);
+    // A loop that ends while the hub is open (a panic) takes the server down with it.
+    let guard = || {
+        OnDrop(|| {
+            if !hub.closing() {
+                failed.store(true, Ordering::SeqCst);
+            }
+        })
+    };
     thread::scope(|scope| {
-        scope.spawn(|| refresh_loop(scope, &collector, &hub, services, &wake, woken));
-        scope.spawn(|| sample_loop(&hub, services.vpn));
+        scope.spawn(|| {
+            let _alive = guard();
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                refresh_loop(scope, &collector, &hub, services, &wake, woken)
+            }));
+        });
+        scope.spawn(|| {
+            let _alive = guard();
+            let _ = catch_unwind(AssertUnwindSafe(|| sample_loop(&hub, services.vpn)));
+        });
         let mut next = 0u64;
-        while !stop() {
+        while !stop() && !failed.load(Ordering::SeqCst) {
             let stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(_) => {
@@ -105,10 +138,14 @@ pub fn serve(
             drop(connections);
             let (shared, open) = (&shared, &open);
             scope.spawn(move || {
-                session::serve(stream, shared);
-                open.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&id);
+                // The slot is freed however the connection ends, a panic included, and
+                // a panic costs only this connection.
+                let _slot = OnDrop(|| {
+                    open.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                });
+                let _ = catch_unwind(AssertUnwindSafe(|| session::serve(stream, shared)));
             });
         }
         hub.close();
@@ -117,6 +154,7 @@ pub fn serve(
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
+    !failed.load(Ordering::SeqCst)
 }
 
 /// Keeps the status document current: on a wake-up from a NetworkExtension status
@@ -219,15 +257,20 @@ pub fn run(
         login,
         host: info::host_block(env.exe(), &env.provider_id()),
         now: &SystemTime::now,
+        hello_timeout: Duration::from_secs(10),
     };
-    serve(
+    let healthy = serve(
         &bound.listener,
         &services,
         crate::os::euid(),
         &|stream| crate::os::peer_uid(stream),
         &|| signals.raised(),
     );
-    (String::new(), 0)
+    if healthy {
+        (String::new(), 0)
+    } else {
+        ("host_unavailable: internal failure".into(), 1)
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +348,7 @@ mod tests {
                     provider_build: "24".into(),
                 },
                 now: &|| SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_794_800),
+                hello_timeout: Duration::from_millis(400),
             }
         }
 
@@ -329,14 +373,6 @@ mod tests {
                 let _stop = OnDrop(|| stop.store(true, Ordering::SeqCst));
                 body(&socket)
             })
-        }
-    }
-
-    struct OnDrop<F: FnMut()>(F);
-
-    impl<F: FnMut()> Drop for OnDrop<F> {
-        fn drop(&mut self) {
-            (self.0)();
         }
     }
 
@@ -692,12 +728,149 @@ mod tests {
                 (3000, Some(1000.0), Some(100.0))
             );
             assert!(rows[0].0 < rows[1].0 && rows[1].0 < rows[2].0);
-            // The status document carries the newest sample too.
-            let status = client.call(r#"{"id":3,"op":"status"}"#);
-            let _ = status;
         });
         let sent = rig.entry.sent();
         assert!(sent.len() >= 3 && sent.iter().all(|m| m == b"oftc.traffic.v1"));
+    }
+
+    /// The 17th simultaneous connection is closed with nothing said; when one of the 16
+    /// ends its slot is free again.
+    #[test]
+    fn the_connection_cap_is_sixteen() {
+        let rig = Rig::new();
+        rig.serving(&me, |socket| {
+            let mut held: Vec<Client> = (0..MAX_CONNECTIONS)
+                .map(|_| {
+                    let mut client = Client::connect(socket);
+                    assert_eq!(client.hello()["ok"], true);
+                    client
+                })
+                .collect();
+            let mut seventeenth = Client::connect(socket);
+            seventeenth.send(r#"{"id":1,"op":"hello","protocol":[1,1]}"#);
+            assert_eq!(seventeenth.next(), None);
+            drop(held.pop());
+            // The slot is released when the server notices the close; allow it a moment.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut again = Client::connect(socket);
+                again.send(r#"{"id":1,"op":"hello","protocol":[1,1]}"#);
+                if again.next().is_some() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "slot never freed");
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
+
+    /// `hello` has one deadline for the whole exchange: a client that keeps sending a
+    /// byte at a time, never finishing a line, is cut off at it (a per-read timeout
+    /// would never fire).
+    #[test]
+    fn the_hello_deadline_is_total() {
+        let rig = Rig::new();
+        rig.serving(&me, |socket| {
+            let mut client = Client::connect(socket);
+            let started = Instant::now();
+            let mut closed = false;
+            while started.elapsed() < Duration::from_secs(5) {
+                if client.writer.write_all(b" ").is_err() {
+                    closed = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            assert!(closed, "still open after 5 s of dribbling");
+            assert!(started.elapsed() >= Duration::from_millis(350));
+            assert_eq!(client.next(), None);
+            // A client that says hello in time is not cut off later.
+            let mut good = Client::connect(socket);
+            assert_eq!(good.hello()["ok"], true);
+            thread::sleep(Duration::from_millis(700));
+            assert_eq!(good.call(r#"{"id":2,"op":"profiles"}"#)["ok"], true);
+        });
+    }
+
+    /// A VPN backend whose loading panics, as a bug in the refresh path would.
+    struct Broken;
+
+    impl oftc_apple::manager::VpnControl for Broken {
+        fn load_all(&self) -> oftc_apple::manager::Result<Vec<oftc_apple::manager::VpnEntry>> {
+            panic!("broken");
+        }
+        fn reload(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+        ) -> oftc_apple::manager::Result<oftc_apple::manager::VpnEntry> {
+            unimplemented!()
+        }
+        fn status(&self, _: &oftc_apple::manager::VpnEntry) -> VpnStatus {
+            unimplemented!()
+        }
+        fn create(&self, _: &str, _: &str, _: &str) -> oftc_apple::manager::Result<()> {
+            unimplemented!()
+        }
+        fn set_enabled(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+            _: bool,
+        ) -> oftc_apple::manager::Result<()> {
+            unimplemented!()
+        }
+        fn remove(&self, _: &oftc_apple::manager::VpnEntry) -> oftc_apple::manager::Result<()> {
+            unimplemented!()
+        }
+        fn start(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+            _: oftc_apple::manager::StartOptions,
+        ) -> oftc_apple::manager::Result<()> {
+            unimplemented!()
+        }
+        fn stop(&self, _: &oftc_apple::manager::VpnEntry) {
+            unimplemented!()
+        }
+        fn send_provider_message(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+            _: &[u8],
+            _: Duration,
+        ) -> oftc_apple::manager::Result<Vec<u8>> {
+            unimplemented!()
+        }
+        fn last_disconnect_error(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+            _: Duration,
+        ) -> oftc_apple::manager::Result<Option<oftc_apple::error::AppleError>> {
+            unimplemented!()
+        }
+        fn observe_status(
+            &self,
+            _: &oftc_apple::manager::VpnEntry,
+            _: mpsc::Sender<()>,
+        ) -> oftc_apple::manager::Result<oftc_apple::manager::Subscription> {
+            unimplemented!()
+        }
+    }
+
+    /// A host whose refresh loop has died must stop (reporting failure, so the verb exits
+    /// non-zero and launchd restarts it) instead of serving stale documents forever.
+    #[test]
+    fn a_dead_refresh_loop_stops_the_server() {
+        let rig = Rig::new();
+        let bound = listener::bind(&rig.dir.0).unwrap();
+        let services = Services {
+            vpn: &Broken,
+            ..rig.services()
+        };
+        let started = Instant::now();
+        let healthy = serve(&bound.listener, &services, 501, &me, &|| {
+            started.elapsed() > Duration::from_secs(20)
+        });
+        assert!(!healthy);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// `host serve` as the verb runs it: it serves with the real peer check until the

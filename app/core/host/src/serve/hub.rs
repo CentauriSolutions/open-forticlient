@@ -301,3 +301,51 @@ impl Hub {
         state.component_inflight = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(rx: u64) -> TrafficSample {
+        TrafficSample {
+            session: "11111111".into(),
+            rx_bytes: rx,
+            tx_bytes: 0,
+            rx_rate: None,
+            tx_rate: None,
+            sample_seq: 0,
+        }
+    }
+
+    fn sequence(events: &[Event]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Traffic { sample, .. } => Some(sample.sample_seq),
+                Event::Status { .. } => None,
+            })
+            .collect()
+    }
+
+    /// A subscriber is owed no old samples: with the counter already at 2, a fresh
+    /// cursor sees only the third, and a cursor that has seen it sees nothing.
+    #[test]
+    fn a_new_subscription_gets_no_old_samples() {
+        let hub = Hub::new();
+        let traffic = Topics {
+            status: false,
+            traffic: true,
+        };
+        hub.push_samples(vec![("lab".into(), sample(1))]);
+        hub.push_samples(vec![("lab".into(), sample(2))]);
+        let mut cursor = hub.fresh_cursor();
+        assert_eq!(cursor.sample_seq, 2);
+        assert!(hub.events_since(&mut cursor, traffic).is_empty());
+        hub.push_samples(vec![("lab".into(), sample(3)), ("other".into(), sample(9))]);
+        assert_eq!(sequence(&hub.events_since(&mut cursor, traffic)), [3, 4]);
+        assert!(hub.events_since(&mut cursor, traffic).is_empty());
+        // A cursor that starts at zero (the connection's first) would be owed the newest.
+        let mut stale = Cursor::default();
+        assert_eq!(sequence(&hub.events_since(&mut stale, traffic)), [3, 4]);
+    }
+}

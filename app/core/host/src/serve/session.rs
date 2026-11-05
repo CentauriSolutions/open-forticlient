@@ -3,6 +3,7 @@
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -16,8 +17,6 @@ use super::collect::Collector;
 use super::frame::{self, Line};
 use super::hub::{Cursor, Hub, Topics};
 
-/// A client that has not said `hello` by then is dropped.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// A client that does not read for this long is dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// At most one `status` event per this interval on one connection.
@@ -29,6 +28,7 @@ pub struct Shared<'a> {
     pub hub: &'a Hub,
     pub collector: &'a Collector<'a>,
     pub host: &'a HostBlock,
+    pub hello_timeout: Duration,
 }
 
 /// The write half and its state, shared by the request loop and the pusher.
@@ -89,7 +89,6 @@ pub fn serve(stream: UnixStream, shared: &Shared) {
         return;
     };
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-    let _ = reader.set_read_timeout(Some(HELLO_TIMEOUT));
     let conn = Conn {
         writer: Mutex::new(stream),
         handle,
@@ -98,18 +97,39 @@ pub fn serve(stream: UnixStream, shared: &Shared) {
         epoch: AtomicU64::new(0),
         start: Mutex::new(Cursor::default()),
     };
+    // However this ends, the connection's topics stop counting as subscribers.
+    let _subscribers = super::OnDrop(|| {
+        let last = std::mem::take(&mut *conn.topics.lock().unwrap_or_else(PoisonError::into_inner));
+        shared.hub.subscribed(last, Topics::default());
+    });
+    let (hello_done, hello_wait) = mpsc::channel::<()>();
     thread::scope(|scope| {
         scope.spawn(|| push(&conn, shared.hub));
-        requests(&conn, BufReader::new(reader), shared);
-        conn.close();
-        // The pusher may be asleep on the hub; it checks `closed` when it wakes.
-        shared.hub.poke();
+        // A total deadline for `hello`, not a timeout per read: a client that dribbles
+        // a byte at a time must not keep a slot. Dropping the sender ends the wait.
+        let conn = &conn;
+        scope.spawn(move || {
+            if hello_wait.recv_timeout(shared.hello_timeout) == Err(mpsc::RecvTimeoutError::Timeout)
+            {
+                conn.close();
+            }
+        });
+        let _closed = super::OnDrop(|| {
+            conn.close();
+            // The pusher may be asleep on the hub; it checks `closed` when it wakes.
+            shared.hub.poke();
+        });
+        requests(conn, BufReader::new(reader), shared, hello_done);
     });
-    let last = *conn.topics.lock().unwrap_or_else(PoisonError::into_inner);
-    shared.hub.subscribed(last, Topics::default());
 }
 
-fn requests(conn: &Conn, mut reader: BufReader<UnixStream>, shared: &Shared) {
+fn requests(
+    conn: &Conn,
+    mut reader: BufReader<UnixStream>,
+    shared: &Shared,
+    hello_done: mpsc::Sender<()>,
+) {
+    let mut hello_done = Some(hello_done);
     let mut negotiated: Option<u32> = None;
     loop {
         let line = match frame::read_line(&mut reader) {
@@ -137,7 +157,8 @@ fn requests(conn: &Conn, mut reader: BufReader<UnixStream>, shared: &Shared) {
                 return;
             };
             negotiated = Some(chosen);
-            let _ = conn.handle.set_read_timeout(None);
+            // Cancels the deadline: the receiver sees the sender go.
+            drop(hello_done.take());
             let result = HelloResult {
                 protocol: chosen,
                 host: shared.host.clone(),

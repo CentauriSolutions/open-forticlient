@@ -169,7 +169,12 @@ mod tests {
         rates.ingest(snap(B, 50, 0, 121.0)); // a new session
         assert_eq!(rates.receiving, None);
         assert_eq!(rates.latest.as_ref().unwrap().received_bytes, 50);
-        rates.ingest(snap(B, 10, 0, 122.0)); // counter rollback
+        // A new session whose counters are higher still gives no rate: the session
+        // change alone is enough, with no rollback to blame.
+        rates.ingest(snap(A, 100, 0, 121.5));
+        rates.ingest(snap(B, 900, 0, 122.0));
+        assert_eq!(rates.receiving, None);
+        rates.ingest(snap(B, 10, 0, 122.5)); // counter rollback
         assert_eq!(rates.receiving, None);
         let mut wrong_version = snap(B, 10, 0, 123.0);
         wrong_version.version = 2;
@@ -183,6 +188,8 @@ mod tests {
         assert_eq!(rates.receiving, Some(1000.0)); // exactly five seconds still counts
         rates.ingest(snap(A, 5000, 0, 15.0));
         assert_eq!(rates.receiving, None); // zero elapsed
+        rates.ingest(snap(A, 6000, 0, 20.5));
+        assert_eq!(rates.receiving, None); // 5.5 s: past the window
     }
 
     /// What reaches `ingest` is only what the provider's reply decodes to.

@@ -96,7 +96,11 @@ Design of D:
 - Path: `~/Library/Application Support/<bundle id>/host.sock`. That directory
   is the host's existing per-user directory, created `0700` by `make_private_dir`
   (`lease.rs`). The socket is created `0600`. A directory that already exists with group or other bits is put back to `0700`
-  if it is ours and refused if it is not. `sun_path` holds 104 bytes including its
+  if it is ours and refused if it is not; a symlink in its place is refused, never
+  followed (`lstat`). The socket is created with the process umask and restricted to
+  `0600` right after `bind`; the window between the two exposes nothing because
+  the directory is already closed to everyone else (no `umask` call: it is
+  process-wide and would need another `unsafe`). `sun_path` holds 104 bytes including its
   NUL, so the path may be at most 103 bytes; the suffix is about 68 bytes, leaving
   about 29 characters for the user name, so the server checks the length before it
   creates anything and refuses to start (`host serve` prints
@@ -129,7 +133,7 @@ Design of D:
 Newline-delimited JSON (NDJSON), UTF-8, one object per line, at most 64 KiB per
 line (longer: the receiver closes). A line that is not a JSON object with an unsigned integer `id` and
 a string `op` cannot be answered, so the server closes the connection without a
-reply; so it does when no `hello` has arrived within 10 s, when a write is not
+reply; so it does when `hello` has not completed within 10 s of connecting (one deadline for the whole exchange, so a client sending a byte at a time is cut off too), when a write is not
 accepted for 5 s, and for a 17th simultaneous connection. Blank lines are
 skipped. One connection carries many requests; each
 request has a client-chosen integer `id` and every reply, progress and result
@@ -594,6 +598,10 @@ Serial spine: 2, 3 (or 5), 6, 7.
 - **A second Login Items entry** and its approval prompt; behaviour of two
   agents in one app is not verified. If the cost is unacceptable, fall back to
   option A with the `launchctl disable` behaviour moved off the shared label.
+- **A host whose loops die.** A connection that panics is closed and its slot and
+  subscriptions released; if the status refresh or the traffic sampler ends while
+  the host is running, `host serve` stops, prints `host_unavailable: internal failure`
+  and exits 1, so `KeepAlive` restarts it rather than serving stale documents.
 - **A new always-on process** in a security tool: mitigated by owner-only
   socket, peer uid check, no secrets, no network listener, caps on line length and
   connections (16), and `deny(unsafe_code)` outside `os`.

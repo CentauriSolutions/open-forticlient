@@ -88,8 +88,14 @@ pub fn bind(root: &Path) -> Result<Bound, StartError> {
 /// The directory must be ours and closed to everyone else. A mode that was loosened is
 /// put back; a directory of another user is refused.
 fn secure_directory(root: &Path) -> Result<(), StartError> {
-    let meta =
-        fs::metadata(root).map_err(|_| StartError::Unusable("cannot inspect the directory"))?;
+    // `lstat`: a symlink in place of the directory is refused, not followed.
+    let meta = fs::symlink_metadata(root)
+        .map_err(|_| StartError::Unusable("cannot inspect the directory"))?;
+    if !meta.file_type().is_dir() {
+        return Err(StartError::Unusable(
+            "the directory is not a plain directory",
+        ));
+    }
     if meta.uid() != os::euid() {
         return Err(StartError::Unusable(
             "the directory belongs to another user",
@@ -170,6 +176,19 @@ mod tests {
         let bound = bind(&dir.0).unwrap();
         assert_eq!(mode(&dir.0), 0o700);
         drop(bound);
+    }
+
+    /// A symlink where the directory should be is refused (its target could be anyone's),
+    /// and nothing is bound through it.
+    #[test]
+    fn a_symlinked_directory_is_refused() {
+        let dir = TempDir::new("listener-link");
+        let target = dir.0.join("target");
+        fs::create_dir(&target).unwrap();
+        let link = dir.0.join("l");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(bind(&link), Err(StartError::Unusable(_))));
+        assert!(!target.join(SOCKET_FILE).exists());
     }
 
     /// The path limit is `sun_path`'s 104 bytes with its NUL: 103 fit, 104 fail closed
