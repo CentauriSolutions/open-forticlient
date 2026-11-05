@@ -61,6 +61,14 @@ impl Out {
         stream.write(b"\n");
     }
 
+    /// Raw bytes, with no newline added (an exported bundle).
+    pub fn bytes(&self, data: &[u8]) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write(data);
+    }
+
     /// Flushes. A dead stream is not an error.
     pub fn flush(&self) {
         self.0

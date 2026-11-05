@@ -3,8 +3,6 @@ import AppKit
 import Foundation
 import NetworkExtension
 import Security
-import ServiceManagement
-import SystemExtensions
 
 private let appID = Bundle.main.bundleIdentifier ?? ""
 private let providerID = appID + ".provider"
@@ -74,25 +72,6 @@ private func storedPSK(for gateway: String) -> Data {
         finish("PSK unavailable in OFTC Keychain service", code: 1)
     }
     return psk
-}
-
-private func savePSK(_ psk: Data, for gateway: String) {
-    let selector: [CFString: Any] = [
-        kSecClass: kSecClassGenericPassword,
-        kSecAttrService: keychainService,
-        kSecAttrAccount: gateway,
-    ]
-    var item = selector
-    item[kSecValueData] = psk
-    let status = SecItemAdd(item as CFDictionary, nil)
-    if status == errSecDuplicateItem {
-        let replacement: [CFString: Any] = [kSecValueData: psk]
-        guard SecItemUpdate(selector as CFDictionary, replacement as CFDictionary) == errSecSuccess else {
-            finish("Could not update OFTC Keychain PSK", code: 1)
-        }
-    } else if status != errSecSuccess {
-        finish("Could not save OFTC Keychain PSK", code: 1)
-    }
 }
 
 private func awaitPreflight(_ connection: NEVPNConnection, deadline: Date) {
@@ -274,14 +253,6 @@ private func fortiClientName(forGateway gateway: String) -> String? {
     }
 }
 
-private func newProfile(_ profile: OFTCProfile) -> OFTCProfileEntry {
-    if allEntries().contains(where: { $0.profile.gateway == profile.gateway }) {
-        finish("OFTC already has a profile for \(profile.gateway)", code: 1)
-    }
-    do { return try OFTCProfileScope.add(profile, root: profileRoot, id: selectedProfile) }
-    catch { finish("Could not save OFTC profile (a profile with that id may already exist)", code: 1) }
-}
-
 private func runLive(gateway: String, port: UInt32,
                      mode: ProviderStartEnvelope.ConnectMode,
                      insecure: Bool, supervised: Bool) -> Never {
@@ -367,7 +338,7 @@ private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent
 // The verbs below are implemented in Rust (liboftc_hostlib.a) and the rest here. Keep
 // this list equal to the `rust` rows of `VERBS` in app/core/host/src/commands.rs; a
 // Rust test compares them. Rust also handles a leading `--profile <id>` for them.
-private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile"]
+private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile", "export-profiles", "import-profiles", "import-profile", "migrate-psk"]
 
 @_silgen_name("oftc_host_main")
 private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
@@ -441,80 +412,6 @@ case "install-config" where args.count == 1:
         }
     }
     dispatchMain()
-
-case "migrate-psk" where args.count == 3:
-    // Explicit one-time path. Tunnel starts never consult FortiClient files.
-    var psk: Data
-    do { psk = try MigrationBridge.psk(profileName: args[1], expectedGateway: args[2]) }
-    catch { finish("Could not obtain plaintext PSK for that profile and gateway", code: 1) }
-    savePSK(psk, for: args[2])
-    psk.resetBytes(in: 0..<psk.count)
-    finish("Existing local profile PSK migrated into OFTC Keychain")
-
-case "import-profile" where args.count == 2:
-    // Only this explicit command loads FortiClient configuration. Normal
-    // connection and recovery read the OFTC store and Keychain exclusively.
-    var imported: MigrationBridge.ImportedProfile
-    do { imported = try MigrationBridge.importProfile(name: args[1]) }
-    catch { finish("Could not import FortiClient profile", code: 1) }
-    defer { imported.psk.resetBytes(in: 0..<imported.psk.count) }
-    let profile: OFTCProfile
-    do { profile = try OFTCProfile(gateway: imported.gateway, samlPort: imported.samlPort,
-                                   name: args[1]) }
-    catch { finish("Imported profile has invalid connection settings", code: 1) }
-    savePSK(imported.psk, for: profile.gateway)
-    let entry = newProfile(profile)
-    finish("FortiClient profile imported into OFTC configuration and Keychain: id=\(entry.id)")
-
-case "export-profiles":
-    // Writes a shareable bundle of the named profile ids (all when none) to
-    // stdout, including each PSK from the Keychain.
-    let wanted = Array(args.dropFirst())
-    let chosen = wanted.isEmpty ? allEntries() : wanted.map { id in
-        guard let entry = allEntries().first(where: { $0.id == id }) else {
-            finish("OFTC profile unavailable: no profile named \(id)", code: 1)
-        }
-        return entry
-    }
-    if chosen.isEmpty { finish("No OFTC profiles to export", code: 1) }
-    let items: [OFTCProfileBundle.Item] = chosen.map { entry in
-        guard var psk = try? lookupPSK(for: entry.profile.gateway),
-              let text = String(data: psk, encoding: .utf8) else {
-            finish("PSK unavailable for \(entry.name); nothing exported", code: 1)
-        }
-        psk.resetBytes(in: 0..<psk.count)
-        return OFTCProfileBundle.Item(
-            name: entry.name, gateway: entry.profile.gateway, samlPort: entry.profile.samlPort,
-            transport: entry.profile.transport, psk: text)
-    }
-    guard let data = try? OFTCProfileBundle(profiles: items).encoded() else {
-        finish("Could not write the profile file", code: 1)
-    }
-    FileHandle.standardOutput.write(data)
-    exit(0)
-
-case "import-profiles" where args.count == 1:
-    // Reads a bundle from stdin. A gateway that already has a profile is
-    // skipped, so importing never changes an existing profile or its PSK.
-    let input = (try? FileHandle.standardInput.read(upToCount: OFTCProfileBundle.maxBytes + 1)) ?? Data()
-    let incoming: [(profile: OFTCProfile, psk: Data)]
-    do { incoming = try OFTCProfileBundle.decode(input) }
-    catch let failure as OFTCProfileBundle.Failure { finish(failure.message, code: 1) }
-    catch { finish("Could not read that profile file", code: 1) }
-    var lines: [String] = []
-    for var item in incoming {
-        defer { item.psk.resetBytes(in: 0..<item.psk.count) }
-        if allEntries().contains(where: { $0.profile.gateway == item.profile.gateway }) {
-            lines.append("Skipped \(item.profile.displayName): already configured")
-            continue
-        }
-        savePSK(item.psk, for: item.profile.gateway)
-        guard let entry = try? OFTCProfileScope.add(item.profile, root: profileRoot) else {
-            finish("Could not save the profile \"\(item.profile.displayName)\"", code: 1)
-        }
-        lines.append("Imported \(entry.name): id=\(entry.id)")
-    }
-    finish(lines.joined(separator: "\n"))
 
 case "launcher-alias" where args.count == 2 && ["ensure", "remove"].contains(args[1]):
     if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }

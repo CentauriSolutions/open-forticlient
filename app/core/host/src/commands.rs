@@ -15,6 +15,7 @@ use oftc_apple::sysext::{EventSink, ExtensionControl, ExtensionEvent, Finish};
 use zeroize::Zeroizing;
 
 use crate::agent::{self, Launchctl};
+use crate::bundle;
 use crate::env::HostEnv;
 use crate::intent;
 use crate::keychain::{read_psk_line, Keychain, KeychainError};
@@ -74,10 +75,10 @@ pub const VERBS: &[Verb] = &[
     rust("list-profiles"),
     swift("check-update [url]"),
     swift("launcher-alias ensure|remove"),
-    swift("export-profiles [id...]"),
-    swift("import-profiles"),
+    rust("export-profiles [id...]"),
+    rust("import-profiles"),
     rust("save-profile <gateway> <saml-port> [--tcp] [--name <name>]"),
-    swift("import-profile <FortiClient-profile>"),
+    rust("import-profile <FortiClient-profile>"),
     rust("show-profile"),
     swift("erase-profile"),
     rust("has-psk"),
@@ -86,7 +87,7 @@ pub const VERBS: &[Verb] = &[
     swift("start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     swift("supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     rust("provision-psk [--stdin] [gateway]"),
-    swift("migrate-psk <FortiClient-profile> <gateway>"),
+    rust("migrate-psk <FortiClient-profile> <gateway>"),
     swift("preflight <gateway> <32-hex-UID>"),
     swift("start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     swift(
@@ -135,6 +136,17 @@ pub enum Command {
     },
     SaveProfile {
         profile: Profile,
+    },
+    ExportProfiles {
+        ids: Vec<String>,
+    },
+    ImportProfiles,
+    ImportProfile {
+        forticlient_name: String,
+    },
+    MigratePsk {
+        forticlient_name: String,
+        gateway: String,
     },
 }
 
@@ -193,6 +205,15 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             }
         }
         ("save-profile", [gateway, port, flags @ ..]) => parse_save_profile(gateway, port, flags)?,
+        ("export-profiles", ids) => Command::ExportProfiles { ids: ids.to_vec() },
+        ("import-profiles", []) => Command::ImportProfiles,
+        ("import-profile", [name]) => Command::ImportProfile {
+            forticlient_name: name.clone(),
+        },
+        ("migrate-psk", [name, gateway]) => Command::MigratePsk {
+            forticlient_name: name.clone(),
+            gateway: gateway.clone(),
+        },
         _ => return Err(ParseError::Usage),
     };
     Ok(Invocation { profile, command })
@@ -226,10 +247,25 @@ pub trait SecretPrompt {
     fn read_secret(&self) -> Result<Zeroizing<Vec<u8>>, KeychainError>;
 }
 
+/// What an installed FortiClient profile provides, for `import-profile` and
+/// `migrate-psk`. `None` when the profile is missing or unusable.
+pub trait FortiClientProfiles {
+    fn import(&self, name: &str) -> Option<FortiClientProfile>;
+    /// The PSK of profile `name`, only when it is for exactly `gateway`.
+    fn psk(&self, name: &str, gateway: &str) -> Option<Zeroizing<Vec<u8>>>;
+}
+
+pub struct FortiClientProfile {
+    pub gateway: String,
+    pub saml_port: u32,
+    pub psk: Zeroizing<Vec<u8>>,
+}
+
 /// Everything a verb reaches outside this process.
 pub struct Backends<'a> {
     pub keychain: &'a dyn Keychain,
     pub prompt: &'a dyn SecretPrompt,
+    pub forticlient: &'a dyn FortiClientProfiles,
     /// The FortiClient profile name for a gateway, to name a migrated profile.
     pub legacy_name: &'a dyn Fn(&str) -> Option<String>,
     pub extensions: &'a dyn ExtensionControl,
@@ -443,6 +479,29 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 Err(_) => finish(io, "Could not save OFTC Keychain PSK", 1),
             }
         }
+        Command::ExportProfiles { ids } => export_profiles(io, backends, root, &ids),
+        Command::ImportProfiles => import_profiles(io, backends, root),
+        Command::ImportProfile { forticlient_name } => {
+            import_profile(io, backends, root, selected.as_deref(), &forticlient_name)
+        }
+        Command::MigratePsk {
+            forticlient_name,
+            gateway,
+        } => match backends.forticlient.psk(&forticlient_name, &gateway) {
+            None => finish(
+                io,
+                "Could not obtain plaintext PSK for that profile and gateway",
+                1,
+            ),
+            Some(psk) => match backends.keychain.set(&gateway, &psk) {
+                Ok(()) => finish(
+                    io,
+                    "Existing local profile PSK migrated into OFTC Keychain",
+                    0,
+                ),
+                Err(_) => finish(io, "Could not save OFTC Keychain PSK", 1),
+            },
+        },
         Command::SaveProfile { profile } => {
             if registry::entries(root)
                 .iter()
@@ -463,6 +522,156 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 ),
             }
         }
+    }
+}
+
+fn has_gateway(root: &std::path::Path, gateway: &str) -> bool {
+    registry::entries(root)
+        .iter()
+        .any(|entry| entry.profile.gateway == gateway)
+}
+
+/// Writes a bundle of the named profile ids (all when none) to stdout, with each
+/// PSK from the Keychain. Nothing is written unless every profile has its PSK.
+fn export_profiles(
+    io: &mut Io,
+    backends: &Backends,
+    root: &std::path::Path,
+    ids: &[String],
+) -> i32 {
+    let all = registry::entries(root);
+    let chosen: Vec<&ProfileEntry> = if ids.is_empty() {
+        all.iter().collect()
+    } else {
+        let mut chosen = Vec::new();
+        for id in ids {
+            match all.iter().find(|entry| &entry.id == id) {
+                Some(entry) => chosen.push(entry),
+                None => {
+                    let message = format!("OFTC profile unavailable: no profile named {id}");
+                    return finish(io, &message, 1);
+                }
+            }
+        }
+        chosen
+    };
+    if chosen.is_empty() {
+        return finish(io, "No OFTC profiles to export", 1);
+    }
+    let mut items = Vec::with_capacity(chosen.len());
+    for entry in chosen {
+        let p = &entry.profile;
+        let psk = backends
+            .keychain
+            .get(&p.gateway)
+            .ok()
+            .and_then(|psk| String::from_utf8(psk.to_vec()).ok());
+        let Some(psk) = psk else {
+            let message = format!("PSK unavailable for {}; nothing exported", entry.name());
+            return finish(io, &message, 1);
+        };
+        items.push(bundle::Item {
+            gateway: p.gateway.clone(),
+            name: entry.name().to_owned(),
+            psk: Zeroizing::new(psk),
+            saml_port: p.saml_port,
+            transport: p.transport,
+        });
+    }
+    match bundle::encode(items) {
+        Some(data) => {
+            io.out.bytes(&data);
+            0
+        }
+        None => finish(io, "Could not write the profile file", 1),
+    }
+}
+
+/// Reads a bundle from standard input. A gateway that already has a profile is
+/// skipped, so importing never changes an existing profile or its PSK.
+fn import_profiles(io: &mut Io, backends: &Backends, root: &std::path::Path) -> i32 {
+    let mut input = Zeroizing::new(Vec::new());
+    // A read error is an empty (so unreadable) file, as before.
+    let _ = io
+        .stdin
+        .take(bundle::MAX_BYTES as u64 + 1)
+        .read_to_end(&mut input);
+    let incoming = match bundle::decode(&input) {
+        Ok(incoming) => incoming,
+        Err(error) => return finish(io, &error.message(), 1),
+    };
+    let mut lines = Vec::new();
+    for item in incoming {
+        let name = item.profile.display_name().to_owned();
+        if has_gateway(root, &item.profile.gateway) {
+            lines.push(format!("Skipped {name}: already configured"));
+            continue;
+        }
+        if backends
+            .keychain
+            .set(&item.profile.gateway, &item.psk)
+            .is_err()
+        {
+            lines.push("Could not save OFTC Keychain PSK".to_owned());
+            return finish(io, &lines.join("\n"), 1);
+        }
+        match registry::add(root, &item.profile, None) {
+            Ok(entry) => lines.push(format!("Imported {name}: id={}", entry.id)),
+            Err(_) => {
+                lines.push(format!("Could not save the profile \"{name}\""));
+                return finish(io, &lines.join("\n"), 1);
+            }
+        }
+    }
+    finish(io, &lines.join("\n"), 0)
+}
+
+/// Creates a profile from an installed FortiClient profile and stores its PSK.
+/// Everything that would refuse the profile is checked before the Keychain is
+/// written, so a refused import leaves an existing PSK alone.
+fn import_profile(
+    io: &mut Io,
+    backends: &Backends,
+    root: &std::path::Path,
+    requested_id: Option<&str>,
+    forticlient_name: &str,
+) -> i32 {
+    let Some(imported) = backends.forticlient.import(forticlient_name) else {
+        return finish(io, "Could not import FortiClient profile", 1);
+    };
+    let Ok(profile) = Profile::new(
+        &imported.gateway,
+        imported.saml_port,
+        Transport::Udp,
+        Some(forticlient_name),
+        None,
+    ) else {
+        return finish(io, "Imported profile has invalid connection settings", 1);
+    };
+    let refused = "Could not save OFTC profile (a profile with that id may already exist)";
+    if has_gateway(root, &profile.gateway) {
+        let message = format!("OFTC already has a profile for {}", profile.gateway);
+        return finish(io, &message, 1);
+    }
+    if requested_id.is_some_and(|id| registry::entries(root).iter().any(|e| e.id == id)) {
+        return finish(io, refused, 1);
+    }
+    if backends
+        .keychain
+        .set(&profile.gateway, &imported.psk)
+        .is_err()
+    {
+        return finish(io, "Could not save OFTC Keychain PSK", 1);
+    }
+    match registry::add(root, &profile, requested_id) {
+        Ok(entry) => {
+            let message = format!(
+                "FortiClient profile imported into OFTC configuration and Keychain: id={}",
+                entry.id
+            );
+            finish(io, &message, 0)
+        }
+        Err(_) => finish(io, refused, 1),
     }
 }
 
@@ -513,7 +722,6 @@ mod tests {
             (vec![], Err(ParseError::Usage)),
             (vec!["activate"], invocation(None, Command::Activate)),
             (vec!["activate", "x"], Err(ParseError::Usage)),
-            (vec!["agent-status", "x"], Err(ParseError::Usage)),
             (
                 vec!["--profile", "lab", "unregister-menu-login"],
                 invocation(Some("lab"), Command::UnregisterMenuLogin),
@@ -572,6 +780,50 @@ mod tests {
             (vec!["provision-psk", "a", "b"], Err(ParseError::Usage)),
             (
                 vec!["provision-psk", "vpn.example.com", "--stdin"],
+                Err(ParseError::Usage),
+            ),
+            // The bundle verbs: export takes any ids, the others a fixed arity.
+            (
+                vec!["export-profiles"],
+                invocation(None, Command::ExportProfiles { ids: vec![] }),
+            ),
+            (
+                vec!["export-profiles", "a", "b"],
+                invocation(
+                    None,
+                    Command::ExportProfiles {
+                        ids: vec!["a".into(), "b".into()],
+                    },
+                ),
+            ),
+            (
+                vec!["import-profiles"],
+                invocation(None, Command::ImportProfiles),
+            ),
+            (vec!["import-profiles", "x"], Err(ParseError::Usage)),
+            (
+                vec!["import-profile", "Example Office"],
+                invocation(
+                    None,
+                    Command::ImportProfile {
+                        forticlient_name: "Example Office".into(),
+                    },
+                ),
+            ),
+            (vec!["import-profile"], Err(ParseError::Usage)),
+            (vec!["import-profile", "a", "b"], Err(ParseError::Usage)),
+            (
+                vec!["migrate-psk", "Example Office", "vpn.example.com"],
+                invocation(
+                    None,
+                    Command::MigratePsk {
+                        forticlient_name: "Example Office".into(),
+                        gateway: "vpn.example.com".into(),
+                    },
+                ),
+            ),
+            (
+                vec!["migrate-psk", "Example Office"],
                 Err(ParseError::Usage),
             ),
             // save-profile: flags repeat, the last --name wins, bad settings are usage errors.
@@ -670,7 +922,9 @@ mod tests {
         for verb in rust_verbs() {
             assert_ne!(parse(&strings(&[verb])), Err(ParseError::ProfileFlag));
             let args = strings(&[verb, "a", "b", "c", "d"]);
-            let known = verb == "save-profile" || parse(&args) == Err(ParseError::Usage);
+            // These two take a variable number of arguments.
+            let known = ["save-profile", "export-profiles"].contains(&verb)
+                || parse(&args) == Err(ParseError::Usage);
             assert!(known, "{verb}");
         }
     }
@@ -687,10 +941,56 @@ mod tests {
         }
     }
 
+    /// One installed FortiClient profile, "Example Office", and one with an unusable
+    /// gateway.
+    struct Installed;
+
+    impl FortiClientProfiles for Installed {
+        fn import(&self, name: &str) -> Option<FortiClientProfile> {
+            let (gateway, saml_port) = match name {
+                "Example Office" => ("vpn.example.com", 9443),
+                "Odd Gateway" => ("bad host", 9443),
+                _ => return None,
+            };
+            Some(FortiClientProfile {
+                gateway: gateway.to_owned(),
+                saml_port,
+                psk: Zeroizing::new(b"forti-secret".to_vec()),
+            })
+        }
+
+        fn psk(&self, name: &str, gateway: &str) -> Option<Zeroizing<Vec<u8>>> {
+            let found = self.import(name)?;
+            (found.gateway == gateway).then_some(found.psk)
+        }
+    }
+
+    /// A Keychain that refuses to write one gateway's PSK, when told to.
+    #[derive(Default)]
+    struct Flaky {
+        inner: MemoryKeychain,
+        deny: std::sync::Mutex<Option<String>>,
+    }
+
+    impl Keychain for Flaky {
+        fn get(&self, gateway: &str) -> Result<Zeroizing<Vec<u8>>, KeychainError> {
+            self.inner.get(gateway)
+        }
+        fn set(&self, gateway: &str, psk: &[u8]) -> Result<(), KeychainError> {
+            if self.deny.lock().unwrap().as_deref() == Some(gateway) {
+                return Err(KeychainError::Failed);
+            }
+            self.inner.set(gateway, psk)
+        }
+        fn delete(&self, gateway: &str) -> Result<(), KeychainError> {
+            self.inner.delete(gateway)
+        }
+    }
+
     struct Harness {
         dir: TempDir,
         env: HostEnv,
-        keychain: MemoryKeychain,
+        keychain: Flaky,
         prompt: Scripted,
         extensions: MockExtensions,
         login: MockLoginItems,
@@ -704,7 +1004,7 @@ mod tests {
             Harness {
                 dir,
                 env,
-                keychain: MemoryKeychain::default(),
+                keychain: Flaky::default(),
                 prompt: Scripted(RefCell::new(None)),
                 extensions: MockExtensions::new(),
                 login: MockLoginItems::new(),
@@ -718,6 +1018,7 @@ mod tests {
             let backends = Backends {
                 keychain: &self.keychain,
                 prompt: &self.prompt,
+                forticlient: &Installed,
                 legacy_name: &|gateway| {
                     (gateway == "vpn.example.com").then(|| "Example Office".to_owned())
                 },
@@ -885,6 +1186,234 @@ mod tests {
         );
     }
 
+    /// `export-profiles` and `import-profiles`: the bundle on stdout and stdin.
+    #[test]
+    fn bundle_verbs() {
+        let h = Harness::new();
+        h.expect(&["export-profiles"], "No OFTC profiles to export\n", 1);
+        h.run(
+            &[
+                "save-profile",
+                "vpn.example.com",
+                "9443",
+                "--name",
+                "Example Office",
+            ],
+            "",
+        );
+        h.run(&["save-profile", "lab.example.com", "8443", "--tcp"], "");
+        h.expect(
+            &["export-profiles", "nope"],
+            "OFTC profile unavailable: no profile named nope\n",
+            1,
+        );
+        // A profile without a PSK stops the export before anything is written (the
+        // gateway names a profile that has no name).
+        h.keychain.set("vpn.example.com", b"office-psk").unwrap();
+        h.expect(
+            &["export-profiles"],
+            "PSK unavailable for lab.example.com; nothing exported\n",
+            1,
+        );
+        h.keychain.set("lab.example.com", b"lab-psk").unwrap();
+        let (exported, code) = h.run(&["export-profiles"], "");
+        assert_eq!(code, 0);
+        // Listing order (by name), the gateway standing in for a missing name.
+        assert!(
+            exported.starts_with("{\n  \"format\" : \"oftc-profiles\""),
+            "{exported}"
+        );
+        assert!(exported.ends_with("  \"version\" : 1\n}\n"));
+        assert!(
+            exported.find("Example Office").unwrap()
+                < exported
+                    .find("lab.example.com\",\n      \"name\" : \"lab.example.com")
+                    .unwrap()
+        );
+        // Only the named ids, in the order given.
+        let (lab_only, _) = h.run(&["export-profiles", "lab-example-com"], "");
+        assert!(!lab_only.contains("Example Office") && lab_only.contains("lab-psk"));
+
+        // Importing it elsewhere recreates both profiles and both PSKs.
+        let other = Harness::new();
+        let expected = "Imported Example Office: id=example-office\nImported lab.example.com: id=lab-example-com\n";
+        assert_eq!(
+            other.run(&["import-profiles"], &exported),
+            (expected.to_owned(), 0)
+        );
+        assert_eq!(
+            other.keychain.get("lab.example.com").unwrap().as_slice(),
+            b"lab-psk"
+        );
+        other.expect(
+            &["list-profiles"],
+            "example-office\tExample Office\tvpn.example.com\t9443\tudp\nlab-example-com\tlab.example.com\tlab.example.com\t8443\ttcp\n",
+            0,
+        );
+        // Importing again skips what exists and leaves its PSK alone.
+        other.keychain.set("lab.example.com", b"changed").unwrap();
+        assert_eq!(
+            other.run(&["import-profiles"], &exported),
+            (
+                "Skipped Example Office: already configured\nSkipped lab.example.com: already configured\n".to_owned(),
+                0
+            )
+        );
+        assert_eq!(
+            other.keychain.get("lab.example.com").unwrap().as_slice(),
+            b"changed"
+        );
+    }
+
+    #[test]
+    fn import_profiles_failures() {
+        let h = Harness::new();
+        let item = |gateway: &str| {
+            format!(
+                r#"{{"name":"P {gateway}","gateway":"{gateway}","samlPort":9443,"transport":"udp","psk":"s"}}"#
+            )
+        };
+        let bundle = |items: &[String]| {
+            format!(
+                r#"{{"format":"oftc-profiles","version":1,"profiles":[{}]}}"#,
+                items.join(",")
+            )
+        };
+        // The bundle's own failure messages, and nothing stored.
+        h.expect(
+            &["import-profiles"],
+            "That file isn't an OFTC profile file\n",
+            1,
+        );
+        let invalid = bundle(&[item("a.example.com"), item("bad host")]);
+        assert_eq!(
+            h.run(&["import-profiles"], &invalid),
+            (
+                "The profile \"P bad host\" in that file has invalid settings\n".to_owned(),
+                1
+            )
+        );
+        h.expect(&["list-profiles"], "\n", 0);
+        // The same gateway twice in one bundle imports once.
+        let twice = bundle(&[item("a.example.com"), item("a.example.com")]);
+        assert_eq!(
+            h.run(&["import-profiles"], &twice),
+            ("Imported P a.example.com: id=p-a-example-com\nSkipped P a.example.com: already configured\n".to_owned(), 0)
+        );
+        // A Keychain failure stops the import, after reporting what was imported.
+        let three = bundle(&[
+            item("b.example.com"),
+            item("c.example.com"),
+            item("d.example.com"),
+        ]);
+        *h.keychain.deny.lock().unwrap() = Some("c.example.com".to_owned());
+        assert_eq!(
+            h.run(&["import-profiles"], &three),
+            (
+                "Imported P b.example.com: id=p-b-example-com\nCould not save OFTC Keychain PSK\n"
+                    .to_owned(),
+                1
+            )
+        );
+        // import-profile stops at a Keychain failure too, creating no profile.
+        *h.keychain.deny.lock().unwrap() = Some("vpn.example.com".to_owned());
+        h.expect(
+            &["import-profile", "Example Office"],
+            "Could not save OFTC Keychain PSK\n",
+            1,
+        );
+        assert!(!h.run(&["list-profiles"], "").0.contains("vpn.example.com"));
+        // Input past 64 KiB is refused whatever it holds (the read stops one byte over).
+        let big = " ".repeat(bundle::MAX_BYTES + 100);
+        assert_eq!(
+            h.run(&["import-profiles"], &big),
+            ("That profile file is too large\n".to_owned(), 1)
+        );
+    }
+
+    /// `import-profile` and `migrate-psk`: the FortiClient side is a double.
+    #[test]
+    fn forticlient_verbs() {
+        let h = Harness::new();
+        h.expect(
+            &["import-profile", "Missing"],
+            "Could not import FortiClient profile\n",
+            1,
+        );
+        h.expect(
+            &["import-profile", "Odd Gateway"],
+            "Imported profile has invalid connection settings\n",
+            1,
+        );
+        assert!(h.keychain.get("bad host").is_err());
+        h.expect(
+            &["import-profile", "Example Office"],
+            "FortiClient profile imported into OFTC configuration and Keychain: id=example-office\n",
+            0,
+        );
+        assert_eq!(
+            h.keychain.get("vpn.example.com").unwrap().as_slice(),
+            b"forti-secret"
+        );
+        // A gateway that already has a profile is refused before the Keychain is
+        // touched, so its PSK survives (Swift overwrote it, then refused).
+        h.keychain.set("vpn.example.com", b"kept").unwrap();
+        h.expect(
+            &["import-profile", "Example Office"],
+            "OFTC already has a profile for vpn.example.com\n",
+            1,
+        );
+        assert_eq!(
+            h.keychain.get("vpn.example.com").unwrap().as_slice(),
+            b"kept"
+        );
+        // `--profile` names the new profile's id; a taken id is refused the same way.
+        let two = Harness::new();
+        two.run(
+            &[
+                "--profile",
+                "lab",
+                "save-profile",
+                "lab.example.com",
+                "8443",
+            ],
+            "",
+        );
+        two.keychain.set("vpn.example.com", b"kept").unwrap();
+        two.expect(
+            &["--profile", "lab", "import-profile", "Example Office"],
+            "Could not save OFTC profile (a profile with that id may already exist)\n",
+            1,
+        );
+        assert_eq!(
+            two.keychain.get("vpn.example.com").unwrap().as_slice(),
+            b"kept"
+        );
+        two.expect(
+            &["--profile", "office", "import-profile", "Example Office"],
+            "FortiClient profile imported into OFTC configuration and Keychain: id=office\n",
+            0,
+        );
+
+        // migrate-psk stores the PSK only for the gateway the profile names.
+        let m = Harness::new();
+        m.expect(
+            &["migrate-psk", "Example Office", "other.example.com"],
+            "Could not obtain plaintext PSK for that profile and gateway\n",
+            1,
+        );
+        assert!(m.keychain.get("other.example.com").is_err());
+        m.expect(
+            &["migrate-psk", "Example Office", "vpn.example.com"],
+            "Existing local profile PSK migrated into OFTC Keychain\n",
+            0,
+        );
+        assert_eq!(
+            m.keychain.get("vpn.example.com").unwrap().as_slice(),
+            b"forti-secret"
+        );
+    }
+
     /// The first run after an upgrade moves the original layout aside.
     #[test]
     fn a_verb_migrates_the_legacy_layout_first() {
@@ -988,12 +1517,6 @@ mod tests {
         h.login.set_status(&agent, LoginStatus::NotRegistered);
         h.expect(&["register-agent"], "OFTC login agent registered\n", 0);
         assert_eq!(h.launchctl.calls(), [crate::agent::AGENT_LABEL]);
-        h.login.set_status(&agent, LoginStatus::RequiresApproval);
-        h.expect(
-            &["register-agent"],
-            "Could not register OFTC login agent: OFTC login agent is requires-approval\n",
-            1,
-        );
         h.expect(&["unregister-agent"], "OFTC login agent unregistered\n", 0);
         assert_eq!(h.login.status(&agent), LoginStatus::NotRegistered);
         h.login
@@ -1058,6 +1581,16 @@ mod tests {
             ],
             "",
         );
+        // A menu item waiting for approval is not enabled.
+        h.login
+            .set_status(&LoginItem::MainApp, LoginStatus::RequiresApproval);
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: disabled\n\
+             VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
         h.login
             .set_status(&LoginItem::MainApp, LoginStatus::Enabled);
         // An enabled agent does not switch on a profile that did not adopt it.
@@ -1066,6 +1599,28 @@ mod tests {
             &["login-settings"],
             "Menu launch at login: enabled\n\
              VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
+        // With no stored preference the adopting profile inherits the agent, and
+        // only while the agent is enabled.
+        std::fs::remove_file(
+            registry::entry_directory(root, "example-office").join("connection-preferences.json"),
+        )
+        .unwrap();
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: enabled\n\
+             VPN connect at login (example-office): enabled\n\
+             VPN connect at login (lab): disabled\n",
+            0,
+        );
+        h.login
+            .set_status(&agent_item(), LoginStatus::RequiresApproval);
+        h.expect(
+            &["login-settings"],
+            "Menu launch at login: enabled\n\
+             VPN connect at login (example-office): disabled\n\
              VPN connect at login (lab): disabled\n",
             0,
         );

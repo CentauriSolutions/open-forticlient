@@ -36,6 +36,10 @@ FortiClient profile for the same gateway, or the gateway itself.
 | `has-psk` | `OFTC PSK available`; exit 0 | `OFTC PSK unavailable`; exit 1 (or the profile errors above) |
 | `provision-psk [--stdin] [gateway]` | `OFTC PSK stored in Keychain`; exit 0 | `Invalid gateway name` (empty, over 253 bytes, contains `/` or `:`) exit 2; `Could not read a valid PSK from the terminal` / `...from standard input` exit 1; `Could not save OFTC Keychain PSK` exit 1 |
 | `save-profile <gateway> <saml-port> [--tcp] [--name <name>]` | `OFTC profile saved: id=<id>`; exit 0 | usage, exit 2, for settings the profile rules refuse; `OFTC already has a profile for <gateway>`; `Could not save OFTC profile (a profile with that id may already exist)`; exit 1 |
+| `export-profiles [id...]` | the `.oftc` bundle of the named profiles (all when none) on stdout, PSKs included; exit 0 | `OFTC profile unavailable: no profile named <id>`, `No OFTC profiles to export`, `PSK unavailable for <name>; nothing exported` (nothing is written); exit 1 |
+| `import-profiles` | reads a bundle from stdin (at most 64 KiB, 16 profiles); one line per profile, `Imported <name>: id=<id>` or `Skipped <name>: already configured` (a gateway that has a profile keeps it and its PSK); exit 0 | the bundle's message (`That file isn't an OFTC profile file`, `...from a newer OFTC; update OFTC and try again`, `...is too large`, `...contains no profiles`, `The profile "<name>" in that file has invalid settings`), `Could not save the profile "<name>"`; exit 1 |
+| `import-profile <FortiClient-profile>` | `FortiClient profile imported into OFTC configuration and Keychain: id=<id>`; exit 0 | `Could not import FortiClient profile`, `Imported profile has invalid connection settings`, `OFTC already has a profile for <gateway>`, `Could not save OFTC profile (a profile with that id may already exist)`, `Could not save OFTC Keychain PSK`; exit 1 |
+| `migrate-psk <FortiClient-profile> <gateway>` | `Existing local profile PSK migrated into OFTC Keychain`; exit 0 | `Could not obtain plaintext PSK for that profile and gateway`, `Could not save OFTC Keychain PSK`; exit 1 |
 
 `oftc` parses `id=` from the `save-profile` line with `rsplit_once("id=")` and the
 `list-profiles` tab-separated fields; the menu classifies failures by the substrings
@@ -56,7 +60,6 @@ exists but cannot be decoded counts as off.
 
 - Activation events print from the main queue while the verb waits; the order of the
   lines is unchanged.
-
 - `provision-psk --stdin` is new (additive), and the usage text lists it.
 - A failed Keychain update reports `Could not save OFTC Keychain PSK`; Swift said
   `Could not update OFTC Keychain PSK` for that one case. Both exit 1.
@@ -68,6 +71,17 @@ exists but cannot be decoded counts as off.
 - A generated profile id that collides more than 998 times keeps counting
   (`name-1000`) within 32 characters; Swift appended four random hex digits, which
   could exceed 32 characters.
+
+- `import-profile` checks for an existing profile for the gateway, and for a taken
+  `--profile` id, before it writes the Keychain. Swift overwrote the existing
+  profile's PSK and then refused.
+- When `import-profiles` or `import-profile` cannot write the Keychain it stops with
+  `Could not save OFTC Keychain PSK`; `import-profiles` first prints the lines for
+  the profiles it had already imported (Swift printed only the failure).
+
+The bundle format (`app/core/host/src/bundle.rs`) is byte-identical to what
+`ProfileBundle.swift` writes; `tests/fixtures/swift/bundle.oftc` is its output. The
+menu still reads bundles with the Swift decoder until its UI moves.
 
 ## Still in Swift
 

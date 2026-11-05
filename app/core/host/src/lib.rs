@@ -12,6 +12,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod agent;
+pub mod bundle;
 pub mod commands;
 pub mod env;
 pub mod intent;

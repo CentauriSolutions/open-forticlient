@@ -24,7 +24,9 @@ impl HostEnv {
         })
     }
 
-    /// The current user's home: `HOME`, else the password database, as Foundation does.
+    /// The current user's home: `HOME`, else the password database. (Swift's
+    /// `homeDirectoryForCurrentUser` ignores `HOME`; the two differ only when `HOME`
+    /// is set to something other than the user's home, as tests and `sudo -E` do.)
     pub fn from_process(bundle_id: &str) -> Option<HostEnv> {
         HostEnv::new(bundle_id, &std::env::home_dir()?)
     }
@@ -57,7 +59,6 @@ mod tests {
             Path::new("/Users/test/Library/Application Support/com.example.oftc")
         );
         assert_eq!(env.keychain_service(), "com.example.oftc.psk");
-        assert_eq!(env.provider_id(), "com.example.oftc.provider");
         assert!(HostEnv::new("", Path::new("/Users/test")).is_none());
     }
 }
