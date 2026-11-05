@@ -35,7 +35,7 @@ cp "$root/Host/HostAgent.plist" "$host_plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${bundle_id}.provider" "$extension/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent_plist" "$host_plist"
 # The host service plist is static and bundled (SMAppService.agent): its file name is
-# its label, it runs the entitled main executable as `host serve`, stays resident and
+# its label, it runs the entitled main executable as `host serve`, restarts after a failed exit and
 # lets supervisors outlive it, and names no per-user path.
 plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$host_plist"; }
 [[ $(plist_value Label) == "${bundle_id}.host" ]] || { print -u2 'Host plist Label must be <bundle id>.host'; exit 1; }
@@ -45,7 +45,12 @@ plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$host_plist"; }
    && ! plist_value ProgramArguments:3 >/dev/null 2>&1 || {
     print -u2 'Host plist ProgramArguments must be exactly: OFTCAgent host serve'; exit 1
 }
-for key in RunAtLoad KeepAlive AbandonProcessGroup; do
+# Restart only after a failure: `host serve` exits 0 on SIGTERM or when another host
+# holds the socket, and neither should respawn it.
+[[ $(plist_value KeepAlive:SuccessfulExit) == false ]] || {
+    print -u2 'Host plist must set KeepAlive to {SuccessfulExit: false}'; exit 1
+}
+for key in RunAtLoad AbandonProcessGroup; do
     [[ $(plist_value $key) == true ]] || { print -u2 "Host plist must set $key true"; exit 1; }
 done
 for key in StandardOutPath StandardErrorPath WorkingDirectory Program Sockets; do

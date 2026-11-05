@@ -59,13 +59,13 @@ Candidates:
 | **A. The existing login agent, made resident** | starts at login, but its plist is `KeepAlive` false and the supervisor calls `launchctl disable` on that label after an unexplained drop so a bad session is not reconnected at the next login (`agent.rs`, `Launchctl::disable`). Disabling the agent would also take the socket down | rejected: the socket would die exactly when the user most needs status |
 | **B. The menu app** | exists only while the UI runs; the CLI and the next UI launch would have no server; couples the lifecycles the user wants decoupled | rejected as the server (it stays a client) |
 | **C. A supervisor** | one per profile, exits when its tunnel ends | rejected: many, short-lived |
-| **D. A new second launch agent, `...oftc.host`, running `OFTCAgent host serve`** | resident from login (`RunAtLoad`), restarted on crash (`KeepAlive`), registered with `SMAppService.agent(plistName:)` like the existing one, same entitled main executable so it may use NetworkExtension and SystemExtensions | **recommended** |
+| **D. A new second launch agent, `...oftc.host`, running `OFTCAgent host serve`** | resident from login (`RunAtLoad`), restarted after a failed exit (`KeepAlive` with `SuccessfulExit` false), registered with `SMAppService.agent(plistName:)` like the existing one, same entitled main executable so it may use NetworkExtension and SystemExtensions | **recommended** |
 
 Design of D:
 
 - New bundled plist `Contents/Library/LaunchAgents/com.chris.openforticlient.oftc.host.plist`:
   `BundleProgram` `Contents/MacOS/OFTCAgent`, arguments `host serve`, `RunAtLoad`
-  true, `KeepAlive` true, `ProcessType` `Interactive`, `AbandonProcessGroup` true
+  true, `KeepAlive` `{SuccessfulExit: false}`, `ProcessType` `Interactive`, `AbandonProcessGroup` true
   (see the risk in section 15: supervisors it starts must outlive it). A hidden
   verb pair `host serve` / `host restart` follows the existing `hidden(...)`
   rows in `commands.rs`, so the usage text stays byte for byte (a test now pins

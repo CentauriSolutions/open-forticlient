@@ -196,9 +196,10 @@ oftc connect
 The app bundles a second launch agent, `com.chris.openforticlient.oftc.host`, in
 `Contents/Library/LaunchAgents/`. It runs `OFTCAgent host serve`, the long-lived
 process that serves the UI's local socket (`docs/ui-edge.md`). It starts at login,
-is restarted if it exits (`KeepAlive`), and sets `AbandonProcessGroup`. Supervisors it
+is restarted if it exits with a failure (`KeepAlive` `SuccessfulExit` false; exit 0 on
+SIGTERM or when another host already serves does not respawn it), and sets `AbandonProcessGroup`. Supervisors it
 starts lead their own process groups, so restarting or killing the host leaves
-their tunnels up; the Network Extension owns packet flow either way.
+their tunnels up (not yet verified live); the Network Extension owns packet flow either way.
 
 - It is a separate Login Items entry from the login agent
   (`com.chris.openforticlient.oftc.agent`): macOS may list two items for OFTC.
