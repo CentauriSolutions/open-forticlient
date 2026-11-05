@@ -18,6 +18,7 @@ fi
 app="$build/OFTC.app"
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
 agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.agent.plist"
+host_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.host.plist"
 target="$(uname -m)-apple-macosx13.0"
 
 # A fresh output path protects installed and notarized artifacts.
@@ -29,9 +30,27 @@ export SWIFT_MODULECACHE_PATH="$build/module-cache"
 cp "$root/Host/Info.plist" "$app/Contents/Info.plist"
 cp "$root/Provider/Info.plist" "$extension/Contents/Info.plist"
 cp "$root/Host/LaunchAgent.plist" "$agent_plist"
+cp "$root/Host/HostAgent.plist" "$host_plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${bundle_id}.provider" "$extension/Contents/Info.plist"
-plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent_plist"
+plutil -lint "$app/Contents/Info.plist" "$extension/Contents/Info.plist" "$agent_plist" "$host_plist"
+# The host service plist is static and bundled (SMAppService.agent): its file name is
+# its label, it runs the entitled main executable as `host serve`, stays resident and
+# lets supervisors outlive it, and names no per-user path.
+plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$host_plist"; }
+[[ $(plist_value Label) == "${bundle_id}.host" ]] || { print -u2 'Host plist Label must be <bundle id>.host'; exit 1; }
+[[ $(plist_value BundleProgram) == Contents/MacOS/OFTCAgent ]] || { print -u2 'Host plist must run Contents/MacOS/OFTCAgent'; exit 1; }
+[[ $(plist_value ProgramArguments:0) == OFTCAgent && $(plist_value ProgramArguments:1) == host \
+   && $(plist_value ProgramArguments:2) == serve ]] \
+   && ! plist_value ProgramArguments:3 >/dev/null 2>&1 || {
+    print -u2 'Host plist ProgramArguments must be exactly: OFTCAgent host serve'; exit 1
+}
+for key in RunAtLoad KeepAlive AbandonProcessGroup; do
+    [[ $(plist_value $key) == true ]] || { print -u2 "Host plist must set $key true"; exit 1; }
+done
+for key in StandardOutPath StandardErrorPath WorkingDirectory Program Sockets; do
+    if plist_value $key >/dev/null 2>&1; then print -u2 "Host plist must not set $key"; exit 1; fi
+done
 
 cp "$root/assets/OFTC.icns" "$app/Contents/Resources/OFTC.icns"
 cp "$root/assets/OFTCDocument.icns" "$app/Contents/Resources/OFTCDocument.icns"

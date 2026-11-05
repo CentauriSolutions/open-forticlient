@@ -9,13 +9,6 @@ if [ -d "$old" ] && [ ! -L "$old" ] &&
     /bin/rm -rf "$old"
 fi
 
-# The signed app owns onboarding. An interactive install (the Installer app)
-# hands off to the logged-in user so the tray icon appears at once. installer(8)
-# and MDM runs set COMMAND_LINE_INSTALL and finish without a GUI session, unless
-# an Installer window is open too.
-if [ -n "${COMMAND_LINE_INSTALL:-}" ] && ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
-    exit 0
-fi
 console_user=$(/usr/bin/stat -f %Su /dev/console)
 case "$console_user" in
     root|loginwindow|_mbsetupuser|'') exit 0 ;;
@@ -24,6 +17,22 @@ console_uid=$(/usr/bin/id -u "$console_user" 2>/dev/null) || exit 0
 case "$console_uid" in
     ''|*[!0-9]*|0) exit 0 ;;
 esac
+
+# The resident host service (`OFTCAgent host serve`) keeps the old bundle's
+# executable until it restarts. kickstart -k restarts it from the new bundle and
+# starts it if it was not running. It fails harmlessly when the user never
+# registered the service; supervisors are in their own process groups and keep
+# their tunnels. This runs for command-line installs too: they replace the bundle
+# just the same.
+/bin/launchctl kickstart -k "gui/$console_uid/com.chris.openforticlient.oftc.host" >/dev/null 2>&1 || true
+
+# The signed app owns onboarding. An interactive install (the Installer app)
+# hands off to the logged-in user so the tray icon appears at once. installer(8)
+# and MDM runs set COMMAND_LINE_INSTALL and finish without a GUI session, unless
+# an Installer window is open too.
+if [ -n "${COMMAND_LINE_INSTALL:-}" ] && ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
+    exit 0
+fi
 app="/Applications/Open Forticlient.app"
 if [ -d "$app" ]; then
     # launchctl must be root to enter the user's session (it fails with
