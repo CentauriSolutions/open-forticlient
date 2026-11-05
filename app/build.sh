@@ -120,6 +120,10 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/SupervisorStatus.swift" "$root/Host/check-host-compat.swift" -o "$build/host-compat-check"
 "$build/host-compat-check" "$root/core/host/tests/fixtures/rust"
 xcrun swiftc -swift-version 5 -target "$target" \
+    "$root/Host/GatewayTrust.swift" "$root/Host/check-trust-compat.swift" \
+    -o "$build/trust-compat-check"
+"$build/trust-compat-check" "$root/core/host/tests/fixtures"
+xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
     "$root/Host/MenuModel.swift" "$root/Host/AgentIntent.swift" \
     "$root/Host/TrafficHistory.swift" \

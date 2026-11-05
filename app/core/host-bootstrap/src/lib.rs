@@ -5,7 +5,7 @@
 
 mod log;
 mod uid;
-mod tls;
+pub mod tls;
 mod saml;
 
 use std::ptr;

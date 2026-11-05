@@ -25,6 +25,7 @@ pub mod registry;
 pub mod snapshot;
 pub mod start;
 pub mod status;
+pub mod trust;
 mod vpn;
 
 #[allow(unsafe_code)]
