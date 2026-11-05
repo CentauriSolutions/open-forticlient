@@ -201,7 +201,8 @@ pub enum Evaluation {
     Trusted,
     /// The chain is complete enough to evaluate and the system does not trust it.
     Rejected,
-    /// The evaluation could not be made at all.
+    /// The evaluation could not be made, or failed for a reason that is not a
+    /// verdict on the certificate (see [`classify_failure`]).
     Error,
 }
 
@@ -341,6 +342,92 @@ impl ChainSource for OpensslChainSource {
     }
 }
 
+/// `NSOSStatusErrorDomain`: the domain of the `CFError` `SecTrustEvaluateWithError`
+/// gives for a failed chain, with the `OSStatus` as the code.
+pub const OSSTATUS_DOMAIN: &str = "NSOSStatusErrorDomain";
+
+/// The codes below were observed from `SecTrustEvaluateWithError` on throwaway
+/// chains (see `trust/loopback.rs`); only these mean the chain itself is what the
+/// system rejects.
+const ERR_NOT_TRUSTED: i64 = -67843; // errSecNotTrusted: a self-signed leaf
+const ERR_UNTRUSTED_ISSUER: i64 = -25318; // the chain ends in a root the system does not trust
+const ERR_CERTIFICATE_EXPIRED: i64 = -67818;
+const ERR_HOST_NAME_MISMATCH: i64 = -67602;
+
+/// What a failed `SecTrustEvaluateWithError` says about the chain. The old
+/// `URLSession` check treated every failure as "untrusted", which cannot tell a bad
+/// certificate from an evaluation that could not run (a network-dependent step such
+/// as an issuer or revocation fetch failing while the network is down). A prompt is
+/// only right for the first: anything not known to be a verdict on the certificate
+/// is `Error`, which the probe reports as `Unreachable` (no prompt, the supervisor
+/// retries).
+pub fn classify_failure(domain: &str, code: i64) -> Evaluation {
+    let about_the_chain = domain == OSSTATUS_DOMAIN
+        && matches!(
+            code,
+            ERR_NOT_TRUSTED
+                | ERR_UNTRUSTED_ISSUER
+                | ERR_CERTIFICATE_EXPIRED
+                | ERR_HOST_NAME_MISMATCH
+        );
+    if about_the_chain {
+        Evaluation::Rejected
+    } else {
+        Evaluation::Error
+    }
+}
+
+/// `SecTrust` on `chain` (leaf first). Empty `anchors` means the system's own;
+/// otherwise only `anchors` are trusted (this is how a test supplies a root).
+#[cfg(target_os = "macos")]
+pub fn evaluate_chain(
+    chain: &[Vec<u8>],
+    target: &Target,
+    allow_network_fetch: bool,
+    anchors: &[Vec<u8>],
+) -> Evaluation {
+    use security_framework::certificate::SecCertificate;
+    use security_framework::policy::SecPolicy;
+    use security_framework::secure_transport::SslProtocolSide;
+    use security_framework::trust::SecTrust;
+
+    let hostname = match target {
+        Target::Name(name) => name.clone(),
+        Target::Address(address) => address.to_string(),
+    };
+    let load = |ders: &[Vec<u8>]| -> Option<Vec<SecCertificate>> {
+        ders.iter()
+            .map(|der| SecCertificate::from_der(der).ok())
+            .collect()
+    };
+    let (Some(certificates), Some(roots)) = (load(chain), load(anchors)) else {
+        return Evaluation::Error;
+    };
+    let policy = SecPolicy::create_ssl(SslProtocolSide::CLIENT, Some(&hostname));
+    let Ok(mut trust) = SecTrust::create_with_certificates(&certificates, &[policy]) else {
+        return Evaluation::Error;
+    };
+    if trust
+        .set_network_fetch_allowed(allow_network_fetch)
+        .is_err()
+    {
+        return Evaluation::Error;
+    }
+    if !roots.is_empty()
+        && (trust.set_anchor_certificates(&roots).is_err()
+            || trust.set_trust_anchor_certificates_only(true).is_err())
+    {
+        return Evaluation::Error;
+    }
+    match trust.evaluate_with_error() {
+        Ok(()) => Evaluation::Trusted,
+        Err(error) => match i64::try_from(error.code()) {
+            Ok(code) => classify_failure(&error.domain().to_string(), code),
+            Err(_) => Evaluation::Error,
+        },
+    }
+}
+
 /// The system trust store through Security.framework's `SecTrust`.
 #[cfg(target_os = "macos")]
 pub struct SystemTrustEvaluator;
@@ -353,36 +440,7 @@ impl Evaluator for SystemTrustEvaluator {
         target: &Target,
         allow_network_fetch: bool,
     ) -> Evaluation {
-        use security_framework::certificate::SecCertificate;
-        use security_framework::policy::SecPolicy;
-        use security_framework::secure_transport::SslProtocolSide;
-        use security_framework::trust::SecTrust;
-
-        let hostname = match target {
-            Target::Name(name) => name.clone(),
-            Target::Address(address) => address.to_string(),
-        };
-        let certificates: Result<Vec<SecCertificate>, _> = chain
-            .iter()
-            .map(|der| SecCertificate::from_der(der))
-            .collect();
-        let Ok(certificates) = certificates else {
-            return Evaluation::Error;
-        };
-        let policy = SecPolicy::create_ssl(SslProtocolSide::CLIENT, Some(&hostname));
-        let Ok(mut trust) = SecTrust::create_with_certificates(&certificates, &[policy]) else {
-            return Evaluation::Error;
-        };
-        if trust
-            .set_network_fetch_allowed(allow_network_fetch)
-            .is_err()
-        {
-            return Evaluation::Error;
-        }
-        match trust.evaluate_with_error() {
-            Ok(()) => Evaluation::Trusted,
-            Err(_) => Evaluation::Rejected,
-        }
+        evaluate_chain(chain, target, allow_network_fetch, &[])
     }
 }
 

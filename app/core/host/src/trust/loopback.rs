@@ -4,8 +4,10 @@
 //! The certificates are generated here with `/usr/bin/openssl` (LibreSSL on macOS) and
 //! chain to a root that macOS does not trust, so every served chain must be
 //! `Untrusted`. A certificate macOS *does* trust cannot be made without changing the
-//! trust store, so that verdict is not covered here (live-only, as are proxies and AIA
-//! fetching, which these certificates do not carry).
+//! trust store, so the served-chain cases are all untrusted; the trusted verdict and
+//! the `CFError` classification are covered by the anchored test at the end (the
+//! throwaway root as the only anchor). Live-only: proxies, AIA fetching and what an
+//! evaluation reports when the network is down.
 //!
 //! The leaf cases differ in what the server sends, not in the verdict: the verdict
 //! cannot say *why* the system rejected a chain. What each case pins is that the
@@ -78,8 +80,12 @@ impl Drop for Proc {
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new() -> Scratch {
-        let dir = std::env::temp_dir().join(format!("oftc-trust-loopback-{}", std::process::id()));
+    /// One directory per test: the tests run in parallel in one process.
+    fn new(test: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!(
+            "oftc-trust-loopback-{}-{test}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
@@ -237,7 +243,7 @@ fn system_evaluator_rejects_every_untrusted_chain_and_a_closed_port_is_unreachab
         // Skipped (the crate denies print macros, so with no note): not a macOS system.
         return;
     }
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("served");
     let dir = scratch.0.as_path();
     let pki = Pki::new(dir);
     let leaf_ext = |san: &str| format!("basicConstraints = CA:FALSE\nsubjectAltName = {san}\n");
@@ -302,5 +308,74 @@ fn system_evaluator_rejects_every_untrusted_chain_and_a_closed_port_is_unreachab
     assert_eq!(
         probe.probe("127.0.0.1", u32::from(closed)),
         Verdict::Unreachable
+    );
+}
+
+/// `SecTrust` through `evaluate_chain` with the throwaway root as the only anchor
+/// (the system store cannot be extended in a test), and with none. No sockets.
+/// Pins the real `CFError` codes against `classify_failure`: a chain the anchor
+/// vouches for is `Trusted`, and each kind of genuine failure stays `Rejected`.
+#[test]
+fn anchored_evaluation_trusts_a_good_chain_and_rejects_each_bad_one() {
+    if !Path::new(OPENSSL).exists() {
+        return;
+    }
+    let scratch = Scratch::new("anchored");
+    let dir = scratch.0.as_path();
+    let pki = Pki::new(dir);
+    let leaf_ext = |san: &str| format!("basicConstraints = CA:FALSE\nsubjectAltName = {san}\n");
+    let loopback = leaf_ext("IP:127.0.0.1");
+    let issued = pki.issue("root", None, CA_EXT, Window::Valid)
+        && pki.issue("mid", Some("root"), CA_EXT, Window::Valid)
+        && pki.issue("leaf", Some("mid"), &loopback, Window::Valid)
+        && pki.issue("expired", Some("root"), &loopback, Window::Expired)
+        && pki.issue(
+            "wrongname",
+            Some("root"),
+            &leaf_ext("IP:192.0.2.1"),
+            Window::Valid,
+        );
+    assert!(issued, "openssl could not generate the certificates");
+
+    let target = Target::parse("127.0.0.1");
+    let ders = |names: &[&str]| -> Vec<Vec<u8>> { names.iter().map(|n| der_of(dir, n)).collect() };
+    let root = ders(&["root"]);
+    // (chain, anchors, expected, what it pins)
+    type Case<'a> = (&'a [&'a str], &'a [Vec<u8>], Evaluation, &'a str);
+    let cases: [Case; 5] = [
+        (
+            &["leaf", "mid"],
+            &root,
+            Evaluation::Trusted,
+            "trusted chain",
+        ),
+        (
+            &["leaf", "mid"],
+            &[],
+            Evaluation::Rejected,
+            "root not in the system store",
+        ),
+        (&["expired", "root"], &root, Evaluation::Rejected, "expired"),
+        (
+            &["wrongname", "root"],
+            &root,
+            Evaluation::Rejected,
+            "name mismatch",
+        ),
+        (
+            &["leaf"],
+            &root,
+            Evaluation::Rejected,
+            "intermediate missing",
+        ),
+    ];
+    for (names, anchors, expected, label) in cases {
+        let got = evaluate_chain(&ders(names), &target, false, anchors);
+        assert_eq!(got, expected, "{label}");
+    }
+    // Not a certificate at all: the evaluation cannot be made.
+    assert_eq!(
+        evaluate_chain(&[vec![0x30, 0x01, 0x00]], &target, false, &[]),
+        Evaluation::Error
     );
 }

@@ -290,6 +290,26 @@ fn probe(chain: Option<Vec<Vec<u8>>>, answer: Evaluation, host: &str) -> (Verdic
     (verdict, evaluator.calls.into_inner())
 }
 
+/// Real `SecTrustEvaluateWithError` codes: only a verdict on the certificate may
+/// lead to a prompt. Anything else (another domain, an unlisted OSStatus such as a
+/// network failure) is an evaluation that could not be made, so it retries.
+#[test]
+fn failure_classification_table() {
+    let cases = [
+        (OSSTATUS_DOMAIN, -67843, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -25318, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -67818, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -67602, Evaluation::Rejected),
+        (OSSTATUS_DOMAIN, -25218, Evaluation::Error),
+        (OSSTATUS_DOMAIN, -9806, Evaluation::Error),
+        ("NSURLErrorDomain", -1009, Evaluation::Error),
+        ("NSURLErrorDomain", -67843, Evaluation::Error),
+    ];
+    for (domain, code, expected) in cases {
+        assert_eq!(classify_failure(domain, code), expected, "{domain} {code}");
+    }
+}
+
 #[test]
 fn verdict_table() {
     let leaf = fixture_der();
