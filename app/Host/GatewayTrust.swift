@@ -97,6 +97,16 @@ enum GatewayTrust {
 
     enum Decision { case trust, decline, unavailable }
 
+    // What the prompt child reads on stdin (`OFTCAgent review-certificate`).
+    // The Rust host writes the same JSON (core/host/src/trust.rs).
+    struct PromptRequest: Codable {
+        let profileName: String
+        let host: String
+        let port: UInt32
+        let certificate: Data
+        let previous: Data?
+    }
+
     enum Outcome: Equatable {
         case notACertificateProblem
         case trusted(GatewayCertificate)
