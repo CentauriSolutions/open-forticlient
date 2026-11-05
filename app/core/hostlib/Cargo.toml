@@ -14,6 +14,8 @@ crate-type = ["staticlib"]
 oftc-apple = { path = "../apple" }
 oftc-host = { path = "../host" }
 oftc-provider = { path = "../provider" }
+oftc-migration = { path = "../migration" }
+zeroize = "=1.9.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "=0.3.1"

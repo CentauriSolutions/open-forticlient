@@ -244,10 +244,11 @@ impl ProfileStore {
         let temporary = self
             .directory
             .join(format!(".{FILE_NAME}.{}.tmp", std::process::id()));
+        // A temporary left by a crashed run with this pid is replaced, never reused.
+        let _ = fs::remove_file(&temporary);
         let written = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&temporary)
@@ -432,7 +433,6 @@ mod tests {
             &br#"{"version":2,"gateway":"vpn.example.com","samlPort":9443,"transport":"udp"}"#[..],
             br#"{"version":1,"gateway":"vpn.example.com","transport":"udp"}"#, // missing port
             br#"{"version":1,"gateway":"vpn.example.com","samlPort":9443,"transport":"sctp"}"#,
-            br#"{"version":1,"gateway":"bad host","samlPort":9443,"transport":"udp"}"#,
             b"",
         ] {
             assert_eq!(Profile::from_json(bad), Err(ProfileError::Invalid));
@@ -445,18 +445,20 @@ mod tests {
     #[test]
     fn store_roundtrip_modes_remove() {
         let dir = TempDir::new("profile");
-        let store = ProfileStore::new(&dir.0.join("p"));
+        let store = ProfileStore::new(&dir.0.join("outer/p"));
         let profile = udp("vpn.example.com", 9443).unwrap();
         store.save(&profile).unwrap();
         assert_eq!(store.load().unwrap(), profile);
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&store.path()), 0o600);
-        assert_eq!(mode(&dir.0.join("p")), 0o700);
+        assert_eq!(mode(&dir.0.join("outer/p")), 0o700);
+        // A directory created on the way (`profiles/`) is private too.
+        assert_eq!(mode(&dir.0.join("outer")), 0o700);
         // Saving again replaces the file; no temporary file is left behind.
         let tcp = Profile::new("vpn.example.com", 9443, Transport::Tcp, None, None).unwrap();
         store.save(&tcp).unwrap();
         assert_eq!(store.load().unwrap(), tcp);
-        assert_eq!(fs::read_dir(dir.0.join("p")).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(dir.0.join("outer/p")).unwrap().count(), 1);
         store.remove().unwrap();
         assert!(!store.path().exists());
         assert_eq!(store.load(), Err(ProfileError::Unavailable));

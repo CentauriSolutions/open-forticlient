@@ -58,6 +58,11 @@ impl Out {
         self.0.write(b"\n");
     }
 
+    /// Raw bytes, with no newline added (an exported bundle).
+    pub fn bytes(&mut self, data: &[u8]) {
+        self.0.write(data);
+    }
+
     /// Flushes. A dead stream is not an error.
     pub fn flush(&mut self) {
         self.0.flush();

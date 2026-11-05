@@ -476,12 +476,17 @@ dependencies = [
  "dispatch2",
  "oftc-apple",
  "oftc-host",
+ "oftc-migration",
  "oftc-provider",
+ "zeroize",
 ]
 
 [[package]]
 name = "oftc-migration"
 version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "oftc-modp14"
