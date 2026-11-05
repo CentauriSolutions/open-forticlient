@@ -257,7 +257,10 @@ impl Host for NeHost {
 
     fn read_packets(&self, done: ReadDone) {
         let Some(provider) = self.provider() else {
-            return done(Vec::new(), Vec::new());
+            // The flow is gone: leave the read unanswered. Dropping `done`
+            // closes the tunnel; an empty answer would be re-issued forever.
+            drop(done);
+            return;
         };
         // The arrays are valid only during the call: copy into owned vectors.
         // `RcBlock::new` takes an `Fn`, so the one-shot completion is taken on
