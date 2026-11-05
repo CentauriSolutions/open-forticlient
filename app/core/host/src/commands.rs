@@ -11,9 +11,12 @@ use std::io::Read;
 use oftc_apple::error::AppleError;
 use oftc_apple::login::LoginItems;
 use oftc_apple::login::{LoginItem, LoginStatus};
+use oftc_apple::manager::VpnControl;
 use oftc_apple::sysext::{EventSink, ExtensionControl, ExtensionEvent, Finish};
+use oftc_provider::envelope::ConnectMode;
 use zeroize::Zeroizing;
 
+use crate::acquire::{Acquirer, Clock};
 use crate::agent::{self, Launchctl};
 use crate::bundle;
 use crate::env::HostEnv;
@@ -22,6 +25,8 @@ use crate::keychain::{read_psk_line, Keychain, KeychainError};
 use crate::out::Out;
 use crate::profile::{Profile, Transport};
 use crate::registry::{self, ProfileEntry};
+use crate::start::parse_start_flags;
+use crate::vpn::{self, Ctx, Rekey};
 
 /// One line of the usage text: how a verb is spelled, and who implements it.
 pub struct Verb {
@@ -71,7 +76,7 @@ pub const VERBS: &[Verb] = &[
     rust("agent-status"),
     rust("register-agent"),
     rust("unregister-agent"),
-    swift("install-config"),
+    rust("install-config"),
     rust("list-profiles"),
     swift("check-update [url]"),
     swift("launcher-alias ensure|remove"),
@@ -80,25 +85,25 @@ pub const VERBS: &[Verb] = &[
     rust("save-profile <gateway> <saml-port> [--tcp] [--name <name>]"),
     rust("import-profile <FortiClient-profile>"),
     rust("show-profile"),
-    swift("erase-profile"),
+    rust("erase-profile"),
     rust("has-psk"),
     swift("set-autostart on|off"),
     swift("supervise-autostart"),
-    swift("start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
+    rust("start-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     swift("supervise-profile [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     rust("provision-psk [--stdin] [gateway]"),
     rust("migrate-psk <FortiClient-profile> <gateway>"),
-    swift("preflight <gateway> <32-hex-UID>"),
-    swift("start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
+    rust("preflight <gateway> <32-hex-UID>"),
+    rust("start-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]"),
     swift(
         "supervise-live <gateway> <saml-port> [--tcp] [--ipv6-outer <CLAT-IPv4>] [--insecure-saml]",
     ),
-    swift("rekey-once"),
-    swift("rekey-ike-once"),
-    swift("rekey-counts"),
-    swift("status"),
+    rust("rekey-once"),
+    rust("rekey-ike-once"),
+    rust("rekey-counts"),
+    rust("status"),
     swift("stop"),
-    swift("remove-config"),
+    rust("remove-config"),
     hidden("login-settings"),
     hidden("unregister-menu-login"),
 ];
@@ -136,6 +141,27 @@ pub enum Command {
     },
     SaveProfile {
         profile: Profile,
+    },
+    InstallConfig,
+    Status,
+    RemoveConfig,
+    EraseProfile,
+    RekeyOnce,
+    RekeyIkeOnce,
+    RekeyCounts,
+    Preflight {
+        gateway: String,
+        uid: String,
+    },
+    StartLive {
+        gateway: String,
+        port: u32,
+        mode: ConnectMode,
+        insecure: bool,
+    },
+    /// The flags are checked after the profile is found, as the Swift verb did.
+    StartProfile {
+        flags: Vec<String>,
     },
     ExportProfiles {
         ids: Vec<String>,
@@ -205,6 +231,33 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             }
         }
         ("save-profile", [gateway, port, flags @ ..]) => parse_save_profile(gateway, port, flags)?,
+        ("install-config", []) => Command::InstallConfig,
+        ("status", []) => Command::Status,
+        ("remove-config", []) => Command::RemoveConfig,
+        ("erase-profile", []) => Command::EraseProfile,
+        ("rekey-once", []) => Command::RekeyOnce,
+        ("rekey-ike-once", []) => Command::RekeyIkeOnce,
+        ("rekey-counts", []) => Command::RekeyCounts,
+        ("preflight", [gateway, uid]) => Command::Preflight {
+            gateway: gateway.clone(),
+            uid: uid.clone(),
+        },
+        ("start-live", [gateway, port, flags @ ..]) => {
+            let port: u32 = port.parse().map_err(|_| ParseError::Usage)?;
+            let (mode, insecure) = parse_start_flags(flags).ok_or(ParseError::Usage)?;
+            if !(1..=65535).contains(&port) || gateway.is_empty() {
+                return Err(ParseError::Usage);
+            }
+            Command::StartLive {
+                gateway: gateway.clone(),
+                port,
+                mode,
+                insecure,
+            }
+        }
+        ("start-profile", flags) => Command::StartProfile {
+            flags: flags.to_vec(),
+        },
         ("export-profiles", ids) => Command::ExportProfiles { ids: ids.to_vec() },
         ("import-profiles", []) => Command::ImportProfiles,
         ("import-profile", [name]) => Command::ImportProfile {
@@ -271,6 +324,11 @@ pub struct Backends<'a> {
     pub extensions: &'a dyn ExtensionControl,
     pub login: &'a dyn LoginItems,
     pub launchctl: &'a dyn Launchctl,
+    pub vpn: &'a dyn VpnControl,
+    pub acquirer: &'a dyn Acquirer,
+    pub clock: &'a dyn Clock,
+    /// A fresh single-use session id for each start envelope.
+    pub session_id: &'a dyn Fn() -> [u8; 16],
 }
 
 pub struct Io<'a> {
@@ -284,7 +342,7 @@ fn finish(io: &mut Io, text: &str, code: i32) -> i32 {
 }
 
 /// The profile a verb acts on: the `--profile` one, or the only one.
-fn require_entry(
+pub(crate) fn require_entry(
     selected: &Option<String>,
     root: &std::path::Path,
 ) -> Result<ProfileEntry, String> {
@@ -368,6 +426,12 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
     // The first run after an upgrade moves the single-profile layout into place.
     registry::migrate_legacy(root, backends.legacy_name);
     let selected = invocation.profile;
+    let ctx = Ctx {
+        env,
+        backends,
+        selected: &selected,
+    };
+    let vpn_verb = |(text, code): (String, i32), io: &mut Io| finish(io, &text, code);
     match invocation.command {
         Command::Activate => change_extension(true, env, backends, io),
         Command::Deactivate => change_extension(false, env, backends, io),
@@ -412,6 +476,21 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             }
             finish(io, &lines.join("\n"), 0)
         }
+        Command::InstallConfig => vpn_verb(vpn::install_config(&ctx), io),
+        Command::Status => vpn_verb(vpn::status(&ctx), io),
+        Command::RemoveConfig => vpn_verb(vpn::remove_config(&ctx), io),
+        Command::EraseProfile => vpn_verb(vpn::erase_profile(&ctx), io),
+        Command::RekeyOnce => vpn_verb(vpn::rekey_once(&ctx, Rekey::Child), io),
+        Command::RekeyIkeOnce => vpn_verb(vpn::rekey_once(&ctx, Rekey::Ike), io),
+        Command::RekeyCounts => vpn_verb(vpn::rekey_counts(&ctx), io),
+        Command::Preflight { gateway, uid } => vpn_verb(vpn::preflight(&ctx, &gateway, &uid), io),
+        Command::StartLive {
+            gateway,
+            port,
+            mode,
+            insecure,
+        } => vpn_verb(vpn::start_live(&ctx, &gateway, port, mode, insecure), io),
+        Command::StartProfile { flags } => vpn_verb(vpn::start_profile(&ctx, &flags), io),
         Command::ListProfiles => {
             let lines: Vec<String> = registry::entries(root)
                 .iter()
@@ -682,10 +761,29 @@ mod tests {
     use crate::keychain::MemoryKeychain;
     use crate::out::Capture;
     use crate::profile::testutil::{fixture, TempDir};
+    use oftc_apple::error::AppleError;
     use oftc_apple::login::MockLoginItems;
+    use oftc_apple::manager::{MockEntry, MockVpn, StartKind, VpnStatus};
     use oftc_apple::sysext::{ExtensionVersion, MockExtensions};
-    use std::cell::RefCell;
+    use oftc_host_bootstrap::{AcquireFailure, TunnelProfile};
+    use oftc_provider::envelope::{
+        consume, encode_hbr1, OptionValue, Secret, StartMode, StartOptions as ProviderOptions,
+    };
+    use std::cell::{Cell, RefCell};
     use std::path::Path;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// The provider remembers session ids for the whole process, and tests run in
+    /// parallel, so each start gets an id no other test has used.
+    fn unique_session_id() -> [u8; 16] {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let mut id = [0x5A; 16];
+        id[..8].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+        id
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -726,7 +824,7 @@ mod tests {
                 vec!["--profile", "lab", "unregister-menu-login"],
                 invocation(Some("lab"), Command::UnregisterMenuLogin),
             ),
-            (vec!["status"], Err(ParseError::Usage)), // still Swift's
+            (vec!["stop"], Err(ParseError::Usage)), // still Swift's
             (vec!["nonsense"], Err(ParseError::Usage)),
             // --profile needs a valid id and a verb after it.
             (vec!["--profile"], Err(ParseError::ProfileFlag)),
@@ -922,8 +1020,7 @@ mod tests {
         for verb in rust_verbs() {
             assert_ne!(parse(&strings(&[verb])), Err(ParseError::ProfileFlag));
             let args = strings(&[verb, "a", "b", "c", "d"]);
-            // These two take a variable number of arguments.
-            let known = ["save-profile", "export-profiles"].contains(&verb)
+            let known = matches!(verb, "save-profile" | "start-profile" | "export-profiles")
                 || parse(&args) == Err(ParseError::Usage);
             assert!(known, "{verb}");
         }
@@ -940,6 +1037,77 @@ mod tests {
                 .map(Zeroizing::new)
         }
     }
+
+    /// Time that moves only when told: `sleep` advances it and runs the hook.
+    struct FakeClock {
+        unix: Cell<u64>,
+        mono: Cell<Duration>,
+        on_sleep: RefCell<Option<Box<dyn FnMut()>>>,
+    }
+
+    impl Clock for FakeClock {
+        fn unix_secs(&self) -> u64 {
+            self.unix.get()
+        }
+        fn now(&self) -> Duration {
+            self.mono.get()
+        }
+        fn sleep(&self, duration: Duration) {
+            self.mono.set(self.mono.get() + duration);
+            self.unix.set(self.unix.get() + duration.as_secs());
+            if let Some(hook) = self.on_sleep.borrow_mut().as_mut() {
+                hook();
+            }
+        }
+    }
+
+    type AcquireCall = (String, Vec<u8>, u32, bool, TunnelProfile);
+
+    /// Stands in for the browser: records what it was asked, may take "minutes",
+    /// and may change the VPN entry meanwhile.
+    struct FakeAcquirer {
+        clock: Rc<FakeClock>,
+        result: RefCell<Result<Vec<u8>, AcquireFailure>>,
+        takes_secs: Cell<u64>,
+        meanwhile: RefCell<Option<Box<dyn FnMut()>>>,
+        calls: RefCell<Vec<AcquireCall>>,
+    }
+
+    impl Acquirer for FakeAcquirer {
+        fn acquire(
+            &self,
+            gateway: &str,
+            psk: &[u8],
+            saml_port: u32,
+            insecure: bool,
+            profile: TunnelProfile,
+        ) -> Result<Zeroizing<Vec<u8>>, AcquireFailure> {
+            self.calls.borrow_mut().push((
+                gateway.to_owned(),
+                psk.to_vec(),
+                saml_port,
+                insecure,
+                profile,
+            ));
+            self.clock
+                .unix
+                .set(self.clock.unix.get() + self.takes_secs.get());
+            if let Some(hook) = self.meanwhile.borrow_mut().as_mut() {
+                hook();
+            }
+            match &*self.result.borrow() {
+                Ok(wire) => Ok(Zeroizing::new(wire.clone())),
+                Err(AcquireFailure::BeforeBrowser) => Err(AcquireFailure::BeforeBrowser),
+                Err(AcquireFailure::Other) => Err(AcquireFailure::Other),
+            }
+        }
+    }
+
+    /// A scripted provider reply, the line it should produce, and the exit code.
+    type Row = (Result<Vec<u8>, AppleError>, &'static str, i32);
+
+    const UID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const PROVIDER: &str = "com.example.oftc.provider";
 
     /// One installed FortiClient profile, "Example Office", and one with an unusable
     /// gateway.
@@ -995,12 +1163,28 @@ mod tests {
         extensions: MockExtensions,
         login: MockLoginItems,
         launchctl: RecordingLaunchctl,
+        vpn: MockVpn,
+        clock: Rc<FakeClock>,
+        acquirer: FakeAcquirer,
     }
 
     impl Harness {
         fn new() -> Harness {
             let dir = TempDir::new("commands");
             let env = HostEnv::new("com.example.oftc", &dir.0).unwrap();
+            let clock = Rc::new(FakeClock {
+                unix: Cell::new(1000),
+                mono: Cell::new(Duration::ZERO),
+                on_sleep: RefCell::new(None),
+            });
+            let wire = encode_hbr1("vpn.example.com", UID, b"secret", b"token").unwrap();
+            let acquirer = FakeAcquirer {
+                clock: clock.clone(),
+                result: RefCell::new(Ok(wire.as_bytes().to_vec())),
+                takes_secs: Cell::new(0),
+                meanwhile: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
             Harness {
                 dir,
                 env,
@@ -1009,6 +1193,9 @@ mod tests {
                 extensions: MockExtensions::new(),
                 login: MockLoginItems::new(),
                 launchctl: RecordingLaunchctl::new(true),
+                vpn: MockVpn::new(),
+                clock,
+                acquirer,
             }
         }
 
@@ -1025,6 +1212,10 @@ mod tests {
                 extensions: &self.extensions,
                 login: &self.login,
                 launchctl: &self.launchctl,
+                vpn: &self.vpn,
+                acquirer: &self.acquirer,
+                clock: &*self.clock,
+                session_id: &unique_session_id,
             };
             let mut stdin = stdin.as_bytes();
             let mut io = Io {
@@ -1121,7 +1312,7 @@ mod tests {
             &format!("{}\n", usage()),
             2,
         );
-        h.expect(&["status"], &format!("{}\n", usage()), 2);
+        h.expect(&["stop"], &format!("{}\n", usage()), 2); // still Swift's
     }
 
     #[test]
@@ -1183,6 +1374,585 @@ mod tests {
         assert_eq!(
             h.keychain.get("lab.example.com").unwrap().as_slice(),
             b"s3cret"
+        );
+    }
+
+    // ---- the VPN verbs, against MockVpn and a scripted browser ----
+
+    impl Harness {
+        /// One profile ("Example Office", udp, 9443), its PSK and its VPN entry.
+        fn setup(&self) -> Arc<MockEntry> {
+            self.run(
+                &[
+                    "save-profile",
+                    "vpn.example.com",
+                    "9443",
+                    "--name",
+                    "Example Office",
+                ],
+                "",
+            );
+            self.keychain.set("vpn.example.com", b"secret").unwrap();
+            self.vpn.add_entry(PROVIDER, Some("example-office"), true)
+        }
+
+        fn started_as_provider_sees_it(&self, entry: &MockEntry, now: u64) -> StartMode {
+            let (kind, envelope, mode) = entry.started().remove(0);
+            let data = |bytes: &[u8]| Some(OptionValue::Data(Secret::new(bytes.to_vec())));
+            let options = match kind {
+                StartKind::Live => ProviderOptions {
+                    live: data(&envelope),
+                    mode: mode.as_deref().and_then(data),
+                    ..Default::default()
+                },
+                StartKind::Preflight => {
+                    assert_eq!(mode, None, "a preflight carries no mode");
+                    ProviderOptions {
+                        preflight: data(&envelope),
+                        ..Default::default()
+                    }
+                }
+            };
+            consume(&options, now).expect("the provider accepts what the host built")
+        }
+    }
+
+    #[test]
+    fn parse_vpn_verbs() {
+        let udp = parse_start_flags(&[]).unwrap();
+        let cmd = |args: &[&str]| parse(&strings(args)).map(|i| i.command);
+        assert_eq!(cmd(&["install-config"]), Ok(Command::InstallConfig));
+        assert_eq!(cmd(&["rekey-ike-once"]), Ok(Command::RekeyIkeOnce));
+        assert_eq!(
+            cmd(&["start-live", "vpn.example.com", "9443"]),
+            Ok(Command::StartLive {
+                gateway: "vpn.example.com".into(),
+                port: 9443,
+                mode: udp.0,
+                insecure: false
+            })
+        );
+        // Swift's `args.count` guards, the port range, and flag errors are all usage.
+        for args in [
+            &["status", "x"][..],
+            &["preflight", "vpn.example.com"],
+            &["preflight", "a", "b", "c"],
+            &["start-live", "vpn.example.com"],
+            &["start-live", "vpn.example.com", "0"],
+            &["start-live", "vpn.example.com", "65536"],
+            &["start-live", "", "9443"],
+            &["start-live", "vpn.example.com", "9443", "--bogus"],
+        ] {
+            assert_eq!(cmd(args), Err(ParseError::Usage), "{args:?}");
+        }
+        // start-profile defers its flags until the profile is known.
+        assert_eq!(
+            cmd(&["start-profile", "--bogus"]),
+            Ok(Command::StartProfile {
+                flags: vec!["--bogus".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn install_config_is_idempotent_and_scoped_to_its_profile() {
+        let h = Harness::new();
+        h.expect(
+            &["install-config"],
+            "OFTC profile unavailable; run oftc setup\n",
+            1,
+        );
+        h.run(
+            &[
+                "save-profile",
+                "vpn.example.com",
+                "9443",
+                "--name",
+                "Example Office",
+            ],
+            "",
+        );
+        // Another profile's entry and another app's entry are not this profile's.
+        h.vpn.add_entry(PROVIDER, Some("lab"), true);
+        h.vpn
+            .add_entry("com.other.provider", Some("example-office"), true);
+        h.expect(&["install-config"], "OFTC configuration saved\n", 0);
+        let created: Vec<_> = h
+            .vpn
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.profile_key.as_deref() == Some("example-office") && e.provider_id == PROVIDER
+            })
+            .collect();
+        assert_eq!(created.len(), 1);
+        h.expect(
+            &["install-config"],
+            "OFTC configuration already exists\n",
+            0,
+        );
+        assert_eq!(h.vpn.load_all().unwrap().len(), 3, "nothing was added");
+        // A duplicate is refused rather than guessed at.
+        h.vpn.add_entry(PROVIDER, Some("example-office"), true);
+        h.expect(
+            &["status"],
+            "Multiple OFTC configurations; refusing to guess\n",
+            1,
+        );
+    }
+
+    #[test]
+    fn status_reports_each_state_or_absence() {
+        let h = Harness::new();
+        h.run(&["save-profile", "vpn.example.com", "9443"], "");
+        h.expect(&["status"], "OFTC configuration absent\n", 0);
+        let entry = h.vpn.add_entry(PROVIDER, Some("vpn-example-com"), true);
+        for (status, word) in [
+            (VpnStatus::Invalid, "invalid"),
+            (VpnStatus::Disconnected, "disconnected"),
+            (VpnStatus::Connecting, "connecting"),
+            (VpnStatus::Connected, "connected"),
+            (VpnStatus::Reasserting, "reasserting"),
+            (VpnStatus::Disconnecting, "disconnecting"),
+        ] {
+            entry.set_status(status);
+            h.expect(&["status"], &format!("OFTC VPN status: {word}\n"), 0);
+        }
+    }
+
+    /// An entry with no profile key belongs to the profile migrated from the
+    /// original single-profile layout, and to no other.
+    #[test]
+    fn an_unkeyed_entry_belongs_only_to_the_profile_that_adopted_it() {
+        let h = Harness::new();
+        h.run(&["save-profile", "vpn.example.com", "9443"], "");
+        h.vpn.add_entry(PROVIDER, None, true);
+        h.expect(&["status"], "OFTC configuration absent\n", 0);
+
+        // A profile migrated from the original layout adopts the unkeyed entry.
+        let h = Harness::new();
+        let root = h.env.root();
+        std::fs::create_dir_all(root).unwrap();
+        for file in ["profile.json", "connection-preferences.json"] {
+            std::fs::copy(fixture("swift/legacy-root").join(file), root.join(file)).unwrap();
+        }
+        h.vpn.add_entry(PROVIDER, None, true);
+        h.expect(&["status"], "OFTC VPN status: disconnected\n", 0);
+    }
+
+    #[test]
+    fn remove_config_removes_every_entry_of_this_app_and_only_those() {
+        let h = Harness::new();
+        h.expect(&["remove-config"], "OFTC configuration absent\n", 0);
+        h.vpn.add_entry(PROVIDER, Some("a"), true);
+        h.vpn.add_entry(PROVIDER, None, false);
+        h.vpn.add_entry("com.other.provider", Some("a"), true);
+        // No profile is needed, and none exists here.
+        h.expect(&["remove-config"], "OFTC configuration removed\n", 0);
+        let left = h.vpn.load_all().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].provider_id, "com.other.provider");
+    }
+
+    #[test]
+    fn erase_profile_refuses_while_connected_then_erases_everything_of_the_profile() {
+        let h = Harness::new();
+        let entry = h.setup();
+        let other = h.vpn.add_entry(PROVIDER, Some("lab"), true);
+        h.run(
+            &[
+                "--profile",
+                "lab",
+                "save-profile",
+                "lab.example.com",
+                "8443",
+            ],
+            "",
+        );
+        let pin_dir = h.env.pin_dir();
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        let pin = pin_dir.join("vpn.example.com_9443.pem");
+        let other_pin = pin_dir.join("lab.example.com_8443.pem");
+        std::fs::write(&pin, "x").unwrap();
+        std::fs::write(&other_pin, "x").unwrap();
+
+        entry.set_status(VpnStatus::Connecting);
+        h.expect(
+            &["--profile", "example-office", "erase-profile"],
+            "Disconnect Example Office before erasing its profile\n",
+            1,
+        );
+        assert!(h.keychain.get("vpn.example.com").is_ok() && pin.exists());
+        assert_eq!(h.vpn.load_all().unwrap().len(), 2);
+
+        entry.set_status(VpnStatus::Disconnected);
+        h.expect(
+            &["--profile", "example-office", "erase-profile"],
+            "OFTC profile, VPN entry and Keychain PSK erased\n",
+            0,
+        );
+        assert_eq!(
+            h.vpn.load_all().unwrap().len(),
+            1,
+            "only the lab entry remains"
+        );
+        assert!(h.keychain.get("vpn.example.com").is_err());
+        assert!(!pin.exists() && other_pin.exists());
+        assert!(!registry::entry_directory(h.env.root(), "example-office").exists());
+        assert!(registry::entry_directory(h.env.root(), "lab").exists());
+
+        // With no --profile, every profile goes; with none left there is nothing to do.
+        other.set_status(VpnStatus::Invalid);
+        h.expect(
+            &["erase-profile"],
+            "OFTC profile, VPN entry and Keychain PSK erased\n",
+            0,
+        );
+        assert!(h.vpn.load_all().unwrap().is_empty() && !other_pin.exists());
+        h.expect(
+            &["erase-profile"],
+            "OFTC profile absent; nothing erased\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn rekey_probes_report_the_provider_reply() {
+        let h = Harness::new();
+        let entry = h.setup();
+        h.expect(&["rekey-once"], "OFTC VPN is not connected\n", 1);
+        assert!(entry.sent().is_empty());
+        entry.set_status(VpnStatus::Connected);
+        let rows: Vec<Row> = vec![
+            (
+                Ok(b"rekey_passed".to_vec()),
+                "CHILD_SA rekey probe passed",
+                0,
+            ),
+            (
+                Ok(b"rekey_failed stage=7".to_vec()),
+                "CHILD_SA rekey probe failed (stage 7)",
+                1,
+            ),
+            (
+                Ok(b"rekey_failed stage=201".to_vec()),
+                "CHILD_SA rekey probe failed",
+                1,
+            ),
+            (Ok(vec![0xff]), "CHILD_SA rekey probe failed", 1),
+            (
+                Err(AppleError::TimedOut),
+                "CHILD_SA rekey probe timed out",
+                1,
+            ),
+            (
+                Err(AppleError::StaleEntry),
+                "Could not request CHILD_SA rekey probe",
+                1,
+            ),
+        ];
+        for (reply, text, code) in rows {
+            entry.push_reply(reply.clone());
+            h.expect(&["rekey-once"], &format!("{text}\n"), code);
+        }
+        entry.push_reply(Ok(b"rekey_passed".to_vec()));
+        h.expect(&["rekey-ike-once"], "IKE_SA rekey probe passed\n", 0);
+        let sent = entry.sent();
+        assert_eq!(sent[0], b"oftc.rekey-child-once.v1");
+        assert_eq!(sent.last().unwrap(), b"oftc.rekey-ike-once.v1");
+    }
+
+    #[test]
+    fn rekey_counts_passes_the_reply_through_and_ignores_the_enabled_flag() {
+        let h = Harness::new();
+        h.run(&["save-profile", "vpn.example.com", "9443"], "");
+        let entry = h.vpn.add_entry(PROVIDER, Some("vpn-example-com"), false);
+        entry.set_status(VpnStatus::Connected);
+        let rows: Vec<Row> = vec![
+            (
+                Ok(b"child_rekeys local=2 remote=1".to_vec()),
+                "child_rekeys local=2 remote=1",
+                0,
+            ),
+            (
+                Ok(b"something else".to_vec()),
+                "CHILD_SA rekey counts unavailable",
+                1,
+            ),
+            (
+                Err(AppleError::TimedOut),
+                "CHILD_SA rekey counts unavailable",
+                1,
+            ),
+            (
+                Err(AppleError::StaleEntry),
+                "Could not request CHILD_SA rekey counts",
+                1,
+            ),
+        ];
+        for (reply, text, code) in rows {
+            entry.push_reply(reply);
+            h.expect(&["rekey-counts"], &format!("{text}\n"), code);
+        }
+        // The probes, unlike the counts, need an enabled entry.
+        h.expect(&["rekey-once"], "OFTC VPN is not connected\n", 1);
+        entry.set_status(VpnStatus::Disconnected);
+        h.expect(&["rekey-counts"], "OFTC VPN is not connected\n", 1);
+    }
+
+    #[test]
+    fn preflight_checks_its_inputs_then_reports_the_stage_and_stops_the_tunnel() {
+        let h = Harness::new();
+        for uid in ["nope", &format!("{UID}A"), &UID.replace('A', "G")] {
+            h.expect(
+                &["preflight", "vpn.example.com", uid],
+                "Expected a 32-character hexadecimal UID\n",
+                2,
+            );
+        }
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "PSK unavailable in OFTC Keychain service\n",
+            1,
+        );
+        h.keychain.set("vpn.example.com", b"secret").unwrap();
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "OFTC profile unavailable; run oftc setup\n",
+            1,
+        );
+        let entry = h.setup();
+        h.vpn.remove(&h.vpn.load_all().unwrap()[0]).unwrap();
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "No OFTC configuration; run install-config\n",
+            1,
+        );
+        let entry2 = h.vpn.add_entry(PROVIDER, Some("example-office"), true);
+        let _ = entry;
+
+        // The provider comes up on the first poll; its early replies are empty or
+        // lost, so the loop asks again rather than giving up.
+        let hook = entry2.clone();
+        *h.clock.on_sleep.borrow_mut() = Some(Box::new(move || {
+            if hook.sent().is_empty() {
+                hook.set_status(VpnStatus::Connected);
+                // No stage yet (the provider's nil reply), then a lost reply.
+                hook.push_reply(Ok(Vec::new()));
+                hook.push_reply(Err(AppleError::TimedOut));
+                hook.push_reply(Ok(b"preflight_passed stage=ike".to_vec()));
+            }
+        }));
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "preflight_passed stage=ike\n",
+            0,
+        );
+        assert_eq!(entry2.stops(), 1);
+        assert_eq!(entry2.sent().len(), 3);
+        let StartMode::Preflight(input) = h.started_as_provider_sees_it(&entry2, 1000) else {
+            panic!("not a preflight");
+        };
+        assert_eq!(
+            (input.gateway.as_str(), input.uid.as_str()),
+            ("vpn.example.com", UID)
+        );
+        assert_eq!(input.psk.as_bytes(), b"secret");
+    }
+
+    #[test]
+    fn a_failed_stage_exits_1_and_silence_times_out_after_45_seconds() {
+        let h = Harness::new();
+        let entry = h.setup();
+        entry.set_status(VpnStatus::Disconnected);
+        let hook = entry.clone();
+        *h.clock.on_sleep.borrow_mut() = Some(Box::new(move || {
+            hook.set_status(VpnStatus::Connected);
+            hook.push_reply(Ok(b"preflight_failed stage=3".to_vec()));
+        }));
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "preflight_failed stage=3\n",
+            1,
+        );
+        assert_eq!(entry.stops(), 1);
+
+        // Never connects: the fake clock runs to the deadline.
+        let h = Harness::new();
+        let entry = h.setup();
+        h.expect(
+            &["preflight", "vpn.example.com", UID],
+            "Provider preflight did not report a stage before timeout\n",
+            1,
+        );
+        assert_eq!(entry.stops(), 1);
+        assert_eq!(h.clock.mono.get(), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn start_live_refuses_before_opening_a_browser_when_it_cannot_start() {
+        let h = Harness::new();
+        let live = ["start-live", "vpn.example.com", "9443"];
+        h.expect(&live, "OFTC profile unavailable; run oftc setup\n", 1);
+        let entry = h.setup();
+        h.vpn.remove(&h.vpn.load_all().unwrap()[0]).unwrap();
+        h.expect(&live, "No OFTC configuration; run install-config\n", 1);
+        let entry2 = h.vpn.add_entry(PROVIDER, Some("example-office"), true);
+        let _ = entry;
+        entry2.set_status(VpnStatus::Connected);
+        h.expect(
+            &live,
+            "OFTC configuration unavailable or VPN already active\n",
+            1,
+        );
+        entry2.set_status(VpnStatus::Disconnected);
+        h.keychain.delete("vpn.example.com").unwrap();
+        h.expect(&live, "PSK unavailable in OFTC Keychain service\n", 1);
+        assert!(
+            h.acquirer.calls.borrow().is_empty(),
+            "no sign-in was attempted"
+        );
+        assert!(entry2.started().is_empty());
+    }
+
+    /// The envelope is stamped after the sign-in, so a login that takes minutes
+    /// cannot age it out (the Swift check `afterSAML` pinned this for Swift).
+    #[test]
+    fn start_live_stamps_the_envelope_after_the_sign_in_and_hands_over_the_mode() {
+        let h = Harness::new();
+        let entry = h.setup();
+        h.acquirer.takes_secs.set(500);
+        h.expect(
+            &[
+                "start-live",
+                "vpn.example.com",
+                "9443",
+                "--tcp",
+                "--insecure-saml",
+            ],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        let calls = h.acquirer.calls.borrow();
+        let profile = TunnelProfile {
+            name: "Example Office".into(),
+            gateway: "vpn.example.com".into(),
+        };
+        assert_eq!(
+            calls[0],
+            (
+                "vpn.example.com".to_owned(),
+                b"secret".to_vec(),
+                9443,
+                true,
+                profile
+            )
+        );
+        let (_, envelope, mode) = entry.started().remove(0);
+        assert_eq!(
+            &envelope[5..13],
+            &1560u64.to_be_bytes(),
+            "now (1500) + 60, not 1000 + 60"
+        );
+        assert_eq!(mode.as_deref(), Some(&[1, 2, 4, 0, 0, 0, 0, 0][..]));
+        let StartMode::Live(input, _) = h.started_as_provider_sees_it(&entry, 1500) else {
+            panic!("not live");
+        };
+        assert_eq!(input.token.as_bytes(), b"token");
+    }
+
+    #[test]
+    fn start_live_failures_start_nothing() {
+        let h = Harness::new();
+        let entry = h.setup();
+        let live = ["start-live", "vpn.example.com", "9443"];
+        for failure in [AcquireFailure::BeforeBrowser, AcquireFailure::Other] {
+            *h.acquirer.result.borrow_mut() = Err(failure);
+            h.expect(&live, "SAML bootstrap failed\n", 1);
+        }
+        // Someone connected while the browser was open: do not start over it.
+        *h.acquirer.result.borrow_mut() = Ok(encode_hbr1("vpn.example.com", UID, b"p", b"t")
+            .unwrap()
+            .as_bytes()
+            .to_vec());
+        let hook = entry.clone();
+        *h.acquirer.meanwhile.borrow_mut() =
+            Some(Box::new(move || hook.set_status(VpnStatus::Connected)));
+        h.expect(
+            &live,
+            "OFTC configuration or status changed before start\n",
+            1,
+        );
+        assert!(entry.started().is_empty());
+    }
+
+    #[test]
+    fn start_profile_uses_the_profiles_own_settings() {
+        let h = Harness::new();
+        h.expect(
+            &["start-profile", "--bogus"],
+            "OFTC profile unavailable; run oftc setup\n",
+            1,
+        );
+        h.run(
+            &[
+                "--profile",
+                "lab",
+                "save-profile",
+                "lab.example.com",
+                "8443",
+                "--tcp",
+            ],
+            "",
+        );
+        h.keychain.set("lab.example.com", b"labpsk").unwrap();
+        let entry = h.vpn.add_entry(PROVIDER, Some("lab"), true);
+        // The flags are checked once the profile is found.
+        h.expect(&["start-profile", "--bogus"], &format!("{}\n", usage()), 2);
+        h.expect(
+            &["start-profile", "--insecure-saml"],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        let calls = h.acquirer.calls.borrow();
+        assert_eq!(
+            (calls[0].0.as_str(), calls[0].2, calls[0].3),
+            ("lab.example.com", 8443, true)
+        );
+        drop(calls);
+        // An explicit --tcp on a TCP profile is not doubled into a usage error.
+        h.expect(
+            &["start-profile", "--tcp"],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        // A UDP profile gets the UDP default (with its TCP fallback).
+        h.run(
+            &[
+                "--profile",
+                "udp",
+                "save-profile",
+                "udp.example.com",
+                "9443",
+            ],
+            "",
+        );
+        h.keychain.set("udp.example.com", b"udppsk").unwrap();
+        let udp = h.vpn.add_entry(PROVIDER, Some("udp"), true);
+        h.expect(
+            &["--profile", "udp", "start-profile"],
+            "Live start requested; inspect status before any fresh-token retry\n",
+            0,
+        );
+        assert_eq!(
+            udp.started()[0].2.as_deref(),
+            Some(&[1, 1, 4, 1, 0, 0, 0, 0][..])
+        );
+        // The profile's TCP transport applies without --tcp on the command line.
+        assert_eq!(
+            entry.started()[0].2.as_deref(),
+            Some(&[1, 2, 4, 0, 0, 0, 0, 0][..])
         );
     }
 

@@ -481,6 +481,9 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "oftc-apple",
+ "oftc-engine",
+ "oftc-host-bootstrap",
+ "oftc-provider",
  "security-framework",
  "serde",
  "serde_json",
@@ -499,6 +502,7 @@ dependencies = [
  "oftc-apple",
  "oftc-host",
  "oftc-migration",
+ "oftc-provider",
  "zeroize",
 ]
 

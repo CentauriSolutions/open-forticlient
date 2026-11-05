@@ -67,143 +67,6 @@ private func lookupPSK(for gateway: String) throws -> Data {
     return data
 }
 
-private func storedPSK(for gateway: String) -> Data {
-    guard let psk = try? lookupPSK(for: gateway) else {
-        finish("PSK unavailable in OFTC Keychain service", code: 1)
-    }
-    return psk
-}
-
-private func awaitPreflight(_ connection: NEVPNConnection, deadline: Date) {
-    guard Date() < deadline else {
-        connection.stopVPNTunnel()
-        finish("Provider preflight did not report a stage before timeout", code: 1)
-    }
-    if connection.status == .connected,
-       let session = connection as? NETunnelProviderSession {
-        do {
-            try session.sendProviderMessage(Data("oftc.preflight-status.v1".utf8)) { reply in
-                if let reply, let stage = String(data: reply, encoding: .utf8) {
-                    connection.stopVPNTunnel()
-                    finish(stage, code: stage.hasPrefix("preflight_passed") ? 0 : 1)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    awaitPreflight(connection, deadline: deadline)
-                }
-            }
-            return
-        } catch { }
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-        awaitPreflight(connection, deadline: deadline)
-    }
-}
-
-private func startWithManager(_ manager: NETunnelProviderManager,
-                              options: [String: NSObject], preflight: Bool) {
-    // Recheck after SAML too: another process may have changed the saved VPN
-    // configuration or connection while the browser flow was in progress.
-    manager.loadFromPreferences { error in
-        guard error == nil, manager.isEnabled,
-              belongs(manager),
-              manager.connection.status == .disconnected else {
-            finish("OFTC configuration or status changed before start", code: 1)
-        }
-        do {
-            try CandidateHostBridge.start(manager.connection, options: options)
-            if preflight {
-                awaitPreflight(manager.connection, deadline: Date().addingTimeInterval(45))
-            } else {
-                finish("Live start requested; inspect status before any fresh-token retry")
-            }
-        } catch {
-            finish("Start request failed; acquire a fresh token before another live attempt", code: 1)
-        }
-    }
-}
-
-private func start(_ options: [String: NSObject], preflight: Bool = false) {
-    loadManager { manager in
-        guard let manager else { finish("No OFTC configuration; run install-config", code: 1) }
-        startWithManager(manager, options: options, preflight: preflight)
-    }
-    dispatchMain()
-}
-
-private func rekeyOnce(ike: Bool = false) {
-    let kind = ike ? "IKE_SA" : "CHILD_SA"
-    let message = ike ? "oftc.rekey-ike-once.v1" : "oftc.rekey-child-once.v1"
-    loadManager { manager in
-        guard let manager else { finish("No OFTC configuration", code: 1) }
-        manager.loadFromPreferences { error in
-            guard error == nil, manager.isEnabled,
-                  belongs(manager),
-                  manager.connection.status == .connected,
-                  let session = manager.connection as? NETunnelProviderSession else {
-                finish("OFTC VPN is not connected", code: 1)
-            }
-            var completed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
-                guard !completed else { return }
-                completed = true
-                finish("\(kind) rekey probe timed out", code: 1)
-            }
-            do {
-                try session.sendProviderMessage(Data(message.utf8)) { reply in
-                    DispatchQueue.main.async {
-                        guard !completed else { return }
-                        completed = true
-                        if reply == Data("rekey_passed".utf8) {
-                            finish("\(kind) rekey probe passed")
-                        }
-                        if let reply,
-                           let text = String(data: reply, encoding: .utf8),
-                           text.hasPrefix("rekey_failed stage="),
-                           let stage = Int32(text.dropFirst("rekey_failed stage=".count)),
-                           (0...200).contains(stage) {
-                            finish("\(kind) rekey probe failed (stage \(stage))", code: 1)
-                        }
-                        finish("\(kind) rekey probe failed", code: 1)
-                    }
-                }
-            } catch { finish("Could not request \(kind) rekey probe", code: 1) }
-        }
-    }
-    dispatchMain()
-}
-
-private func rekeyCounts() {
-    loadManager { manager in
-        guard let manager else { finish("No OFTC configuration", code: 1) }
-        manager.loadFromPreferences { error in
-            guard error == nil, manager.connection.status == .connected,
-                  let session = manager.connection as? NETunnelProviderSession else {
-                finish("OFTC VPN is not connected", code: 1)
-            }
-            var completed = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                guard !completed else { return }
-                completed = true
-                finish("CHILD_SA rekey counts unavailable", code: 1)
-            }
-            do {
-                try session.sendProviderMessage(Data("oftc.rekey-counts.v1".utf8)) { reply in
-                    DispatchQueue.main.async {
-                        guard !completed else { return }
-                        completed = true
-                        guard let reply, let text = String(data: reply, encoding: .utf8),
-                              text.hasPrefix("child_rekeys local=") else {
-                            finish("CHILD_SA rekey counts unavailable", code: 1)
-                        }
-                        finish(text)
-                    }
-                }
-            } catch { finish("Could not request CHILD_SA rekey counts", code: 1) }
-        }
-    }
-    dispatchMain()
-}
-
 private func startMode(_ flags: [String]) -> (ProviderStartEnvelope.ConnectMode, Bool)? {
     var tcp = false
     var insecure = false
@@ -255,7 +118,7 @@ private func fortiClientName(forGateway gateway: String) -> String? {
 
 private func runLive(gateway: String, port: UInt32,
                      mode: ProviderStartEnvelope.ConnectMode,
-                     insecure: Bool, supervised: Bool) -> Never {
+                     insecure: Bool) -> Never {
     loadManager { manager in
         guard let manager else { finish("No OFTC configuration; run install-config", code: 1) }
         manager.loadFromPreferences { error in
@@ -264,37 +127,24 @@ private func runLive(gateway: String, port: UInt32,
                   manager.connection.status == .disconnected else {
                 finish("OFTC configuration unavailable or VPN already active", code: 1)
             }
-            if supervised {
-                let lease: SupervisorLease
-                let entry = requireEntry()
-                // Named on the browser's sign-in confirmation page.
-                setenv("OFTC_PROFILE_NAME", entry.name, 1)
-                setenv("OFTC_PROFILE_GATEWAY", gateway, 1)
-                do { lease = try SupervisorLease(directory: entry.directory) }
-                catch { finish("Another OFTC supervisor is active", code: 1) }
-                let supervisor = ReconnectSupervisor(
-                    manager: manager, providerID: providerID, gateway: gateway,
-                    samlPort: port, mode: mode, insecure: insecure, lease: lease,
-                    entry: entry,
-                    loadPSK: { try lookupPSK(for: gateway) })
-                supervisor.reviewCertificate = { host, port in
-                    GatewayTrust.review(host: host, port: port, profileName: entry.name,
-                                        prompt: GatewayTrustPrompt.present)
-                }
-                activeSupervisor = supervisor
-                supervisor.run()
-                return
+            let lease: SupervisorLease
+            let entry = requireEntry()
+            // Named on the browser's sign-in confirmation page.
+            setenv("OFTC_PROFILE_NAME", entry.name, 1)
+            setenv("OFTC_PROFILE_GATEWAY", gateway, 1)
+            do { lease = try SupervisorLease(directory: entry.directory) }
+            catch { finish("Another OFTC supervisor is active", code: 1) }
+            let supervisor = ReconnectSupervisor(
+                manager: manager, providerID: providerID, gateway: gateway,
+                samlPort: port, mode: mode, insecure: insecure, lease: lease,
+                entry: entry,
+                loadPSK: { try lookupPSK(for: gateway) })
+            supervisor.reviewCertificate = { host, port in
+                GatewayTrust.review(host: host, port: port, profileName: entry.name,
+                                    prompt: GatewayTrustPrompt.present)
             }
-            var psk = storedPSK(for: gateway)
-            defer { psk.resetBytes(in: 0..<psk.count) }
-            var options: [String: NSObject]
-            do {
-                options = try CandidateHostBridge.acquireOptions(
-                    gateway: gateway, psk: psk, samlPort: port,
-                    insecure: insecure)
-                options[ProviderStartEnvelope.modeKey] = try mode.encode() as NSData
-            } catch { finish("SAML bootstrap failed", code: 1) }
-            startWithManager(manager, options: options, preflight: false)
+            activeSupervisor = supervisor
+            supervisor.run()
         }
     }
     dispatchMain()
@@ -338,7 +188,7 @@ private let usage = "Usage: OFTCAgent [--profile <id>] activate|deactivate|agent
 // The verbs below are implemented in Rust (liboftc_hostlib.a) and the rest here. Keep
 // this list equal to the `rust` rows of `VERBS` in app/core/host/src/commands.rs; a
 // Rust test compares them. Rust also handles a leading `--profile <id>` for them.
-private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile", "export-profiles", "import-profiles", "import-profile", "migrate-psk"]
+private let rustVerbs: Set<String> = ["activate", "deactivate", "agent-status", "register-agent", "unregister-agent", "login-settings", "unregister-menu-login", "list-profiles", "show-profile", "has-psk", "provision-psk", "save-profile", "install-config", "erase-profile", "preflight", "start-live", "start-profile", "status", "rekey-once", "rekey-ike-once", "rekey-counts", "remove-config", "export-profiles", "import-profiles", "import-profile", "migrate-psk"]
 
 @_silgen_name("oftc_host_main")
 private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
@@ -394,24 +244,6 @@ case "set-autostart" where args.count == 2 && ["on", "off"].contains(args[1]):
 case "supervise-autostart" where args.count == 1:
     superviseAutostart()
 
-case "install-config" where args.count == 1:
-    let entry = requireEntry()
-    loadManager { existing in
-        if existing != nil { finish("OFTC configuration already exists") }
-        let manager = NETunnelProviderManager()
-        let configuration = NETunnelProviderProtocol()
-        configuration.providerBundleIdentifier = providerID
-        configuration.serverAddress = "OFTC" // Display label only, never a secret.
-        configuration.providerConfiguration = [OFTCProfileScope.configurationKey: entry.id]
-        manager.protocolConfiguration = configuration
-        manager.localizedDescription = "OFTC VPN (\(entry.name))"
-        manager.isEnabled = true
-        manager.saveToPreferences { error in
-            if error != nil { finish("Could not save OFTC configuration", code: 1) }
-            finish("OFTC configuration saved")
-        }
-    }
-    dispatchMain()
 
 case "launcher-alias" where args.count == 2 && ["ensure", "remove"].contains(args[1]):
     if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }
@@ -432,135 +264,29 @@ case "check-update" where args.count <= 2:
     }
     dispatchMain()
 
-case "erase-profile" where args.count == 1:
-    // Without --profile this erases every profile, so uninstall can clean up.
-    let targets = selectedProfile == nil ? allEntries() : [requireEntry()]
-    if targets.isEmpty { finish("OFTC profile absent; nothing erased") }
-    NETunnelProviderManager.loadAllFromPreferences { managers, error in
-        if error != nil { finish("Could not load VPN configuration", code: 1) }
-        for entry in targets {
-            for manager in OFTCProfileScope.manager(for: entry, in: managers ?? [], providerID: providerID)
-            where manager.connection.status != .disconnected && manager.connection.status != .invalid {
-                finish("Disconnect \(entry.name) before erasing its profile", code: 1)
-            }
-        }
-        func eraseData() {
-            for entry in targets {
-                let selector: [CFString: Any] = [
-                    kSecClass: kSecClassGenericPassword,
-                    kSecAttrService: keychainService,
-                    kSecAttrAccount: entry.profile.gateway,
-                ]
-                let status = SecItemDelete(selector as CFDictionary)
-                guard status == errSecSuccess || status == errSecItemNotFound else {
-                    finish("Could not erase OFTC Keychain PSK for \(entry.name); profile left in place", code: 1)
-                }
-                // Its trusted gateway certificate goes too; a re-added VPN asks again.
-                try? FileManager.default.removeItem(at: GatewayTrust.pinURL(
-                    host: entry.profile.gateway, port: entry.profile.samlPort,
-                    directory: GatewayTrust.pinDirectory()))
-                do { try FileManager.default.removeItem(at: entry.directory) }
-                catch { finish("Keychain PSK erased, but profile \(entry.name) could not be removed", code: 1) }
-            }
-            finish("OFTC profile, VPN entry and Keychain PSK erased")
-        }
-        // Each profile's macOS VPN entry goes with it, so none is left orphaned.
-        func removeNext(_ remaining: [NETunnelProviderManager]) {
-            guard let manager = remaining.first else { eraseData(); return }
-            manager.removeFromPreferences { error in
-                if error != nil { finish("Could not remove an OFTC VPN entry; profile left in place", code: 1) }
-                removeNext(Array(remaining.dropFirst()))
-            }
-        }
-        removeNext(targets.flatMap {
-            OFTCProfileScope.manager(for: $0, in: managers ?? [], providerID: providerID)
-        })
-    }
-    dispatchMain()
-
-case "preflight" where args.count == 3:
-    let gateway = args[1]
-    let uid = args[2]
-    guard uid.utf8.count == 32, uid.utf8.allSatisfy({
-        (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
-    }) else {
-        finish("Expected a 32-character hexadecimal UID", code: 2)
-    }
-    var psk = storedPSK(for: gateway)
-    defer { psk.resetBytes(in: 0..<psk.count) }
-    let wire: Data
-    do { wire = try ProviderBootstrapInput.preflightWire(gateway: gateway, uid: uid, psk: psk) }
-    catch { finish("Invalid preflight input", code: 2) }
-    let now = UInt64(Date().timeIntervalSince1970)
-    let payload = BootstrapWire.Payload(expiresAt: now + 60,
-        sessionID: withUnsafeBytes(of: UUID().uuid) { Data($0) }, secret: wire)
-    let envelope: Data
-    do { envelope = try BootstrapWire.encode(payload, now: now) }
-    catch { finish("Could not make preflight envelope", code: 2) }
-    start([ProviderStartEnvelope.preflightKey: envelope as NSData], preflight: true)
-
-case "start-live" where args.count >= 3:
-    let gateway = args[1]
-    guard let (mode, insecure) = startMode(Array(args.dropFirst(3))) else {
-        finish(usage, code: 2)
-    }
-    guard let port = UInt32(args[2]), port > 0, port <= 65535,
-          !gateway.isEmpty else { finish(usage, code: 2) }
-    runLive(gateway: gateway, port: port, mode: mode,
-            insecure: insecure, supervised: false)
-
 case "supervise-live" where args.count >= 3:
     let gateway = args[1]
     guard let (mode, insecure) = startMode(Array(args.dropFirst(3))),
           let port = UInt32(args[2]), port > 0, port <= 65535,
           !gateway.isEmpty else { finish(usage, code: 2) }
-    runLive(gateway: gateway, port: port, mode: mode,
-            insecure: insecure, supervised: true)
+    runLive(gateway: gateway, port: port, mode: mode, insecure: insecure)
 
-case "start-profile", "supervise-profile":
-    if command == "supervise-profile" {
-        // An agent plist from before multi-profile support runs this
-        // command without a profile; it now means "start the autostart set".
-        if selectedProfile == nil,
-           ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" {
-            superviseAutostart()
-        }
-        do { try OFTCAgentService.redirectSupervisorOutput() }
-        catch { finish(error.localizedDescription, code: 1) }
+case "supervise-profile":
+    // An agent plist from before multi-profile support runs this
+    // command without a profile; it now means "start the autostart set".
+    if selectedProfile == nil,
+       ProcessInfo.processInfo.environment["OFTC_BUNDLED_AGENT"] == "1" {
+        superviseAutostart()
     }
+    do { try OFTCAgentService.redirectSupervisorOutput() }
+    catch { finish(error.localizedDescription, code: 1) }
     let profile = storedProfile()
     var flags = Array(args.dropFirst())
     if profile.transport == .tcp && !flags.contains("--tcp") {
         flags.insert("--tcp", at: 0)
     }
     guard let (mode, insecure) = startMode(flags) else { finish(usage, code: 2) }
-    runLive(gateway: profile.gateway, port: profile.samlPort, mode: mode,
-            insecure: insecure, supervised: command == "supervise-profile")
-
-case "status" where args.count == 1:
-    loadManager { manager in
-        guard let manager else { finish("OFTC configuration absent") }
-        let state: String
-        switch manager.connection.status {
-        case .invalid: state = "invalid"
-        case .disconnected: state = "disconnected"
-        case .connecting: state = "connecting"
-        case .connected: state = "connected"
-        case .reasserting: state = "reasserting"
-        case .disconnecting: state = "disconnecting"
-        @unknown default: state = "unknown"
-        }
-        finish("OFTC VPN status: \(state)")
-    }
-    dispatchMain()
-
-case "rekey-once" where args.count == 1:
-    rekeyOnce()
-case "rekey-ike-once" where args.count == 1:
-    rekeyOnce(ike: true)
-
-case "rekey-counts" where args.count == 1:
-    rekeyCounts()
+    runLive(gateway: profile.gateway, port: profile.samlPort, mode: mode, insecure: insecure)
 
 case "stop" where args.count == 1:
     // Stopping a tunnel leaves its connect-at-login choice alone; that is a
@@ -572,25 +298,6 @@ case "stop" where args.count == 1:
         guard let manager else { finish("OFTC configuration absent") }
         manager.connection.stopVPNTunnel()
         finish("Stop requested")
-    }
-    dispatchMain()
-
-case "remove-config" where args.count == 1:
-    // Removes every OFTC VPN entry, with or without a profile key.
-    NETunnelProviderManager.loadAllFromPreferences { managers, error in
-        if error != nil { finish("Could not load VPN configuration", code: 1) }
-        let ours = (managers ?? []).filter {
-            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerID
-        }
-        if ours.isEmpty { finish("OFTC configuration absent") }
-        var remaining = ours.count
-        for manager in ours {
-            manager.removeFromPreferences { error in
-                if error != nil { finish("Could not remove OFTC configuration", code: 1) }
-                remaining -= 1
-                if remaining == 0 { finish("OFTC configuration removed") }
-            }
-        }
     }
     dispatchMain()
 
