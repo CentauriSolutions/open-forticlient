@@ -196,6 +196,16 @@ mod tests {
         request(&d, true, later(1)).unwrap();
         assert!(!should_start(&d, now, false));
         assert!(!d.join(REQUEST).exists());
+        // Dates no clock could hold are ignored, not a crash: the choice decides.
+        for created in ["1e300", "-1e300", "1e19", "-1e19"] {
+            fs::write(
+                d.join(REQUEST),
+                format!(r#"{{"connect":true,"created":{created}}}"#),
+            )
+            .unwrap();
+            assert!(!should_start(&d, now, false), "{created}");
+            assert!(!d.join(REQUEST).exists(), "{created}");
+        }
         // `connect: false` is "registered, idle": it suppresses the standing choice once.
         set_connect_at_login(&d, true).unwrap();
         request(&d, false, now).unwrap();

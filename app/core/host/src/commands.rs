@@ -2650,11 +2650,7 @@ mod tests {
         two_profiles(&h);
         // The "executable" records how it was started in the profile's log.
         let script = h.dir.0.join("fake-agent");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\necho \"args=$* bundled=${OFTC_BUNDLED_AGENT-unset}\"\n",
-        )
-        .unwrap();
+        std::fs::write(&script, "#!/bin/sh\necho \"args=$*\"\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         crate::lease::make_private_dir(&h.env.logs_dir()).unwrap();
         let logs = h.env.logs_dir();
@@ -2673,13 +2669,10 @@ mod tests {
         h.expect(&["supervise-autostart"], disabled, 0);
         assert_eq!(log("lab"), None);
 
-        // The agent is told the marker is gone for the child, whatever it inherited.
-        std::env::set_var("OFTC_BUNDLED_AGENT", "1");
         h.expect(&["supervise-autostart"], "OFTC supervisors exited\n", 0);
-        std::env::remove_var("OFTC_BUNDLED_AGENT");
         assert_eq!(
             log("lab").as_deref(),
-            Some("args=--profile lab supervise-profile bundled=unset\n")
+            Some("args=--profile lab supervise-profile\n")
         );
         assert_eq!(log("example-office"), None);
         let mode = std::fs::metadata(logs.join("lab.log"))
@@ -2698,7 +2691,7 @@ mod tests {
         h.expect(&["supervise-autostart"], "OFTC supervisors exited\n", 0);
         assert_eq!(
             log("example-office").as_deref(),
-            Some("args=--profile example-office supervise-profile bundled=unset\n")
+            Some("args=--profile example-office supervise-profile\n")
         );
         h.env = h.env.clone().with_exe(&h.dir.0.join("missing"));
         h.expect(

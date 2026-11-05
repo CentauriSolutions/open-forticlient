@@ -78,8 +78,11 @@ pub(crate) fn encode_date(time: SystemTime) -> f64 {
 }
 
 /// The inverse of [`encode_date`].
+///
+/// A date file content can name any number, so the value is clamped to about
+/// 31,000 years either side of 2001; far past and far future are both "not fresh".
 pub(crate) fn decode_date(seconds: f64) -> SystemTime {
-    let unix = seconds + REFERENCE_OFFSET;
+    let unix = (seconds + REFERENCE_OFFSET).clamp(-1e12, 1e12);
     if unix >= 0.0 {
         UNIX_EPOCH + Duration::from_secs_f64(unix)
     } else {
@@ -229,8 +232,11 @@ mod tests {
         assert_eq!(store.read(now).map(|r| r.phase), Some(Phase::Connected));
         write("connected", other, me, FIXTURE_UPDATED); // lease id mismatch
         assert_eq!(store.read(now), None);
-        write("connected", &id, 0x7FFF_FFF0, FIXTURE_UPDATED); // no such process
-        assert_eq!(store.read(now), None);
+        for pid in [0x7FFF_FFF0, 0, -1] {
+            // No such process; and process-group pids, which `kill` accepts.
+            write("connected", &id, pid, FIXTURE_UPDATED);
+            assert_eq!(store.read(now), None, "{pid}");
+        }
         drop(lease); // lock gone
         write("connected", &id, me, FIXTURE_UPDATED);
         assert_eq!(store.read(now), None);

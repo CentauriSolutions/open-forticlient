@@ -88,6 +88,10 @@ pub fn unlock(file: &File) {
 /// Whether `kill(pid, 0)` succeeds: the process exists and may be signalled. A
 /// process of another user counts as gone, as the Swift status reader had it.
 pub fn process_alive(pid: i32) -> bool {
+    // `kill(0, 0)` and `kill(-1, 0)` address process groups and succeed.
+    if pid <= 0 {
+        return false;
+    }
     // SAFETY: signal 0 only checks that the process exists; nothing is sent.
     unsafe { libc::kill(pid, 0) == 0 }
 }

@@ -160,12 +160,17 @@ pub fn redirect_output(env: &HostEnv) -> Result<(), String> {
 
 /// Starts `<exe> --profile <id> supervise-profile` with the agent marker removed, its
 /// output appended to `log` (or inherited when there is none) and no input.
-pub fn spawn_supervisor(exe: &Path, id: &str, log: Option<File>) -> std::io::Result<Child> {
+pub fn supervisor_command(exe: &Path, id: &str) -> Command {
     let mut command = Command::new(exe);
     command
         .args(["--profile", id, "supervise-profile"])
         .env_remove("OFTC_BUNDLED_AGENT")
         .stdin(Stdio::null());
+    command
+}
+
+pub fn spawn_supervisor(exe: &Path, id: &str, log: Option<File>) -> std::io::Result<Child> {
+    let mut command = supervisor_command(exe, id);
     if let Some(log) = log {
         command.stdout(log.try_clone()?).stderr(log);
     }
@@ -352,18 +357,15 @@ mod tests {
     fn redirect_sends_output_to_the_agent_log() {
         use std::os::unix::fs::PermissionsExt;
         let dir = crate::profile::testutil::TempDir::new("redirect");
-        let run = |bundled: bool| {
-            let output = Command::new(std::env::current_exe().unwrap())
+        let run = || {
+            Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "agent::tests::redirect_helper", "--nocapture"])
                 .env(HOME, &dir.0)
-                .env_remove("OFTC_BUNDLED_AGENT")
                 .output()
-                .unwrap();
-            let _ = bundled;
-            output
+                .unwrap()
         };
         let log = dir.0.join("Library/Logs/OFTC/agent.log");
-        let output = run(true);
+        let output = run();
         assert_eq!(output.status.code(), Some(0));
         // Nothing reached the terminal; the log has both streams, appended.
         assert!(!String::from_utf8_lossy(&output.stdout).contains("to stdout"));
@@ -372,7 +374,7 @@ mod tests {
             text.contains("to stdout\n") && text.contains("to stderr\n"),
             "{text}"
         );
-        run(true);
+        run();
         assert_eq!(
             fs::read_to_string(&log)
                 .unwrap()
@@ -392,8 +394,18 @@ mod tests {
         // A log that is a symlink is refused (`O_NOFOLLOW`), and the verb fails.
         fs::remove_file(&log).unwrap();
         std::os::unix::fs::symlink(dir.0.join("elsewhere"), &log).unwrap();
-        assert_eq!(run(true).status.code(), Some(3));
+        assert_eq!(run().status.code(), Some(3));
         assert!(!dir.0.join("elsewhere").exists());
+    }
+
+    #[test]
+    fn a_supervisor_is_started_for_its_profile_without_the_agent_marker() {
+        let command = supervisor_command(Path::new("/x/OFTCAgent"), "lab");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--profile", "lab", "supervise-profile"]);
+        // `None` means removed from the child's environment.
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(envs, [(std::ffi::OsStr::new("OFTC_BUNDLED_AGENT"), None)]);
     }
 
     #[test]
