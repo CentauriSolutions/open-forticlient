@@ -45,7 +45,11 @@ pub type SettingsDone = Box<dyn FnOnce(bool) + Send>;
 pub trait Host: Send + Sync {
     /// Install, or with `None` clear, the tunnel network settings.
     fn set_settings(&self, settings: Option<NeSettings>, done: SettingsDone);
-    /// Ask for the next batch of outbound packets.
+    /// Ask for the next batch of outbound packets. If the packet flow is gone
+    /// (the provider object was freed), drop `done` without calling it: that
+    /// closes the tunnel, ending the reader. Answering with an empty batch
+    /// instead would make the reader re-issue the read in a tight loop on the
+    /// main queue.
     fn read_packets(&self, done: ReadDone);
     /// Write one `AF_INET` packet; `false` if the flow refused it.
     fn write_packet(&self, packet: &[u8]) -> bool;

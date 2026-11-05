@@ -16,6 +16,14 @@
 //! Dropping an engine stops it and blocks, so it only ever runs on a worker
 //! thread, and only for a provider object whose key is reused (a freed object's
 //! address) or after its stop.
+//!
+//! A start that fails leaves its map entry in place. NetworkExtension is not
+//! documented to send `stopTunnel` to a provider whose `startTunnel` failed, so
+//! nothing here is guaranteed to remove it, and removing it on failure would
+//! also drop a stopped engine while the failure hook may still be running. The
+//! entry is bounded (one per provider-object address, replaced when an address
+//! is reused, and a failed engine has already torn its tunnel down), so it is
+//! left and documented rather than changed.
 
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -55,7 +63,10 @@ pub trait Engine: Send + Sync {
     fn start_completion_enqueued(&self) {}
     /// Stop the tunnel and wait for cleanup. Blocks.
     fn stop(&self);
-    /// Answer a provider message. Blocks.
+    /// Answer a provider message. Blocks. The reply goes back over the app
+    /// channel to any process that can send one, so it must never carry
+    /// secrets: `Provider` answers only with counters, a random session id,
+    /// stage numbers and fixed words (checked in #91).
     fn handle_message(&self, message: &[u8]) -> Option<Vec<u8>>;
 }
 
@@ -65,6 +76,9 @@ pub trait Engine: Send + Sync {
 /// NetworkExtension creates a new provider object for every start but keeps the
 /// process, and a `Provider` is one tunnel's worth of state (once stopped it
 /// refuses to start), so every start gets a fresh engine, and a fresh latch.
+///
+/// A factory that panics is a failed start (code 900, nothing stored), the
+/// same as no factory having been registered.
 pub type Factory = Box<dyn Fn(Weak<NEPacketTunnelProvider>) -> Box<dyn Engine> + Send + Sync>;
 
 type Shared = Arc<dyn Engine>;
@@ -100,9 +114,12 @@ impl<A> Engines<A> {
         self.live().get(&key).cloned()
     }
 
-    /// Forget the engine of `key` once it is stopped.
+    /// Forget the engine of `key` once it is stopped. The engine is dropped
+    /// after the map guard is released: a drop stops the tunnel and blocks, and
+    /// must not hold up every other profile's lookups.
     fn remove(&self, key: Key) {
-        self.live().remove(&key);
+        let removed = self.live().remove(&key);
+        drop(removed);
     }
 
     /// Build the engine for a new start of provider object `key`. Returns it
@@ -233,10 +250,19 @@ pub fn begin_start(
         complete_start(queue, done, Err(PANICKED));
         return;
     };
+    // If the thread cannot be spawned, `old` is dropped here on the calling
+    // (main) thread, which blocks while it stops. That is accepted: it needs a
+    // reused provider address and a process out of threads, and the alternative
+    // (leaking a running tunnel's engine) is worse.
     if let Err((done, _)) = spawn_owning("oftc-start", (done, old), move |(done, old)| {
         sys::pooled(|| {
-            // Only a freed provider object's engine can be here; drop it here.
-            drop(old);
+            // Only a freed provider object's engine can be here. Stop it
+            // explicitly, so a panic in its stop cannot skip this start's
+            // completion, then drop it (a no-op stop) on this thread.
+            if let Some(old) = old {
+                let _ = catch_unwind(AssertUnwindSafe(|| old.stop()));
+                drop(old);
+            }
             start_body(queue, &*engine, &options, move |result| {
                 complete_start_now(done, result);
             });
@@ -289,7 +315,12 @@ pub fn begin_message(key: Key, message: Vec<u8>, done: Option<ReplyDone>) {
     }
 }
 
-/// Set once the start completion has been enqueued on the main queue.
+/// A one-way flag: set once the start completion has been enqueued on the main
+/// queue. [`failure_hook`] waits on it, so `cancelTunnelWithError` can never
+/// reach the host before the start completion, whichever thread posts first.
+/// One latch per engine, never reset. `start_body` sets it on every path that
+/// ran the start (including a failed or panicked one), so a waiter is bounded;
+/// if the engine was never started nothing can fail, so nothing waits.
 #[derive(Default)]
 pub struct Latch {
     set: Mutex<bool>,
@@ -416,6 +447,11 @@ mod tests {
 
     use super::super::tunnel::fake::{FakeHost, FakeQueue};
 
+    /// A bounded wait, so a regression fails the test instead of hanging CI.
+    fn recv<T>(receiver: &mpsc::Receiver<T>) -> T {
+        receiver.recv_timeout(Duration::from_secs(10)).expect("no message within 10s")
+    }
+
     /// Like `Provider`: one tunnel's worth of state. Once stopped it refuses to
     /// start again, with code 1.
     #[derive(Default)]
@@ -468,13 +504,13 @@ mod tests {
         // The engine that was reused would have refused, with its real code.
         let (code, done) = mpsc::channel();
         start_body(&*queue, &*first, &options, move |r| code.send(r).unwrap());
-        assert_eq!(done.recv().unwrap(), Err(Failure(1)));
+        assert_eq!(recv(&done), Err(Failure(1)));
     }
 
-    /// Counts stops, to see which engine a call reached.
-    #[derive(Default)]
+    /// Logs its id on stop, to see which engine a call reached.
     struct Counting {
-        stops: Mutex<u32>,
+        id: u32,
+        stops: Arc<Mutex<Vec<u32>>>,
     }
 
     impl Engine for Counting {
@@ -482,7 +518,7 @@ mod tests {
             Ok(())
         }
         fn stop(&self) {
-            *self.stops.lock().unwrap() += 1;
+            self.stops.lock().unwrap().push(self.id);
         }
         fn handle_message(&self, _message: &[u8]) -> Option<Vec<u8>> {
             None
@@ -497,7 +533,14 @@ mod tests {
     fn a_second_provider_object_leaves_the_first_one_running_and_addressable() {
         let engines: Engines<()> =
             Engines { factory: OnceLock::new(), live: Mutex::new(BTreeMap::new()) };
-        assert!(engines.factory.set(Box::new(|()| Box::new(Counting::default()))).is_ok());
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&stops);
+        let next = std::sync::atomic::AtomicU32::new(0);
+        let factory = move |()| -> Box<dyn Engine> {
+            let id = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::new(Counting { id, stops: Arc::clone(&log) })
+        };
+        assert!(engines.factory.set(Box::new(factory)).is_ok());
 
         let (a, old) = engines.replace(10, ()).unwrap();
         assert!(old.is_none());
@@ -512,6 +555,8 @@ mod tests {
         engines.get(10).unwrap().stop();
         engines.remove(10);
         assert!(engines.get(10).is_none());
+        // Only A (id 0) was stopped: not B, and removing A's entry did not stop it again.
+        assert_eq!(*stops.lock().unwrap(), [0]);
         assert!(Arc::ptr_eq(&engines.get(20).unwrap(), &b));
 
         // A reused key (a freed object's address) hands back the stale engine.
@@ -559,9 +604,37 @@ mod tests {
             // The queue is FIFO and single-threaded: wait for both bodies.
             let (sender, receiver) = mpsc::channel();
             queue.post(Box::new(move || sender.send(()).unwrap()));
-            receiver.recv().unwrap();
+            recv(&receiver);
             assert_eq!(*host.log.lock().unwrap(), ["completion", "cancel"]);
         }
+    }
+
+    /// An engine whose start panics, and whose latch release panics too.
+    struct Panicking;
+
+    impl Engine for Panicking {
+        fn start(&self, _options: &StartOptions) -> Result<(), Failure> {
+            panic!("synthetic start panic");
+        }
+        fn start_completion_enqueued(&self) {
+            panic!("synthetic latch panic");
+        }
+        fn stop(&self) {}
+        fn handle_message(&self, _message: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// A panicking engine is a failed start (code 900) that still completes,
+    /// and a panic while releasing the latch does not escape the start thread.
+    #[test]
+    fn a_panicking_engine_completes_the_start_as_a_failure() {
+        let queue = FakeQueue::new();
+        let (sender, receiver) = mpsc::channel();
+        start_body(&*queue, &Panicking, &StartOptions::default(), move |r| {
+            sender.send(r).unwrap();
+        });
+        assert_eq!(recv(&receiver), Err(PANICKED));
     }
 
     /// A completion block copied on the NetworkExtension thread is completed
@@ -579,12 +652,12 @@ mod tests {
         let heap = block2::DynBlock::copy(&block);
         let ok = SendBlock::copy(&heap);
         complete_start(&*queue, ok, Ok(()));
-        let (seen, ran_on) = receiver.recv().unwrap();
+        let (seen, ran_on) = recv(&receiver);
         assert_eq!(seen, None);
         assert_ne!(ran_on, thread::current().id());
         complete_start(&*queue, SendBlock::copy(&heap), Err(Failure(7)));
         assert_eq!(
-            receiver.recv().unwrap().0,
+            recv(&receiver).0,
             Some(("OFTCProvider".to_string(), 7))
         );
     }
