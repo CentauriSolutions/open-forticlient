@@ -100,7 +100,7 @@ define_class!(
                 )
             }));
             match prepared {
-                Ok((options, weak)) => provider::begin_start(weak, options, done),
+                Ok((options, weak)) => provider::begin_start(self.key(), weak, options, done),
                 Err(_) => provider::fail_start(done),
             }
         }
@@ -108,7 +108,7 @@ define_class!(
         #[unsafe(method(stopTunnelWithReason:completionHandler:))]
         fn stop_tunnel(&self, _reason: NEProviderStopReason, completion: &DynBlock<dyn Fn()>) {
             let done = SendBlock::copy(completion);
-            provider::begin_stop(done);
+            provider::begin_stop(self.key(), done);
         }
 
         #[unsafe(method(handleAppMessage:completionHandler:))]
@@ -118,12 +118,17 @@ define_class!(
             completion: Option<&DynBlock<dyn Fn(*mut NSData)>>,
         ) {
             let done = completion.map(SendBlock::copy);
-            provider::begin_message(message.to_vec(), done);
+            provider::begin_message(self.key(), message.to_vec(), done);
         }
     }
 );
 
 impl OftcProvider {
+    /// This object's identity, which keys its engine.
+    fn key(&self) -> provider::Key {
+        std::ptr::from_ref(self) as provider::Key
+    }
+
     fn retain_as_super(&self) -> Retained<NEPacketTunnelProvider> {
         Retained::into_super(self.retain())
     }
