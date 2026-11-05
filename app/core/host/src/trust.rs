@@ -561,3 +561,6 @@ impl TrustPrompt for ChildPrompt<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod loopback;
