@@ -2,7 +2,9 @@
 
 A macOS VPN client for **FortiGate IPsec IKEv2 gateways that use browser SAML
 sign-in**. It lives in the menu bar, keeps more than one VPN connected at a time,
-and reconnects by itself after sleep, lock, and network changes.
+and reconnects after sleep, lock, and network changes. Every reconnect needs a fresh
+browser sign-in (SAML tokens are single use), so you may see a sign-in window when the
+tunnel comes back.
 
 OFTC runs its own IKEv2 and ESP engine inside a NetworkExtension packet tunnel.
 Normal connections do not run Fortinet's daemons or read FortiClient's files;
@@ -21,8 +23,9 @@ the app can import an existing FortiClient profile once, during setup.
   *overlapping* routes between tunnels is not built yet; see the roadmap.)
 - **Menu bar controls.** A row per VPN with its state, Connect/Disconnect,
   per-VPN "Connect at login", and live traffic rates and sparklines while connected.
-- **Survives sleep, lock, and roaming.** A supervisor re-authenticates with fresh
-  SSO when the gateway drops the session; browser sign-ins are queued one at a
+- **Recovers from sleep, lock, and roaming.** When the gateway drops the session, a
+  supervisor starts a new sign-in and reconnects once you complete it in your
+  browser (each attempt needs a fresh single-use token); sign-ins are queued one at a
   time.
 - **Share VPN setups.** `oftc export` (or *Settings → Export VPNs…*) writes your
   profiles to a `.oftc` file; opening that file on a colleague's Mac adds them.
@@ -83,7 +86,7 @@ profiles, Keychain access, browser SAML, VPN configuration, and the reconnect
 supervisor; the provider owns transport, IKEv2/EAP, ESP, routes, and DNS. SAML
 tokens are handed to the provider for a single start and never written down. See
 [docs/architecture.md](docs/architecture.md) and the protocol notes in
-[docs/](docs/).
+[docs/](docs/). If something fails, [docs/support.md](docs/support.md) says what to send.
 
 ## Build from source
 
@@ -92,7 +95,7 @@ touching any installed VPN:
 
 ```sh
 OFTC_BUILD_DIR=/private/tmp/oftc-build-local zsh app/build.sh
-cargo test --offline --manifest-path client/Cargo.toml
+zsh scripts/test-rust.sh
 ```
 
 `app/build.sh` writes only to the build directory and runs the offline checks. It
@@ -106,9 +109,9 @@ has the working conventions.
 
 Working: UDP and TCP outer transport, IKE and CHILD SA rekeying, concurrent
 tunnels, recovery after sleep, SAML re-authentication, the menu bar app, `.oftc`
-sharing, and signed installers. Still open: overlapping-route detection and DNS
-policy across tunnels, IPv6-only/NAT64 acceptance, and an installer test on a
-clean Mac. See [docs/ROADMAP.md](docs/ROADMAP.md).
+sharing, and signed installers. Still open: the live gate for the Rust provider,
+overlapping-route detection and DNS policy across tunnels, IPv6-only/NAT64
+acceptance, and an installer test on a clean Mac. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Acknowledgements
 

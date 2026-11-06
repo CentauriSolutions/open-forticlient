@@ -7,7 +7,8 @@
 - [Host verbs](host-verbs.md): the `OFTCAgent` verbs implemented in Rust and their output and exit codes.
 - [Roadmap](ROADMAP.md): distribution and rollout work.
 - [Releasing](releasing.md): CI, and building, signing and publishing a release.
-- [Swift removal plan](swift-removal-plan.md): Issues 41 to 50, seams, lanes, and hygiene rules.
+- [Swift removal plan](swift-removal-plan.md): #41 to #50: decisions, what is done, what remains.
+- [Support](support.md): what to send when something fails.
 
 ## Historical research
 
