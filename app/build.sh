@@ -62,6 +62,11 @@ cp "$root/assets/OFTCDocument.icns" "$app/Contents/Resources/OFTCDocument.icns"
 mkdir -p "$app/Contents/Resources/en.lproj"
 cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/InfoPlist.strings"
 
+# The UI reaches the host only through Host/HostEdge.swift (docs/ui-edge.md, section 10): the
+# ratchet fails on any new reach around it, and its own test pins that it can fail.
+zsh "$root/check-ui-edge-test.sh"
+zsh "$root/check-ui-edge.sh"
+
 export CARGO_TARGET_DIR="$build/rust-target"
 cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
 # The provider is the Rust OFTCTunnel executable from this workspace build; it
@@ -77,63 +82,58 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/MigrationBridge.swift" \
     "$root/Host/OFTCProfile.swift" \
     "$root/Host/ProfileScope.swift" \
-    "$root/Host/ProfileBundle.swift" \
     "$root/Host/LauncherAlias.swift" \
     "$root/Host/UpdateCheck.swift" \
     "$root/Host/GatewayTrust.swift" \
     "$root/Host/GatewayTrustPrompt.swift" \
     "$root/Host/Onboarding.swift" \
     "$root/Host/LaunchExperience.swift" \
-    "$root/Host/ProviderReadiness.swift" \
     "$root/Host/Welcome.swift" \
     "$root/Host/ControlsWindow.swift" \
+    "$root/Host/HostEdge.swift" \
     "$root/Host/MenuCommand.swift" \
-    "$root/Host/AgentService.swift" \
-    "$root/Host/AgentIntent.swift" \
-    "$root/Host/SupervisorStatus.swift" \
     "$root/Host/MenuModel.swift" \
     "$root/Host/TrafficHistory.swift" \
     "$root/Host/RateSparklineView.swift" \
     "$root/Host/MenuBar.swift" \
-    "$root/support/TrafficStatistics.swift" \
     "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"
 xcrun swiftc -swift-version 5 -target "$target" \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/AgentIntent.swift" \
-    "$root/Host/ProfileBundle.swift" "$root/Host/LauncherAlias.swift" "$root/Host/UpdateCheck.swift" \
-    "$root/Host/check-misc.swift" -o "$build/misc-check"
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/LauncherAlias.swift" \
+    "$root/Host/UpdateCheck.swift" "$root/Host/check-misc.swift" -o "$build/misc-check"
 "$build/misc-check"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
     -o "$build/profile-check"
 "$build/profile-check"
-# The Swift readers still in use (menu, remaining verbs) must accept what the Rust
-# host writes. It stays while any Swift code reads these files.
+# The setup window still reads the profiles the Rust host writes; it must accept them.
+# This goes with that reader when the window moves onto the host's add_profile.
 xcrun swiftc -swift-version 5 -target "$target" \
     -framework Foundation -framework NetworkExtension \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/AgentIntent.swift" \
-    "$root/Host/SupervisorStatus.swift" "$root/Host/check-host-compat.swift" -o "$build/host-compat-check"
+    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/check-host-compat.swift" \
+    -o "$build/host-compat-check"
 "$build/host-compat-check" "$root/core/host/tests/fixtures/rust"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/GatewayTrust.swift" "$root/Host/check-trust-compat.swift" \
     -o "$build/trust-compat-check"
 "$build/trust-compat-check" "$root/core/host/tests/fixtures"
-xcrun swiftc -swift-version 5 -target "$target" \
-    -framework Foundation -framework NetworkExtension \
-    "$root/Host/MenuModel.swift" "$root/Host/AgentIntent.swift" \
-    "$root/Host/TrafficHistory.swift" \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" \
-    "$root/Host/SupervisorStatus.swift" "$root/support/TrafficStatistics.swift" \
-    "$root/Host/check-menu.swift" -o "$build/menu-check"
+xcrun swiftc -swift-version 5 -target "$target" -framework Foundation \
+    "$root/Host/MenuModel.swift" "$root/Host/TrafficHistory.swift" "$root/Host/HostEdge.swift" \
+    "$root/Host/LaunchExperience.swift" "$root/Host/check-menu.swift" -o "$build/menu-check"
 "$build/menu-check"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/LaunchExperience.swift" "$root/Host/check-experience.swift" \
     -o "$build/experience-check"
 "$build/experience-check"
 xcrun swiftc -swift-version 5 -target "$target" \
-    "$root/Host/MenuCommand.swift" "$root/Host/check-menu-command.swift" \
+    "$root/Host/MenuCommand.swift" "$root/Host/HostEdge.swift" "$root/Host/check-menu-command.swift" \
     -o "$build/menu-command-check"
 "$build/menu-command-check"
+# HostEdge against the golden documents core/ui-edge pins and a scripted host on a temporary
+# unix socket (no real host, launchd or Network Extension).
+xcrun swiftc -swift-version 5 -target "$target" \
+    "$root/Host/HostEdge.swift" "$root/Host/check-host-edge.swift" -o "$build/host-edge-check"
+"$build/host-edge-check" "$root/core/ui-edge/tests/golden"
 CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"

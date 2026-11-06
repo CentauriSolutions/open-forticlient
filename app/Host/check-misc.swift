@@ -1,15 +1,14 @@
 import Foundation
 
 // What is left of the old supervisor check once the supervisor, its lease, the SAML lock
-// and gateway trust moved to Rust (cargo test): the Swift readers of profiles and bundles
-// that the menu still uses, and the launcher alias and update halves that stay Swift.
+// and gateway trust moved to Rust (cargo test): the Swift profile reader the setup window
+// still uses, and the launcher alias and update halves that stay Swift.
 @main enum MiscCheck {
     static func main() throws {
         try checkProfiles()
-        try checkProfileBundle()
         try checkLauncherAlias()
         try checkUpdates()
-        print("profile registry, bundle, launcher alias and update checks passed")
+        print("profile registry, launcher alias and update checks passed")
     }
 
     static func checkProfiles() throws {
@@ -27,7 +26,7 @@ import Foundation
         }
 
         // The original single-profile layout migrates into profiles/<id>/ and
-        // keeps its login preference.
+        // keeps its login preference file.
         let legacy = try OFTCProfileStore(bundleID: "test.oftc", directory: root)
         try legacy.save(try OFTCProfile(gateway: "vpn.office.example", samlPort: 9443))
         try Data("{\"connectAtLogin\":true}".utf8)
@@ -38,8 +37,6 @@ import Foundation
         precondition(entries[0].profile.adoptsUnkeyedVPNEntry == true)
         precondition(!FileManager.default.fileExists(atPath: legacy.url.path))
         precondition(!FileManager.default.fileExists(atPath: root.appendingPathComponent("connection-preferences.json").path))
-        precondition(AgentIntent(bundleID: "test.oftc", directory: entries[0].directory)
-            .connectAtLogin(legacyEnabled: false))
         OFTCProfileScope.migrateLegacy(root: root) { _ in nil } // idempotent
         precondition(OFTCProfileScope.entries(root: root).count == 1)
 
@@ -52,42 +49,6 @@ import Foundation
         entries = OFTCProfileScope.entries(root: root)
         precondition(entries.map(\.name) == ["Office VPN", "Warehouse", "Warehouse"])
         precondition(entries[0].profile.adoptsUnkeyedVPNEntry == true && warehouse.profile.adoptsUnkeyedVPNEntry == nil)
-        precondition(!AgentIntent(bundleID: "test.oftc", directory: warehouse.directory)
-            .connectAtLogin(legacyEnabled: false))
-    }
-
-    static func checkProfileBundle() throws {
-        let items = [
-            OFTCProfileBundle.Item(name: "Office VPN", gateway: "vpn.office.example", samlPort: 9443,
-                                   transport: .udp, psk: "psk-one"),
-            OFTCProfileBundle.Item(name: "Warehouse", gateway: "vpn.warehouse.example", samlPort: 9443,
-                                   transport: .tcp, psk: "psk-two"),
-        ]
-        let data = try OFTCProfileBundle(profiles: items).encoded()
-        let decoded = try OFTCProfileBundle.decode(data)
-        precondition(decoded.map(\.profile.displayName) == ["Office VPN", "Warehouse"])
-        precondition(decoded[1].profile.transport == .tcp && decoded[0].profile.samlPort == 9443)
-        precondition(String(data: decoded[0].psk, encoding: .utf8) == "psk-one")
-
-        func fails(_ data: Data, _ expected: OFTCProfileBundle.Failure) {
-            do { _ = try OFTCProfileBundle.decode(data); preconditionFailure("accepted") }
-            catch let failure as OFTCProfileBundle.Failure { precondition(failure == expected) }
-            catch { preconditionFailure("unexpected error") }
-        }
-        func json(_ text: String) -> Data { Data(text.utf8) }
-        fails(json("not json"), .unreadable)
-        fails(json(#"{"format":"other","version":1,"profiles":[]}"#), .wrongFormat)
-        fails(json(#"{"format":"oftc-profiles","version":2,"profiles":[]}"#), .unsupportedVersion)
-        fails(json(#"{"format":"oftc-profiles","version":1,"profiles":[]}"#), .empty)
-        fails(Data(count: OFTCProfileBundle.maxBytes + 1), .tooLarge)
-        // Invalid gateway, empty PSK and NUL in a PSK are all rejected.
-        let bad = { (gateway: String, psk: String) -> Data in
-            let item = OFTCProfileBundle.Item(name: "X", gateway: gateway, samlPort: 9443, transport: .udp, psk: psk)
-            return try! OFTCProfileBundle(profiles: [item]).encoded()
-        }
-        fails(bad("../etc", "psk"), .invalid("X"))
-        fails(bad("vpn.example", ""), .invalid("X"))
-        fails(bad("vpn.example", "a\u{0}b"), .invalid("X"))
     }
 
     static func checkLauncherAlias() throws {

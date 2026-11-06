@@ -5,17 +5,17 @@
 #![cfg(target_os = "macos")]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, CStr};
 use std::io::{stdin, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::process;
 use std::thread;
 
-use oftc_apple::login::{LoginItems, LoginStatus, ServiceLoginItems};
+use oftc_apple::login::ServiceLoginItems;
 use oftc_apple::manager::{NeVpnControl, StartKeys};
 use oftc_apple::sysext::SystemExtensions;
 use oftc_host::acquire::{random_session_id, SamlAcquirer, SystemClock};
-use oftc_host::agent::{agent_item, SystemLaunchctl};
+use oftc_host::agent::SystemLaunchctl;
 use oftc_host::commands::{run, Backends, FortiClientProfile, FortiClientProfiles, Io};
 use oftc_host::env::HostEnv;
 use oftc_host::keychain::SecKeychain;
@@ -189,83 +189,4 @@ pub unsafe extern "C" fn oftc_host_main(
         process::exit(code)
     });
     dispatch2::dispatch_main()
-}
-
-/// The profile registry, per-profile supervisor phase and connect-at-login choice
-/// as one JSON document (`oftc_host::snapshot`), for the menu to read in process
-/// instead of decoding Rust's files itself. Returns a NUL-terminated string to free
-/// with [`oftc_host_free`], or null when the bundle identifier or home is unusable.
-///
-/// # Safety
-/// `bundle_id` must point to a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn oftc_host_snapshot_json(bundle_id: *const c_char) -> *mut c_char {
-    // SAFETY: the caller guarantees a valid string.
-    let bundle_id = unsafe { CStr::from_ptr(bundle_id) }.to_string_lossy();
-    // A panic must not unwind into Swift.
-    panic::catch_unwind(|| {
-        let env = HostEnv::from_process(&bundle_id)?;
-        let text = oftc_host::snapshot::json(
-            env.root(),
-            &|gateway| forticlient_name_for_gateway(FORTICLIENT_VPN_PLIST.as_ref(), gateway),
-            &|| ServiceLoginItems.status(&agent_item()) == LoginStatus::Enabled,
-            std::time::SystemTime::now(),
-        );
-        CString::new(text).ok()
-    })
-    .ok()
-    .flatten()
-    .map_or(std::ptr::null_mut(), CString::into_raw)
-}
-
-/// Frees a string returned by [`oftc_host_snapshot_json`]. Null is ignored.
-///
-/// # Safety
-/// `text` must be null or a pointer returned by this library and not yet freed.
-#[no_mangle]
-pub unsafe extern "C" fn oftc_host_free(text: *mut c_char) {
-    if !text.is_null() {
-        // SAFETY: the caller guarantees it came from `CString::into_raw` here.
-        drop(unsafe { CString::from_raw(text) });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::CString;
-
-    /// The exported read function, called as Swift would: a temporary home holding
-    /// one profile that did not adopt the original layout (so the real login-item
-    /// status is never asked for), the string freed, and null for a missing bundle id.
-    #[test]
-    fn snapshot_round_trips_through_the_c_functions() {
-        let home = std::env::temp_dir().join(format!("oftc-hostlib-{}", std::process::id()));
-        let profile = home.join("Library/Application Support/com.example.oftc/profiles/lab");
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(
-            profile.join("profile.json"),
-            r#"{"gateway":"lab.example.com","samlPort":8443,"transport":"tcp","version":1}"#,
-        )
-        .unwrap();
-        std::env::set_var("HOME", &home);
-        let bundle = CString::new("com.example.oftc").unwrap();
-        // SAFETY: valid strings; the result is freed once.
-        let text = unsafe {
-            let raw = oftc_host_snapshot_json(bundle.as_ptr());
-            assert!(!raw.is_null());
-            let text = CStr::from_ptr(raw).to_str().unwrap().to_owned();
-            oftc_host_free(raw);
-            oftc_host_free(std::ptr::null_mut());
-            text
-        };
-        assert_eq!(
-            text,
-            r#"{"profiles":[{"id":"lab","name":"lab.example.com","gateway":"lab.example.com","samlPort":8443,"transport":"tcp","adoptsUnkeyedVPNEntry":false,"phase":null,"connectAtLogin":false}]}"#
-        );
-        let empty = CString::new("").unwrap();
-        // SAFETY: a valid string.
-        assert!(unsafe { oftc_host_snapshot_json(empty.as_ptr()) }.is_null());
-        let _ = std::fs::remove_dir_all(&home);
-    }
 }

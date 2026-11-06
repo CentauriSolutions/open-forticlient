@@ -1,0 +1,17 @@
+# What the UI still does around HostEdge.swift: file, pattern, lines matched. Only Onboarding.swift
+# (the setup window, which moves onto the host's add_profile in the UI-feature PR) and
+# UpdateCheck.swift (the update check, which moves to the host's check_update) are left.
+# This file may only shrink; check-ui-edge.sh fails on any new match or higher count, and
+# CI fails if this file gains a row or a count in a pull request. Tab separated.
+Host/Onboarding.swift	import Security	1
+Host/Onboarding.swift	import SystemExtensions	1
+Host/Onboarding.swift	import ServiceManagement	1
+Host/Onboarding.swift	import NetworkExtension	1
+Host/Onboarding.swift	SecItem	3
+Host/Onboarding.swift	kSec	10
+Host/Onboarding.swift	NETunnelProviderManager	3
+Host/Onboarding.swift	saveToPreferences	2
+Host/Onboarding.swift	loadAllFromPreferences	2
+Host/Onboarding.swift	SMAppService	1
+Host/Onboarding.swift	OSSystemExtension	11
+Host/UpdateCheck.swift	URLSession	1

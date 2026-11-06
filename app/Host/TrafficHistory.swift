@@ -5,7 +5,7 @@ enum TrafficHistoryClock {
     private static let origin = clock.now
     static var now: TimeInterval {
         // ContinuousClock includes sleep, so a minute-old graph expires even
-        // when the Mac sleeps. Provider uptime is only used for rate deltas.
+        // when the Mac sleeps. The host derives the rates.
         let start = origin
         let elapsed = start.duration(to: clock.now).components
         return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
@@ -21,16 +21,17 @@ struct TrafficRatePoint {
 struct TrafficHistory {
     static let duration: TimeInterval = 60
     static let maximumSamples = 120
-    private(set) var sessionID: UUID?
+    /// The host's short id of the provider connection the points belong to.
+    private(set) var sessionID: String?
     private(set) var points: [TrafficRatePoint] = []
 
     mutating func reset() { self = TrafficHistory() }
 
-    mutating func record(_ sample: TrafficSnapshot, receiving: Double?, sending: Double?, at time: TimeInterval) {
-        guard sample.valid, time.isFinite, time >= 0 else { return }
-        if sessionID != sample.sessionID {
+    mutating func record(session: String, receiving: Double?, sending: Double?, at time: TimeInterval) {
+        guard time.isFinite, time >= 0 else { return }
+        if sessionID != session {
             reset()
-            sessionID = sample.sessionID
+            sessionID = session
         }
         guard points.last.map({ time > $0.time }) ?? true else { return }
         func valid(_ rate: Double?) -> Double? {

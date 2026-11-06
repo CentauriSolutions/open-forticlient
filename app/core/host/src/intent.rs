@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(req, serde_json::json!({"connect": true, "created": 7.0}));
     }
 
-    /// The Swift `AgentIntent` in `check-host-compat.swift` decodes this file.
+    /// The Swift `AgentIntent` that once decoded this file is gone; the bytes stay pinned.
     #[test]
     fn writes_the_preferences_the_swift_reader_checks() {
         let dir = TempDir::new("intent-golden");

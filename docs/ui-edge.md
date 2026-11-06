@@ -424,6 +424,21 @@ finished `HostStatus` values. No view waits on the socket.
 5. `Quit` still disconnects tunnels first: with the host down it cannot, and
    says so instead of hanging (the existing `quitAfterStop` timeout applies).
 
+PR 6 settled, where this section was silent:
+
+- Nothing registered the host service (PR 5 only bundled it), so a hidden verb
+  `host register` (`agent::register_host`, then a kickstart; exit 4 when macOS holds it for
+  approval) is what `HostEdge` runs, directly, when `launchctl kickstart` finds no service.
+  Approval shows as `unavailable(approval)` with a row linking to Login Items; it is not retried
+  into a loop. `oftc setup` does not register the service yet.
+- The UI starts the host once per outage (kickstart, then register), not on every retry; a
+  window opening or a wake starts the count again. An unsupported protocol is not retried.
+- `HostEdge` ignores a `status` whose `seq` is not above the last one of that connection and
+  accepts the first after a reconnect, since a restarted host counts from 1.
+- The `.oftc` import and export keep the old file hand-offs: the menu app copies the user's
+  file into a private scratch directory and gives the host that path (and the host exports
+  to a scratch path the menu copies out), so the same process as before touches the user's folders.
+
 ## 8. How it composes with the merged host code
 
 `core/host` already provides what the server serves; the server adds transport,

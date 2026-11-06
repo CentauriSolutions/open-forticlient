@@ -114,6 +114,7 @@ pub const VERBS: &[Verb] = &[
     hidden("unregister-menu-login"),
     hidden("host serve"),
     hidden("host restart"),
+    hidden("host register"),
 ];
 
 /// The usage text, as `OFTCAgent` prints it for a bad command line.
@@ -144,6 +145,8 @@ pub enum Command {
     HostServe,
     /// `host restart`: `launchctl kickstart -k` of the host service.
     HostRestart,
+    /// `host register`: registers the host service with the system and starts it.
+    HostRegister,
     ListProfiles,
     ShowProfile,
     HasPsk,
@@ -243,6 +246,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("unregister-menu-login", []) => Command::UnregisterMenuLogin,
         ("host", [sub]) if sub == "serve" => Command::HostServe,
         ("host", [sub]) if sub == "restart" => Command::HostRestart,
+        ("host", [sub]) if sub == "register" => Command::HostRegister,
         ("list-profiles", []) => Command::ListProfiles,
         ("show-profile", []) => Command::ShowProfile,
         ("has-psk", []) => Command::HasPsk,
@@ -559,6 +563,29 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                     "Could not restart OFTC host; is its service registered?",
                     1,
                 )
+            }
+        }
+        Command::HostRegister => {
+            // The UI's way to bring the service up on a Mac where nothing registered it yet:
+            // the same policy as `register-agent`, then a start. Exit 4 means macOS wants the
+            // user to allow it in Login Items; the UI says so instead of retrying.
+            match agent::register_host(backends.login, backends.launchctl) {
+                Ok(()) if backends.launchctl.kickstart(agent::HOST_LABEL) => {
+                    finish(io, "OFTC host service registered", 0)
+                }
+                Ok(()) => finish(
+                    io,
+                    "OFTC host service registered, but it did not start",
+                    1,
+                ),
+                Err(e) => {
+                    let approval = agent::host_status(backends.login) == "requires-approval";
+                    finish(
+                        io,
+                        &format!("Could not register OFTC host service: {e}"),
+                        if approval { 4 } else { 1 },
+                    )
+                }
             }
         }
         Command::LoginSettings => {
@@ -1145,6 +1172,10 @@ mod tests {
                 vec!["--profile", "lab", "host", "restart"],
                 invocation(Some("lab"), Command::HostRestart),
             ),
+            (
+                vec!["host", "register"],
+                invocation(None, Command::HostRegister),
+            ),
             (vec!["host"], Err(ParseError::Usage)),
             (vec!["host", "serve", "x"], Err(ParseError::Usage)),
             (vec!["host", "stop"], Err(ParseError::Usage)),
@@ -1584,7 +1615,7 @@ mod tests {
 
     /// The usage text is a protocol too (`oftc` and the install scripts print it): the
     /// hidden verbs (`login-settings`, `unregister-menu-login`, `host serve`,
-    /// `host restart`) must never appear in it, and nothing else may change.
+    /// `host restart`, `host register`) must never appear in it, and nothing else may change.
     #[test]
     fn usage_text_is_pinned() {
         assert_eq!(
@@ -1609,6 +1640,30 @@ mod tests {
         h.expect(
             &["host", "restart"],
             "Could not restart OFTC host; is its service registered?\n",
+            1,
+        );
+    }
+
+    /// `host register` registers the service, then starts it; a pending approval is exit 4 so
+    /// the UI can say what to allow rather than retry.
+    #[test]
+    fn host_register_registers_and_starts_the_service() {
+        let h = Harness::new();
+        let host = crate::agent::host_item();
+        h.login.set_status(&host, LoginStatus::NotRegistered);
+        h.expect(&["host", "register"], "OFTC host service registered\n", 0);
+        assert_eq!(h.launchctl.calls(), [crate::agent::HOST_LABEL]);
+        assert_eq!(h.launchctl.kicked(), [crate::agent::HOST_LABEL]);
+        h.login.set_status(&host, LoginStatus::RequiresApproval);
+        h.expect(
+            &["host", "register"],
+            "Could not register OFTC host service: OFTC host service is requires-approval\n",
+            4,
+        );
+        h.login.set_status(&host, LoginStatus::Unknown);
+        h.expect(
+            &["host", "register"],
+            "Could not register OFTC host service: OFTC host service is unknown\n",
             1,
         );
     }

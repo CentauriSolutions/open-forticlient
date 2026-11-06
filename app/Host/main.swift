@@ -2,17 +2,14 @@ import AppKit
 import Foundation
 
 // The UI edge. Every host verb is Rust (liboftc_hostlib.a: core/host); only what needs
-// AppKit, bookmarks or URLSession stays here. Keep `swift` rows of `VERBS` in
+// AppKit, bookmarks or URLSession stays here. The menu reads nothing from the host's files:
+// it asks the host over its socket (HostEdge.swift). Keep `swift` rows of `VERBS` in
 // core/host/src/commands.rs equal to the verbs below; a Rust test compares them.
 private let appID = Bundle.main.bundleIdentifier ?? ""
 
 @_silgen_name("oftc_host_main")
 private func oftcHostMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
                           _ bundleID: UnsafePointer<CChar>) -> Never
-@_silgen_name("oftc_host_snapshot_json")
-private func oftcHostSnapshot(_ bundleID: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("oftc_host_free")
-private func oftcHostFree(_ text: UnsafeMutablePointer<CChar>?)
 
 private func finish(_ message: String, code: Int32 = 0) -> Never {
     print(message)
@@ -20,17 +17,11 @@ private func finish(_ message: String, code: Int32 = 0) -> Never {
     exit(code)
 }
 
-// The menu reads the profile files itself; asking the host for its snapshot first
-// moves the single-profile layout into profiles/<id>/, as every start has done.
-private func migrateLegacyLayout() { oftcHostFree(appID.withCString { oftcHostSnapshot($0) }) }
-
 let args = Array(CommandLine.arguments.dropFirst())
 switch (args.first ?? "", args.count) {
 case ("", _):
-    migrateLegacyLayout()
     OFTCMenuBar.run(appID: appID)
 case ("--after-install", 1):
-    migrateLegacyLayout()
     OFTCMenuBar.run(appID: appID, afterInstall: true)
 case ("preview-menu", 2):
     guard let state = MenuConnectionState(rawValue: args[1]) else { finish("Invalid preview state", code: 2) }

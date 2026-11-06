@@ -1,23 +1,12 @@
-//! The read the menu makes of the host's files: every profile with what its
-//! supervisor is doing and whether it connects at login.
+//! What the host reads of its own files for each profile: its settings, what its
+//! supervisor is doing and whether it connects at login. The status socket serves this
+//! (`serve::collect`); the UI reads none of these files itself.
 //!
-//! Rust owns these formats (`profile.json`, the status record, the connect-at-login
-//! choice), so the UI asks for one JSON document instead of decoding them itself:
-//!
-//! ```json
-//! {"profiles":[{"id":"office","name":"Office","gateway":"vpn.example.com",
-//!   "samlPort":9443,"transport":"udp","adoptsUnkeyedVPNEntry":false,
-//!   "phase":null,"connectAtLogin":false}]}
-//! ```
-//!
-//! `phase` is `null` when no supervisor stands behind a status record. The original
-//! single-profile layout is migrated first (idempotent), as the menu has always done
-//! at startup.
+//! `phase` is `None` when no supervisor stands behind a status record. The original
+//! single-profile layout is migrated by `commands::run` before anything reads it.
 
 use std::path::Path;
 use std::time::SystemTime;
-
-use serde::Serialize;
 
 use crate::intent;
 use crate::profile::Transport;
@@ -39,7 +28,7 @@ pub struct ProfileFacts {
 /// Every profile with what its supervisor is doing and whether it connects at
 /// login. `agent_enabled` is asked at most once per call, and only if a profile
 /// adopted the original layout (the one kind that inherits it). The original layout
-/// is not migrated here; [`json`] does that first.
+/// is not migrated here.
 pub fn facts(root: &Path, agent_enabled: &dyn Fn() -> bool, now: SystemTime) -> Vec<ProfileFacts> {
     let mut agent: Option<bool> = None;
     registry::entries(root)
@@ -62,58 +51,12 @@ pub fn facts(root: &Path, agent_enabled: &dyn Fn() -> bool, now: SystemTime) -> 
         .collect()
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Item {
-    id: String,
-    name: String,
-    gateway: String,
-    saml_port: u32,
-    transport: &'static str,
-    #[serde(rename = "adoptsUnkeyedVPNEntry")]
-    adopts_unkeyed_vpn_entry: bool,
-    phase: Option<Phase>,
-    connect_at_login: bool,
-}
-
-#[derive(Serialize)]
-struct Snapshot {
-    profiles: Vec<Item>,
-}
-
-/// The snapshot as JSON. `agent_enabled` says whether the login agent is registered
-/// and enabled (see [`facts`]).
-pub fn json(
-    root: &Path,
-    legacy_name: &dyn Fn(&str) -> Option<String>,
-    agent_enabled: &dyn Fn() -> bool,
-    now: SystemTime,
-) -> String {
-    registry::migrate_legacy(root, legacy_name);
-    let profiles = facts(root, agent_enabled, now)
-        .into_iter()
-        .map(|facts| Item {
-            id: facts.id,
-            name: facts.name,
-            gateway: facts.gateway,
-            saml_port: facts.saml_port,
-            transport: facts.transport.as_str(),
-            adopts_unkeyed_vpn_entry: facts.adopts_unkeyed_vpn_entry,
-            phase: facts.phase,
-            connect_at_login: facts.connect_at_login,
-        })
-        .collect();
-    serde_json::to_string(&Snapshot { profiles })
-        .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lease::SupervisorLease;
     use crate::profile::testutil::{fixture, TempDir};
     use crate::profile::{Profile, Transport};
-    use serde_json::{json, Value};
     use std::cell::Cell;
     use std::fs;
 
@@ -121,7 +64,7 @@ mod tests {
     fn lists_profiles_with_phase_and_login_choice() {
         let dir = TempDir::new("snapshot");
         let root = &dir.0;
-        // A legacy layout (adopted, stored choice on), migrated by the snapshot itself.
+        // A legacy layout (adopted, stored choice on), migrated first as `run` does.
         for file in ["profile.json", "connection-preferences.json"] {
             fs::create_dir_all(root).unwrap();
             fs::copy(fixture("swift/legacy-root").join(file), root.join(file)).unwrap();
@@ -144,35 +87,31 @@ mod tests {
             asked.set(asked.get() + 1);
             true
         };
-        let text = json(root, &office, &agent, now);
-        let value: Value = serde_json::from_str(&text).unwrap();
+        registry::migrate_legacy(root, &office);
+        let rows = |facts: Vec<ProfileFacts>| -> Vec<(String, String, bool, Option<Phase>, bool)> {
+            facts
+                .into_iter()
+                .map(|f| {
+                    (f.id, f.name, f.adopts_unkeyed_vpn_entry, f.phase, f.connect_at_login)
+                })
+                .collect()
+        };
         assert_eq!(
-            value,
-            json!({"profiles": [
-                {"id": "example-office", "name": "Example Office", "gateway": "vpn.example.com",
-                 "samlPort": 9443, "transport": "tcp", "adoptsUnkeyedVPNEntry": true,
-                 "phase": null, "connectAtLogin": true},
-                {"id": "lab", "name": "Lab", "gateway": "lab.example.com",
-                 "samlPort": 8443, "transport": "tcp", "adoptsUnkeyedVPNEntry": false,
-                 "phase": "connected", "connectAtLogin": false},
-            ]}),
-            "{text}"
+            rows(facts(root, &agent, now)),
+            [
+                ("example-office".into(), "Example Office".into(), true, None, true),
+                ("lab".into(), "Lab".into(), false, Some(Phase::Connected), false),
+            ]
         );
         // The agent is asked once however many profiles adopted the original layout.
         assert_eq!(asked.get(), 1);
         let office_dir = registry::entry_directory(root, "example-office");
         fs::remove_file(office_dir.join("connection-preferences.json")).unwrap();
-        let text = json(root, &office, &agent, now);
+        let again = facts(root, &agent, now);
         assert_eq!(asked.get(), 2);
-        assert!(
-            text.contains(r#""phase":null,"connectAtLogin":true"#),
-            "{text}"
-        );
-        // With no profiles the document is still well formed.
+        assert_eq!((again[0].phase, again[0].connect_at_login), (None, true));
+        // With no profiles there is nothing to list, and the agent is never asked.
         let empty = TempDir::new("snapshot-empty");
-        assert_eq!(
-            json(&empty.0, &|_| None, &|| false, now),
-            r#"{"profiles":[]}"#
-        );
+        assert!(facts(&empty.0, &|| panic!("no profile adopted the layout"), now).is_empty());
     }
 }

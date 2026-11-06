@@ -2,8 +2,6 @@ import AppKit
 import Carbon
 import Darwin
 import Foundation
-import NetworkExtension
-import ServiceManagement
 import UniformTypeIdentifiers
 
 enum TunnelMenuIcon {
@@ -223,6 +221,9 @@ final class OFTCMenuViewController: NSViewController {
     var onAddVPN: (() -> Void)?
     var onSettings: ((NSButton) -> Void)?
     var onQuit: (() -> Void)?
+    var onService: (() -> Void)?
+    private let serviceLabel = NSTextField(wrappingLabelWithString: "")
+    private let serviceButton = NSButton(title: "Start service", target: nil, action: nil)
     private let noticeLabel = NSTextField(wrappingLabelWithString: "")
     private let updateBanner = NSStackView()
     private let updateLabel = NSTextField(labelWithString: "")
@@ -233,6 +234,7 @@ final class OFTCMenuViewController: NSViewController {
     private let disconnectAll = NSButton(title: "Disconnect all", target: nil, action: nil)
     private let addButton = NSButton(title: "Add VPN…", target: nil, action: nil)
     private let quitButton = NSButton(title: "Quit OFTC", target: nil, action: nil)
+    private var serviceRow: NSStackView?
     private var rows: [String: TunnelRowView] = [:]
     private var shownIDs: [String] = []
 
@@ -294,6 +296,20 @@ final class OFTCMenuViewController: NSViewController {
         updateBanner.isHidden = true
         add(updateBanner)
 
+        serviceLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        serviceLabel.maximumNumberOfLines = 3
+        serviceButton.bezelStyle = .rounded
+        serviceButton.controlSize = .small
+        serviceButton.target = self
+        serviceButton.action = #selector(serviceTapped)
+        let service = NSStackView(views: [serviceLabel, serviceButton])
+        service.orientation = .vertical
+        service.alignment = .leading
+        service.spacing = 6
+        service.isHidden = true
+        serviceRow = service
+        add(service)
+
         noticeLabel.font = .systemFont(ofSize: 12)
         noticeLabel.textColor = .systemRed
         noticeLabel.maximumNumberOfLines = 3
@@ -344,7 +360,12 @@ final class OFTCMenuViewController: NSViewController {
         updateBanner.isHidden = presentation.update == nil
         noticeLabel.stringValue = presentation.notice ?? ""
         noticeLabel.isHidden = presentation.notice == nil
-        emptyLabel.isHidden = !presentation.tunnels.isEmpty
+        serviceRow?.isHidden = presentation.service.message == nil
+        serviceLabel.stringValue = presentation.service.message ?? ""
+        serviceButton.title = presentation.service.button ?? ""
+        serviceButton.isHidden = presentation.service.button == nil
+        rowsStack.alphaValue = presentation.service == .ready ? 1 : 0.5 // the last document, greyed
+        emptyLabel.isHidden = !presentation.tunnels.isEmpty || presentation.service != .ready
         let ids = presentation.tunnels.map(\.id)
         if ids != shownIDs {
             for old in rowsStack.arrangedSubviews { rowsStack.removeArrangedSubview(old); old.removeFromSuperview() }
@@ -373,8 +394,8 @@ final class OFTCMenuViewController: NSViewController {
         connectAll.isEnabled = !presentation.busy && presentation.tunnels.contains { !$0.state.active && $0.state != .setup }
         disconnectAll.isEnabled = !presentation.busy && presentation.anyActive
         addButton.isEnabled = !presentation.busy || presentation.anyActive
-        quitButton.title = presentation.anyActive ? "Disconnect and Quit OFTC" : "Quit OFTC"
-        quitButton.isEnabled = !presentation.busy
+        quitButton.title = presentation.anyActive && presentation.service == .ready ? "Disconnect and Quit OFTC" : "Quit OFTC"
+        quitButton.isEnabled = !presentation.busy || presentation.service != .ready
         view.layoutSubtreeIfNeeded()
     }
 
@@ -385,6 +406,7 @@ final class OFTCMenuViewController: NSViewController {
     @objc private func addTapped() { onAddVPN?() }
     @objc private func showSettings(_ sender: NSButton) { onSettings?(sender) }
     @objc private func quit() { onQuit?() }
+    @objc private func serviceTapped() { onService?() }
 }
 
 private extension NSBox {
@@ -395,42 +417,52 @@ private extension NSBox {
     }
 }
 
-// Everything the menu tracks for one profile.
+// Everything the menu tracks for one profile: the host's last word about it, plus the display
+// state the menu keeps itself (a stop it just asked for, the last failure, the traffic ring).
 private final class TunnelRuntime {
-    var entry: OFTCProfileEntry
-    var manager: NETunnelProviderManager?
-    var statusError: String?
+    var profile: HostProfile
     var errorMessage: String?
     var stoppingSince: Date?
-    var command: MenuCommand?
-    var autoStart = false
-    var traffic = TrafficRates()
+    var busy = false
+    var receiving: Double?
+    var sending: Double?
+    var latest: HostTraffic?
     var trafficHistory = TrafficHistory()
-    var trafficEpoch = 0
-    var trafficPending = false
     var trafficReceivedAt: Date?
-    var connectedDate: Date?
+    var lastSampleSeq: UInt64 = 0
+    var connectedSince: Date?
     var state = MenuConnectionState.disconnected
 
-    init(entry: OFTCProfileEntry) { self.entry = entry }
+    init(profile: HostProfile) { self.profile = profile }
+
+    // A sample older than the last one seen is dropped; the host's counter is one per host.
+    func ingest(_ sample: HostTraffic) {
+        guard sample.sampleSeq > lastSampleSeq else { return }
+        lastSampleSeq = sample.sampleSeq
+        latest = sample
+        receiving = sample.rxRate
+        sending = sample.txRate
+        trafficReceivedAt = Date()
+        trafficHistory.record(session: sample.session, receiving: sample.rxRate, sending: sample.txRate,
+                              at: TrafficHistoryClock.now)
+    }
 
     func resetTraffic(clearHistory: Bool = false) {
-        trafficEpoch += 1
-        trafficPending = false
         trafficReceivedAt = nil
+        receiving = nil
+        sending = nil
         if clearHistory {
-            traffic.reset()
+            latest = nil
             trafficHistory.reset()
         } else {
-            traffic.markUnavailable()
             trafficHistory.markUnavailable(at: TrafficHistoryClock.now)
         }
     }
 }
 
-// The menu observes state; only the existing CLI/supervisors start or stop a
-// tunnel. Preview mode never constructs a manager, reads a profile or Keychain,
-// registers a login service, or invokes a connection command.
+// The menu shows what the host says (HostEdge) and asks it to act; it reads no file and
+// holds no Network Extension object. Preview mode never creates the edge, so it
+// reaches no host and invokes nothing.
 final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let appID: String
     private let preview: MenuConnectionState?
@@ -439,18 +471,16 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var item: NSStatusItem?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
-    private var statusObservers: [NSObjectProtocol] = []
-    private var statusObserverKey = ""
     private var menuLock: Int32 = -1
+    private var edge: HostEdge?
+    private var edgeActive = true
+    private var service = ServiceState.starting
+    private var loginMenuItem = HostLoginState.notFound
     private var runtimes: [String: TunnelRuntime] = [:]
     private var order: [String] = []
     private var presentation = MenuPresentation()
-    private var refreshEpoch = 0
-    private var refreshPending = false
-    private var ticks = 0
-    private static let safetyReloadTicks = 600
     private var globalError: String?
-    private var bulkCommand: MenuCommand?
+    private var bulkBusy = false
     private var onboarding: OFTCOnboarding?
     private var updateOffer: UpdateOffer?
     private var updateTimer: Timer?
@@ -459,26 +489,21 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let afterInstall: Bool
     private var automaticLaunch = false
     private var launchExperiencePending = true
+    private var loginDefaultPending = true
     private var welcome: OFTCWelcome?
     private var controls: OFTCControlsWindow?
     private var applicationQuitItem: NSMenuItem?
     private var welcomeIsUpgrade = false
-    private let componentProbe = ProviderReadiness()
     private var componentState = VPNComponentState.checking
-    private var componentCheckPending = false
-    private var root: URL { OFTCProfileScope.defaultRoot(bundleID: appID) }
+    private var supportDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/\(appID)", isDirectory: true)
+    }
     private var updateStore: UpdateStore { UpdateStore(directory: experienceStore.directory) }
-    private var experienceStore: LaunchExperienceStore {
-        LaunchExperienceStore(directory: AgentIntent(bundleID: appID).directory)
-    }
+    private var experienceStore: LaunchExperienceStore { LaunchExperienceStore(directory: supportDirectory) }
     private var hostBuild: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "" }
-    private var providerBuild: String {
-        let url = Bundle.main.bundleURL.appendingPathComponent(
-            "Contents/Library/SystemExtensions/\(appID).provider.systemextension/Contents/Info.plist")
-        return (NSDictionary(contentsOf: url)?["CFBundleVersion"] as? String) ?? ""
-    }
     private var orderedRuntimes: [TunnelRuntime] { order.compactMap { runtimes[$0] } }
-    private var configured: Bool { runtimes.values.contains { $0.manager?.isEnabled == true } }
+    private var configured: Bool { runtimes.values.contains { $0.state != .setup } }
 
     init(appID: String, preview: MenuConnectionState? = nil, afterInstall: Bool = false) {
         self.appID = appID
@@ -509,7 +534,6 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         captureLaunchReason()
         if preview == nil {
             DispatchQueue.global(qos: .utility).async { LauncherAlias.ensure() }
-            applyMenuLoginDefault()
             scheduleUpdateChecks()
         }
         if preview == nil, !acquireMenuLock() {
@@ -534,18 +558,11 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             showPopover()
             return
         }
-        // Each cached manager is the source of truth for its tunnel: status
-        // changes are read from it, and a full reload happens only when a
-        // profile has no manager yet, on a configuration change, after wake,
-        // on user actions, and as a rare safety net.
-        syncStatusObservers()
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .NEVPNConfigurationChange, object: nil, queue: .main) { [weak self] _ in
-                self?.refresh()
-            })
+        startEdge()
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.refresh()
+                self?.edge?.retryNow()
+                self?.edge?.refresh()
             })
         for suffix in ["show-menu", "quit-menu"] {
             let token = DistributedNotificationCenter.default().addObserver(
@@ -557,34 +574,51 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
-        checkComponent()
-        refresh()
+        // The first document normally ends the launch wait; this is the same ten-second bound
+        // the menu always had when the system does not answer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.finishInitialExperience() }
+        reconcile()
     }
 
-    // Status observers are scoped to the connections this menu actually shows,
-    // one observer per connection. Never observe with object: nil: every
-    // loadAllFromPreferences then leaks about 3 mach ports in this process
-    // (Issue 038).
-    private func syncStatusObservers() {
-        let connections: [NEVPNConnection] = orderedRuntimes.compactMap { $0.manager?.connection }
-        let key = connections.map { String(UInt(bitPattern: ObjectIdentifier($0).hashValue)) }.joined(separator: ",")
-        guard key != statusObserverKey else { return }
-        statusObserverKey = key
-        statusObservers.forEach { NotificationCenter.default.removeObserver($0) }
-        statusObservers = []
-        let handler: (Notification) -> Void = { [weak self] note in
+    private func startEdge() {
+        let configuration = HostEdge.Configuration(
+            socketPath: HostEdge.socketPath(bundleID: appID),
+            clientVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
+            clientBuild: hostBuild)
+        let created = HostEdge(configuration: configuration,
+                               starter: LaunchctlStarter(label: appID + ".host", executable: Bundle.main.executableURL))
+        created.onAvailability = { [weak self] availability in
             guard let self else { return }
-            self.checkComponent()
-            if self.runtimes.values.contains(where: { $0.manager?.connection === (note.object as AnyObject?) }) {
-                self.reconcile()
-            } else if self.runtimes.values.contains(where: { $0.manager == nil }) {
-                self.refresh()
-            }
+            self.service = ServiceState(availability)
+            // A restarted host numbers its traffic samples from one again.
+            if availability == .ready { for runtime in self.runtimes.values { runtime.lastSampleSeq = 0 } }
+            self.reconcile()
         }
-        for connection in connections {
-            statusObservers.append(NotificationCenter.default.addObserver(
-                forName: .NEVPNStatusDidChange, object: connection, queue: .main, using: handler))
+        created.onStatus = { [weak self] status in self?.apply(status) }
+        created.onTraffic = { [weak self] event in
+            guard let self, let runtime = self.runtimes[event.profile] else { return }
+            runtime.ingest(event.sample)
+            self.reconcile()
         }
+        edge = created
+        created.start()
+    }
+
+    // Reconciles the runtime set with the host's document.
+    private func apply(_ status: HostStatus) {
+        loginMenuItem = status.login.menuItem
+        componentState = VPNComponentState(status.component.state)
+        for profile in status.profiles {
+            if let existing = runtimes[profile.id] { existing.profile = profile }
+            else { runtimes[profile.id] = TunnelRuntime(profile: profile) }
+            if let sample = profile.traffic { runtimes[profile.id]?.ingest(sample) }
+        }
+        let ids = status.profiles.map(\.id)
+        for id in runtimes.keys where !ids.contains(id) { runtimes[id] = nil }
+        order = ids
+        applyMenuLoginDefault()
+        reconcile()
+        finishInitialExperience()
     }
 
     private func configureActions(_ controller: OFTCMenuViewController) {
@@ -597,6 +631,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.onAddVPN = { [weak self] in self?.showSetup() }
         controller.onSettings = { [weak self] button in self?.showSettings(button) }
         controller.onQuit = { [weak self] in self?.quit() }
+        controller.onService = { [weak self] in self?.serviceAction() }
     }
 
     private func installApplicationMenu() {
@@ -621,7 +656,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func acquireMenuLock() -> Bool {
-        let directory = AgentIntent(bundleID: appID).directory
+        let directory = supportDirectory
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
@@ -631,84 +666,28 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return menuLock >= 0 && flock(menuLock, LOCK_EX | LOCK_NB) == 0
     }
 
-    // Reconciles the runtime set with the profiles on disk.
-    private func syncProfiles() {
-        let entries = OFTCProfileScope.entries(root: root)
-        let ids = entries.map(\.id)
-        for entry in entries {
-            if let existing = runtimes[entry.id] { existing.entry = entry }
-            else { runtimes[entry.id] = TunnelRuntime(entry: entry) }
-        }
-        for id in runtimes.keys where !ids.contains(id) { runtimes[id] = nil }
-        order = ids
-        for runtime in runtimes.values { runtime.autoStart = OFTCAgentService.connectAtLogin(runtime.entry) }
-    }
-
-    private func refresh() {
-        guard !refreshPending else { return }
-        refreshPending = true
-        refreshEpoch += 1
-        let epoch = refreshEpoch
-        syncProfiles()
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
-            DispatchQueue.main.async {
-                guard let self, self.refreshEpoch == epoch else { return }
-                self.refreshPending = false
-                for runtime in self.runtimes.values {
-                    let matching = OFTCProfileScope.manager(for: runtime.entry, in: managers ?? [],
-                                                            providerID: self.appID + ".provider")
-                    if error != nil || matching.count > 1 {
-                        runtime.manager = nil
-                        runtime.statusError = "Could not read a single VPN configuration for \(runtime.entry.name). Check VPN settings."
-                    } else {
-                        runtime.manager = matching.first
-                        runtime.statusError = nil
-                    }
-                }
-                self.syncStatusObservers()
-                self.reconcile()
-                self.finishInitialExperience()
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-            guard let self, self.refreshPending, self.refreshEpoch == epoch else { return }
-            self.refreshEpoch += 1
-            self.refreshPending = false
-            for runtime in self.runtimes.values {
-                runtime.manager = nil
-                runtime.statusError = "VPN status is unavailable. Open VPN settings and try again."
-                runtime.resetTraffic()
-            }
-            self.reconcile()
-            self.finishInitialExperience()
-        }
-    }
-
     private func finishInitialExperience() {
-        guard launchExperiencePending else { return }
+        guard launchExperiencePending, preview == nil else { return }
         launchExperiencePending = false
         if !automaticLaunch { showLaunchExperience(forceWelcome: afterInstall) }
     }
 
+    // The edge retries only while something of the menu is on screen, except while the first
+    // document is awaited: at login the menu and the host start together, and the status item
+    // must not stay stale because the host was a second late.
     private func tick() {
-        ticks += 1
-        syncStatusObservers()
-        if ticks % 5 == 0 {
-            let before = order
-            syncProfiles()
-            if before != order || runtimes.values.contains(where: { $0.manager == nil })
-                || ticks % Self.safetyReloadTicks == 0 { refresh() }
-        }
+        let visible = popover.isShown || controls?.window?.isVisible == true
+            || welcome?.window?.isVisible == true || onboarding != nil || launchExperiencePending
+        if visible != edgeActive { edgeActive = visible; edge?.setActive(visible) }
         reconcile()
-        for runtime in orderedRuntimes { sampleTraffic(runtime) }
     }
 
     private func tunnelPresentation(_ runtime: TunnelRuntime) -> TunnelPresentation {
-        let phase = SupervisorStatusStore(directory: runtime.entry.directory).read()?.phase
-        let status = runtime.manager?.connection.status
+        let profile = runtime.profile
+        let hostState = MenuConnectionState(profile.state)
         if let since = runtime.stoppingSince {
-            if (status == .disconnected || status == .invalid || runtime.manager == nil),
-               phase == nil || phase == .stopped || phase == .failed {
+            // The host's document is the truth that ends the optimistic "Disconnecting".
+            if [.disconnected, .setup, .attention].contains(hostState) {
                 runtime.stoppingSince = nil
             } else if Date().timeIntervalSince(since) > 20 {
                 runtime.stoppingSince = nil
@@ -716,51 +695,50 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 runtime.errorMessage = "Could not confirm disconnection. Check VPN settings."
             }
         }
-        var state = MenuConnectionState.resolve(status: status, configured: runtime.manager?.isEnabled == true,
-                                               phase: phase, stopping: runtime.stoppingSince != nil)
-        if !state.active && componentState.needsSetup { state = .setup }
-        if runtime.statusError != nil || (runtime.errorMessage != nil && !state.active) { state = .attention }
+        var state = runtime.stoppingSince != nil ? MenuConnectionState.disconnecting : hostState
+        if runtime.errorMessage != nil && !state.active { state = .attention }
         runtime.state = state
-        if runtime.connectedDate != runtime.manager?.connection.connectedDate || state != .connected {
-            runtime.connectedDate = runtime.manager?.connection.connectedDate
+        let since = profile.connectedDate
+        if runtime.connectedSince != since || state != .connected {
+            runtime.connectedSince = since
             runtime.resetTraffic(clearHistory: true)
         }
         let now = TrafficHistoryClock.now
         runtime.trafficHistory.prune(now: now)
-        var row = TunnelPresentation(id: runtime.entry.id, name: runtime.entry.name)
+        var row = TunnelPresentation(id: profile.id, name: profile.name)
         row.state = state
         row.description = state.detail
-        row.autoStart = runtime.autoStart
-        row.busy = runtime.command != nil || bulkCommand != nil || onboarding != nil
-            || runtime.statusError != nil || (componentCheckPending && !state.active)
-        let gateway = runtime.entry.profile.gateway
-        let transport = runtime.entry.profile.transport.rawValue.uppercased()
-        if state == .disconnected { row.description = "\(gateway) · \(transport)" }
+        row.autoStart = profile.autoStart
+        row.busy = runtime.busy || bulkBusy || onboarding != nil || service != .ready
+            || (componentState == .checking && !state.active)
+        let place = "\(profile.gateway) · \(profile.transport.uppercased())"
+        if state == .disconnected { row.description = place }
         if !state.active && state != .setup && componentState != .ready {
             row.description = componentState.detail
         }
         if state == .connected {
-            row.description = "\(gateway) · \(transport)"
-            row.duration = TrafficFormat.duration(since: runtime.connectedDate)
+            row.description = place
+            row.duration = TrafficFormat.duration(since: profile.connectedDate)
             if let receivedAt = runtime.trafficReceivedAt, Date().timeIntervalSince(receivedAt) > 3 {
                 runtime.resetTraffic()
             }
-            row.receiving = TrafficFormat.rate(runtime.traffic.receiving)
-            row.sending = TrafficFormat.rate(runtime.traffic.sending)
+            row.receiving = TrafficFormat.rate(runtime.receiving)
+            row.sending = TrafficFormat.rate(runtime.sending)
             row.history = runtime.trafficHistory.points
             row.historyTime = now
-            if let sample = runtime.traffic.latest {
-                row.totals = TrafficFormat.bytes(Double(sample.receivedBytes)) + " / " + TrafficFormat.bytes(Double(sample.sentBytes))
+            if let sample = runtime.latest {
+                row.totals = TrafficFormat.bytes(Double(sample.rxBytes)) + " / " + TrafficFormat.bytes(Double(sample.txBytes))
             }
         }
-        if let message = runtime.statusError ?? runtime.errorMessage { row.description = message }
+        if let message = runtime.errorMessage { row.description = message }
         return row
     }
 
     private func reconcile() {
         var next = MenuPresentation()
+        next.service = service
         next.tunnels = orderedRuntimes.map(tunnelPresentation)
-        next.busy = bulkCommand != nil || onboarding != nil
+        next.busy = bulkBusy || onboarding != nil || service != .ready
         next.notice = globalError
         next.update = updateOffer.flatMap { updateStore.shouldShow($0) ? $0.version : nil }
         presentation = next
@@ -772,17 +750,27 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         updateWelcome()
     }
 
-    private func checkComponent() {
-        guard preview == nil, !componentCheckPending else { return }
-        componentCheckPending = true
-        componentState = .checking
-        componentProbe.check(identifier: appID + ".provider", expected: providerBuild) { [weak self] state in
-            guard let self else { return }
-            self.componentCheckPending = false
-            self.componentState = state
-            self.reconcile()
+    // After something the host does not watch (the setup window, a wake): a fresh document.
+    private func refresh() { edge?.refresh() }
+
+    // What a failed request to the host means for the menu: a typed code picks the text.
+    private func fail(_ error: HostError, action: String) -> String {
+        MenuCommandFailure(error).message(action: action)
+    }
+
+    private func send(_ op: String, _ args: [String: Any] = [:], timeout: TimeInterval? = nil,
+                      completion: @escaping (Result<Data, HostError>) -> Void) {
+        guard let edge else { completion(.failure(.local(.hostUnavailable, "no host in preview"))); return }
+        edge.request(op, args: args, timeout: timeout, completion: completion)
+    }
+
+    private func serviceAction() {
+        if service == .needsApproval {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+                NSWorkspace.shared.open(url)
+            }
         }
-        reconcile()
+        edge?.retryNow()
     }
 
     private func showLaunchExperience(forceWelcome: Bool = false) {
@@ -822,7 +810,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     guard self.presentation.anyActive || self.componentState == .ready else { return }
                     self.welcome?.close()
                     DispatchQueue.main.async { [weak self] in self?.showControlsWindow() }
-                case .check: self.checkComponent(); self.refresh()
+                case .check: self.edge?.retryNow(); self.refresh()
                 case .wait: break
                 }
             }
@@ -845,49 +833,14 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.performClose(nil)
         controls?.update(presentation)
         controls?.present()
-        if preview == nil { orderedRuntimes.forEach(sampleTraffic) }
-    }
-
-    private func sampleTraffic(_ runtime: TunnelRuntime) {
-        guard !runtime.trafficPending, runtime.manager?.connection.status == .connected,
-              let session = runtime.manager?.connection as? NETunnelProviderSession else { return }
-        runtime.trafficPending = true
-        runtime.trafficEpoch += 1
-        let epoch = runtime.trafficEpoch
-        let date = session.connectedDate
-        do {
-            try session.sendProviderMessage(Data("oftc.traffic.v1".utf8)) { [weak self, weak runtime] reply in
-                DispatchQueue.main.async {
-                    guard let self, let runtime, runtime.trafficEpoch == epoch else { return }
-                    runtime.trafficPending = false
-                    guard runtime.manager?.connection.status == .connected,
-                          runtime.manager?.connection.connectedDate == date,
-                          let reply, reply.count <= 4096,
-                          let sample = try? JSONDecoder().decode(TrafficSnapshot.self, from: reply), sample.valid else {
-                        runtime.resetTraffic()
-                        self.reconcile()
-                        return
-                    }
-                    runtime.traffic.ingest(sample)
-                    runtime.trafficHistory.record(sample, receiving: runtime.traffic.receiving,
-                                                  sending: runtime.traffic.sending, at: TrafficHistoryClock.now)
-                    runtime.trafficReceivedAt = Date()
-                    self.reconcile()
-                }
-            }
-        } catch { runtime.resetTraffic() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, weak runtime] in
-            guard let self, let runtime, runtime.trafficPending, runtime.trafficEpoch == epoch else { return }
-            runtime.resetTraffic()
-            self.reconcile()
-        }
     }
 
     private func updateView() {
         content.update(presentation)
         controls?.update(presentation)
         popover.contentSize = content.view.fittingSize
-        applicationQuitItem?.title = presentation.anyActive ? "Disconnect and Quit OFTC" : "Quit OFTC"
+        let stopsTunnels = presentation.anyActive && presentation.service == .ready
+        applicationQuitItem?.title = stopsTunnels ? "Disconnect and Quit OFTC" : "Quit OFTC"
         item?.button?.image = TunnelMenuIcon.image(connected: presentation.anyConnected,
                                                    attention: presentation.anyAttention)
         item?.button?.toolTip = "OFTC VPN: " + presentation.summary
@@ -905,11 +858,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if onboarding == nil && welcome?.window?.isVisible != true { NSApp.setActivationPolicy(.accessory) }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        if preview == nil { orderedRuntimes.forEach(sampleTraffic) }
+        edge?.retryNow()
     }
-
-    // Sampling continues while connected so reopening the popover shows a
-    // useful recent history. The bounded buffer is kept only in memory.
 
     private func performAction(_ id: String) {
         if preview != nil {
@@ -921,17 +871,20 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let runtime = runtimes[id] else { return }
         if runtime.state == .setup { showSetup(); return }
         if !runtime.state.active && componentState != .ready { showWelcome(); return }
-        guard runtime.command == nil, bulkCommand == nil else { return }
+        guard !runtime.busy, !bulkBusy, service == .ready else { return }
         let disconnect = runtime.state.active
         runtime.errorMessage = nil
         globalError = nil
         if disconnect { runtime.stoppingSince = Date() }
-        runCommand([disconnect ? "disconnect" : "connect", id], for: runtime) { [weak self, weak runtime] result in
+        runtime.busy = true
+        reconcile()
+        send(disconnect ? "disconnect" : "connect", ["profile": id]) { [weak self, weak runtime] result in
             guard let self, let runtime else { return }
-            if case .failure(let failure) = result {
+            runtime.busy = false
+            if case .failure(let error) = result {
                 runtime.stoppingSince = nil
                 self.quitAfterStop = false
-                runtime.errorMessage = failure.message(action: disconnect ? "disconnect" : "connect")
+                runtime.errorMessage = self.fail(error, action: disconnect ? "disconnect" : "connect")
             }
             self.refresh()
             self.reconcile()
@@ -939,42 +892,33 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func performAll(connect: Bool) {
-        guard preview == nil, bulkCommand == nil else { return }
+        guard preview == nil, !bulkBusy else { return }
+        if service != .ready {
+            // With the host down nothing can be stopped from here, and Quit must not hang.
+            if quitAfterStop { NSApp.terminate(nil) }
+            return
+        }
         if connect && componentState != .ready { showWelcome(); return }
         globalError = nil
         if !connect { for runtime in runtimes.values where runtime.state.active { runtime.stoppingSince = Date() } }
-        runCommand([connect ? "connect" : "disconnect"], for: nil) { [weak self] result in
+        bulkBusy = true
+        reconcile()
+        send(connect ? "connect" : "disconnect") { [weak self] result in
             guard let self else { return }
-            if case .failure(let failure) = result {
+            self.bulkBusy = false
+            if case .failure(let error) = result {
                 for runtime in self.runtimes.values { runtime.stoppingSince = nil }
                 self.quitAfterStop = false
-                self.globalError = failure.message(action: connect ? "connect" : "disconnect")
+                self.globalError = self.fail(error, action: connect ? "connect" : "disconnect")
             }
             self.refresh()
             self.reconcile()
         }
     }
 
-    private func runCommand(_ arguments: [String], for runtime: TunnelRuntime?,
-                            completion: @escaping (MenuCommandResult) -> Void) {
-        let runner = MenuCommand()
-        if let runtime { runtime.command = runner } else { bulkCommand = runner }
-        runner.start(executable: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/oftc"),
-                     arguments: ["--app", Bundle.main.bundlePath] + arguments,
-                     home: FileManager.default.homeDirectoryForCurrentUser) { [weak self, weak runner] result in
-            guard let self, let runner else { return }
-            if let runtime, runtime.command === runner { runtime.command = nil }
-            else if self.bulkCommand === runner { self.bulkCommand = nil }
-            else { return }
-            completion(result)
-        }
-        reconcile()
-    }
-
     private func removeProfile(_ id: String) {
-        guard preview == nil, let runtime = runtimes[id],
-              runtime.command == nil, bulkCommand == nil else { return }
-        let name = runtime.entry.name
+        guard preview == nil, let runtime = runtimes[id], !runtime.busy, !bulkBusy, service == .ready else { return }
+        let name = runtime.profile.name
         popover.performClose(nil)
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
@@ -991,11 +935,15 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         runtime.errorMessage = nil
         globalError = nil
         runtime.stoppingSince = runtime.state.active ? Date() : nil
-        runCommand(["remove", id], for: runtime) { [weak self, weak runtime] result in
+        runtime.busy = true
+        reconcile()
+        // The host stops the profile, waits up to 20 s for its tunnel, then erases it.
+        send("remove", ["profile": id], timeout: 60) { [weak self, weak runtime] result in
             guard let self else { return }
-            if case .failure(let failure) = result, let runtime {
+            runtime?.busy = false
+            if case .failure(let error) = result, let runtime {
                 runtime.stoppingSince = nil
-                runtime.errorMessage = failure.message(action: "remove")
+                runtime.errorMessage = self.fail(error, action: "remove")
             }
             self.refresh()
             self.reconcile()
@@ -1003,15 +951,17 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func setAutoStart(_ id: String, _ enabled: Bool) {
-        guard preview == nil, let runtime = runtimes[id] else { return }
-        do {
-            try OFTCAgentService.setConnectAtLogin(enabled, for: runtime.entry)
-            runtime.errorMessage = nil
-        } catch {
-            runtime.errorMessage = "Could not change automatic connection. Check Login Items & Extensions in System Settings."
+        guard preview == nil, let runtime = runtimes[id], service == .ready else { return }
+        send("settings_set", ["key": "auto_start:" + id, "value": enabled]) { [weak self, weak runtime] result in
+            guard let self, let runtime else { return }
+            switch result {
+            case .success: runtime.errorMessage = nil
+            case .failure:
+                runtime.errorMessage = "Could not change automatic connection. Check Login Items & Extensions in System Settings."
+            }
+            self.refresh() // the document carries the stored choice, success or not
+            self.reconcile()
         }
-        runtime.autoStart = OFTCAgentService.connectAtLogin(runtime.entry)
-        reconcile()
     }
 
     private func showSetup() {
@@ -1028,7 +978,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     guard let self else { return }
                     self.onboarding = nil
                     self.globalError = nil
-                    self.checkComponent()
+                    self.edge?.retryNow()
                     self.refresh()
                     self.showWelcome()
                 }
@@ -1040,48 +990,55 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showSettings(_ sender: NSButton) {
         let menu = NSMenu()
+        let ready = preview == nil && !bulkBusy && service == .ready
         func add(_ title: String, action: Selector, checked: Bool? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             if let checked { item.state = checked ? .on : .off }
-            item.isEnabled = preview == nil && bulkCommand == nil
+            item.isEnabled = ready
             menu.addItem(item)
         }
         menu.autoenablesItems = false
         add("Launch OFTC at login", action: #selector(toggleMenuLogin),
-            checked: preview == nil && SMAppService.mainApp.status == .enabled)
+            checked: preview == nil && loginMenuItem == .enabled)
         add("Check for Updates Automatically", action: #selector(toggleAutoUpdates),
             checked: preview == nil && updateStore.automatic)
         add("Check for Updates Now…", action: #selector(checkUpdatesNow))
         menu.addItem(.separator())
         add("Add VPN…", action: #selector(openSetup))
         add("Export VPNs…", action: #selector(exportVPNs))
-        menu.items.last?.isEnabled = preview == nil && bulkCommand == nil && !runtimes.isEmpty
+        menu.items.last?.isEnabled = ready && !runtimes.isEmpty
         add("Login Items & Extensions…", action: #selector(openLoginSettings))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
     }
 
     @objc private func toggleMenuLogin() {
         guard preview == nil else { return }
-        do {
-            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
-            else { try SMAppService.mainApp.register() }
-            globalError = nil
-        } catch { globalError = "Could not change login launch. Check Login Items & Extensions in System Settings." }
-        reconcile()
+        send("settings_set", ["key": "menu_login", "value": loginMenuItem != .enabled]) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success: self.globalError = nil
+            case .failure:
+                self.globalError = "Could not change login launch. Check Login Items & Extensions in System Settings."
+            }
+            self.refresh()
+            self.reconcile()
+        }
     }
     @objc private func openSetup() { showSetup() }
 
     // MARK: First-run login item
 
     // A fresh install turns "Launch OFTC at login" on so the tray icon is there
-    // after every login; an upgrade keeps whatever the user had. Decided once.
+    // after every login; an upgrade keeps whatever the user had. Decided once, with the
+    // first document that says what the login item is.
     private func applyMenuLoginDefault() {
-        guard Bundle.main.bundleURL.standardizedFileURL.path == LauncherAlias.installedApp.path else { return }
+        guard loginDefaultPending, installedCopy else { return }
+        loginDefaultPending = false
         let store = MenuLoginDefaultStore(directory: experienceStore.directory)
         guard !store.decided else { return }
-        if experienceStore.acknowledgedBuild == nil, SMAppService.mainApp.status == .notRegistered {
-            try? SMAppService.mainApp.register()
+        if experienceStore.acknowledgedBuild == nil, loginMenuItem == .disabled {
+            send("settings_set", ["key": "menu_login", "value": true]) { [weak self] _ in self?.refresh() }
         }
         try? store.markDecided()
     }
@@ -1182,46 +1139,85 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         importProfiles(from: url)
     }
 
+    // The host parses the file (it holds PSKs). This process only copies the user's file into a
+    // private scratch directory first, so the same process as before is the one that reads from
+    // wherever the user keeps it, and hands the host a path it can always open.
+    private func scratchDirectory() throws -> URL {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        return scratch
+    }
+
     private func importProfiles(from url: URL) {
-        guard bulkCommand == nil else {
+        guard !bulkBusy, service == .ready else {
             present("OFTC is busy", "Try opening the file again in a moment.")
             return
         }
         popover.performClose(nil)
-        let incoming: [(profile: OFTCProfile, psk: Data)]
+        let scratch: URL
+        let staged: URL
         do {
-            let data = try FileHandle(forReadingFrom: url).read(upToCount: OFTCProfileBundle.maxBytes + 1) ?? Data()
-            incoming = try OFTCProfileBundle.decode(data)
-        } catch let failure as OFTCProfileBundle.Failure {
-            present("Can’t add these VPNs", failure.message + ".")
-            return
+            scratch = try scratchDirectory()
+            staged = scratch.appendingPathComponent("import.oftc")
+            try FileManager.default.copyItem(at: url, to: staged)
         } catch {
             present("Can’t add these VPNs", "OFTC couldn’t read that file.")
             return
         }
-        let configured = Set(OFTCProfileScope.entries(root: root).map(\.profile.gateway))
-        let fresh = incoming.filter { !configured.contains($0.profile.gateway) }
+        bulkBusy = true
+        reconcile()
+        send("import_preview", ["path": staged.path]) { [weak self] result in
+            guard let self else { return }
+            self.bulkBusy = false
+            self.reconcile()
+            switch result {
+            case .failure(let error):
+                try? FileManager.default.removeItem(at: scratch)
+                // `invalid_file` carries the reason in words ("That file isn't an OFTC profile file").
+                let reason = error.code == .invalidFile ? error.detail : "OFTC couldn’t read that file"
+                self.present("Can’t add these VPNs", reason.hasSuffix(".") ? reason : reason + ".")
+            case .success(let data):
+                guard let preview = try? HostWire.decoder.decode(HostImportPreview.self, from: data) else {
+                    try? FileManager.default.removeItem(at: scratch)
+                    self.present("Can’t add these VPNs", "OFTC couldn’t read that file.")
+                    return
+                }
+                self.confirmImport(preview.profiles, staged: staged, scratch: scratch)
+            }
+        }
+    }
+
+    private func confirmImport(_ incoming: [HostImportItem], staged: URL, scratch: URL) {
+        let fresh = incoming.filter { !$0.alreadyConfigured }
         guard !fresh.isEmpty else {
+            try? FileManager.default.removeItem(at: scratch)
             present("Already set up", "Every VPN in that file is already in OFTC.")
             return
         }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = fresh.count == 1 ? "Add this VPN to OFTC?" : "Add these \(fresh.count) VPNs to OFTC?"
-        alert.informativeText = fresh.map { "\($0.profile.displayName) — \($0.profile.gateway)" }
+        alert.informativeText = fresh.map { "\($0.name) — \($0.gateway)" }
             .joined(separator: "\n")
             + (fresh.count < incoming.count ? "\n\nVPNs you already have are left as they are." : "")
             + "\n\nYou’ll sign in to each one with your own account when you connect."
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            try? FileManager.default.removeItem(at: scratch)
+            return
+        }
         globalError = nil
-        runCommand(["setup", "--from", url.path], for: nil) { [weak self] result in
+        bulkBusy = true
+        reconcile()
+        send("import", ["path": staged.path], timeout: 60) { [weak self] result in
             guard let self else { return }
-            if case .failure(let failure) = result {
-                self.globalError = failure.message(action: "add")
+            try? FileManager.default.removeItem(at: scratch)
+            self.bulkBusy = false
+            if case .failure(let error) = result {
+                self.globalError = self.fail(error, action: "add")
             }
-            self.checkComponent()
             self.refresh()
             self.reconcile()
             if case .success = result { self.showPopover() }
@@ -1229,7 +1225,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func exportVPNs() {
-        guard preview == nil, bulkCommand == nil, !runtimes.isEmpty else { return }
+        guard preview == nil, !bulkBusy, !runtimes.isEmpty, service == .ready else { return }
         popover.performClose(nil)
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
@@ -1239,21 +1235,20 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         panel.allowedContentTypes = [UTType(exportedAs: "com.chris.openforticlient.oftc.profiles", conformingTo: .data)]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        // The CLI never overwrites; export to a fresh scratch file, then replace.
-        let scratch = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        // The host never overwrites; it exports to a fresh scratch file, then this replaces.
+        let scratch: URL
+        do { scratch = try scratchDirectory() } catch { globalError = "Could not export VPNs."; reconcile(); return }
         let staged = scratch.appendingPathComponent("export.oftc")
-        do {
-            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-        } catch { globalError = "Could not export VPNs."; reconcile(); return }
         globalError = nil
-        runCommand(["export", "-o", staged.path], for: nil) { [weak self] result in
+        bulkBusy = true
+        reconcile()
+        send("export", ["path": staged.path]) { [weak self] result in
             guard let self else { return }
             defer { try? FileManager.default.removeItem(at: scratch) }
+            self.bulkBusy = false
             switch result {
-            case .failure(let failure):
-                self.globalError = failure.message(action: "export")
+            case .failure(let error):
+                self.globalError = self.fail(error, action: "export")
             case .success:
                 do {
                     if FileManager.default.fileExists(atPath: destination.path) {
@@ -1270,11 +1265,17 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self.reconcile()
         }
     }
-    @objc private func openLoginSettings() { if preview == nil { SMAppService.openSystemSettingsLoginItems() } }
+
+    @objc private func openLoginSettings() {
+        guard preview == nil else { return }
+        send("open_settings", ["pane": "login_items"]) { _ in }
+    }
 
     private func quit() {
         if preview != nil { NSApp.terminate(nil); return }
-        if presentation.anyActive { quitAfterStop = true; performAll(connect: false) }
+        // With the host down nothing can be stopped from here: the tunnels outlive the menu, so
+        // quit rather than wait for a reply that cannot come.
+        if presentation.anyActive && service == .ready { quitAfterStop = true; performAll(connect: false) }
         else { NSApp.terminate(nil) }
     }
 

@@ -1,0 +1,5 @@
+# Fixture for check-ui-edge-test.sh: one clean file, one listed violation, the edge.
+Host/Clean.swift
+Host/Violating.swift
+Host/HostEdge.swift
+Host/Gone.swift

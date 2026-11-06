@@ -1,0 +1,16 @@
+# The Swift UI files the ratchet (check-ui-edge.sh) watches, one path per line, relative to app/.
+# Only Host/HostEdge.swift may talk to the host; the others may not reach around it
+# (docs/ui-edge.md, sections 1 and 10). main.swift is left out: it is the argv trampoline into
+# the Rust host verbs (oftc_host_main), not UI.
+Host/ControlsWindow.swift
+Host/GatewayTrustPrompt.swift
+Host/HostEdge.swift
+Host/LaunchExperience.swift
+Host/MenuBar.swift
+Host/MenuCommand.swift
+Host/MenuModel.swift
+Host/Onboarding.swift
+Host/RateSparklineView.swift
+Host/TrafficHistory.swift
+Host/UpdateCheck.swift
+Host/Welcome.swift
