@@ -275,7 +275,7 @@ impl<'a> Collector<'a> {
             connected_since: since.cloned(),
             traffic: None,
             error: (phase == Some(Phase::Failed))
-                .then(|| facts.failure.and_then(reason::explain))
+                .then(|| facts.failure.and_then(|f| reason::explain(f, facts.transport)))
                 .flatten()
                 .map(|(code, detail)| ProfileError { code, detail: detail.to_owned() }),
         }

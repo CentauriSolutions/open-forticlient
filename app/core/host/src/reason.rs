@@ -12,14 +12,26 @@
 
 use oftc_ui_edge::ErrorCode;
 
+use crate::profile::Transport;
+
 /// Recorded instead of a provider code when an established tunnel dropped and the
 /// automatic recoveries are used up.
 pub const LOST: i32 = 1000;
 
 /// The error code and the one-line message for a recorded failure, or `None` when
 /// the code says nothing a user can act on (the menu keeps its generic text).
-pub fn explain(code: i32) -> Option<(ErrorCode, &'static str)> {
+///
+/// `transport` is the profile's: a UDP profile always tries TCP 4443 after UDP
+/// (`start.rs`), a TCP profile makes one TCP connect and never touches UDP, so the
+/// same connect `Socket` code 201 reads differently.
+///
+/// The ranges of connect (1xx plus status) and send (2xx plus status) codes
+/// overlap at 202, 207, 208 and 209. That is harmless here: only a connect code
+/// is recorded for an attempt that never came up, and an established tunnel that
+/// dropped is recorded as [`LOST`], never as its raw send code.
+pub fn explain(code: i32, transport: Transport) -> Option<(ErrorCode, &'static str)> {
     Some(match code {
+        201 if transport == Transport::Tcp => (ErrorCode::GatewayNoAnswer, "The gateway did not answer over TCP."),
         // Resolve: no address for the gateway name.
         200 => (ErrorCode::GatewayNotFound, "The gateway's address could not be found. Check the network connection and the gateway name."),
         // Socket after the UDP attempt timed out and the TCP fallback failed too.
@@ -40,6 +52,8 @@ pub fn explain(code: i32) -> Option<(ErrorCode, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UDP: Transport = Transport::Udp;
 
     /// Every connect code the engine can produce, and what the user is told.
     #[test]
@@ -65,17 +79,29 @@ mod tests {
             (900, None),
         ];
         for (code, want) in table {
-            assert_eq!(explain(code).map(|(c, _)| c), want, "{code}");
+            assert_eq!(explain(code, UDP).map(|(c, _)| c), want, "{code}");
+        }
+    }
+
+    /// A TCP-only profile never tried UDP, so 201 must not say it did.
+    #[test]
+    fn a_tcp_profile_does_not_blame_udp() {
+        let (code, text) = explain(201, Transport::Tcp).unwrap();
+        assert_eq!(code, ErrorCode::GatewayNoAnswer);
+        assert!(text.contains("TCP") && !text.contains("UDP"), "{text}");
+        // Every other code reads the same on either transport.
+        for code in (200..=212).filter(|c| *c != 201).chain([LOST]) {
+            assert_eq!(explain(code, UDP), explain(code, Transport::Tcp), "{code}");
         }
     }
 
     /// The UDP-blocked case reads as such, and no message names a host or a code.
     #[test]
     fn messages_are_plain() {
-        let (_, blocked) = explain(201).unwrap();
+        let (_, blocked) = explain(201, UDP).unwrap();
         assert!(blocked.contains("UDP") && blocked.contains("TCP"));
         for code in (200..=212).chain([LOST]) {
-            let (_, text) = explain(code).unwrap();
+            let (_, text) = explain(code, UDP).unwrap();
             assert!(text.ends_with('.') && !text.chars().any(|c| c.is_ascii_digit()), "{text}");
         }
     }

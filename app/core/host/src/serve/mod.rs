@@ -778,7 +778,7 @@ pub(super) mod tests {
         });
     }
 
-    /// A failed supervisor's recorded provider code becomes `profiles[].error` (code
+    /// A failed supervisor's recorded provider code (the rig's profile is TCP-only, so 201 is "no answer") becomes `profiles[].error` (code
     /// and plain message); a failure with no plain reason, or any other phase, has none.
     #[test]
     fn a_failed_profile_says_why() {
@@ -795,16 +795,17 @@ pub(super) mod tests {
             client.hello();
             settled(&mut client);
             for (phase, failure, want) in [
-                (crate::status::Phase::Failed, Some(201), Some("network_blocked")),
+                (crate::status::Phase::Failed, Some(201), Some("gateway_no_answer")),
                 (crate::status::Phase::Failed, Some(900), None),
-                (crate::status::Phase::Connecting, Some(201), None),
+                // `Stopped` is returned by the reader without a lock, so this pins the failed-only gate.
+                (crate::status::Phase::Stopped, Some(201), None),
             ] {
                 record(phase, failure);
                 let status = client.call(r#"{"id":3,"op":"status"}"#)["result"].clone();
                 let error = &status["profiles"][0]["error"];
                 assert_eq!(error["code"].as_str(), want, "{phase:?} {failure:?}");
                 if want.is_some() {
-                    assert!(error["detail"].as_str().unwrap().contains("UDP"));
+                    assert!(error["detail"].as_str().unwrap().contains("TCP"));
                     assert_eq!(status["profiles"][0]["state"], "attention");
                 } else {
                     assert_eq!(*error, Value::Null);
