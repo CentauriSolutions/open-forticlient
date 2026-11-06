@@ -17,11 +17,13 @@
       return false;
     }
     function checkUpdate() {
+      // Every profile has its own VPN entry ("OFTC VPN", "OFTC VPN (<name>)", ...), all
+      // naming the app's bundle id; the preinstall script runs the same test.
       var vpn = system.run('/bin/sh', '-c',
-        'vpn_state=$(/usr/sbin/scutil --nc status "OFTC VPN" 2>/dev/null); case "$vpn_state" in Connected*|Connecting*|Disconnecting*|Reasserting*) exit 10;; *) exit 0;; esac');
+        '/usr/sbin/scutil --nc list 2>/dev/null | /usr/bin/grep "com[.]chris[.]openforticlient[.]oftc" | /usr/bin/grep -qE "[(](Connected|Connecting|Disconnecting|Reasserting)[)]" && exit 10; exit 0');
       if (vpn !== 0) {
         return stopWith('Disconnect OFTC before updating',
-          'Disconnect OFTC from its controls or System Settings > VPN, then reopen this installer. Installer will ask to close the app. Your saved VPN settings will be kept.');
+          'Disconnect every OFTC VPN from its controls or System Settings > VPN, then reopen this installer. Installer will ask to close the app. Your saved VPN settings will be kept.');
       }
       var app = system.run('/usr/bin/pgrep', '-f',
         '^/Applications/(OFTC|Open Forticlient)\\.app/Contents/MacOS/OFTCAgent([[:space:]]|$)');
@@ -38,7 +40,7 @@
   <choice id="oftc" title="OFTC" description="Menu bar VPN client" visible="false">
     <pkg-ref id="com.chris.openforticlient.oftc.pkg"/>
   </choice>
-  <pkg-ref id="com.chris.openforticlient.oftc.pkg" version="1.2.2">OFTC-component.pkg</pkg-ref>
+  <pkg-ref id="com.chris.openforticlient.oftc.pkg" version="1.3.0">OFTC-component.pkg</pkg-ref>
   <pkg-ref id="com.chris.openforticlient.oftc.pkg">
     <must-close><app id="com.chris.openforticlient.oftc"/></must-close>
   </pkg-ref>

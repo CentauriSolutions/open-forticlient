@@ -29,6 +29,7 @@ FortiClient profile for the same gateway, or the gateway itself.
 | `agent-status` | `not-registered`, `enabled`, `requires-approval`, `not-found` or `unknown`; exit 0 | |
 | `register-agent` | `OFTC login agent registered`; exit 0 | `Could not register OFTC login agent: <reason>`, exit 1; the reason is the system's description, or `OFTC login agent is <status>` when approval is pending, the status is unknown or registration did not leave it enabled, or `... is disabled` when `launchctl enable` failed |
 | `unregister-agent` | `OFTC login agent unregistered` (also when nothing is registered); exit 0 | `Could not unregister OFTC login agent: <reason>`, exit 1 |
+| `unregister-host` | `OFTC host service unregistered` (also when nothing is registered); exit 0. Hidden; `oftc uninstall` calls it so no Login Items entry for the resident host service is left. Nothing registers it yet | `Could not unregister OFTC host service: <reason>`, exit 1 |
 | `unregister-menu-login` | `OFTC menu login item unregistered`; exit 0 | `Could not unregister the OFTC menu login item`; exit 1 |
 | `login-settings` | `Menu launch at login: enabled\|disabled`, then `VPN connect at login (<id>): enabled\|disabled` per profile; exit 0 | |
 | `list-profiles` | one line per profile, `id`, name, gateway, port, transport separated by tabs, ordered by name; an empty line when there are none; exit 0 | |
@@ -141,7 +142,7 @@ No verb text, exit code or usage line changed. `connect`, `add_profile`'s steps 
 order, `list_sources` and `check_update` have no verb: the CLI's `connect` starts
 `supervise-profile` itself, and the host does the same through `ProcessSpawner`.
 
-`login-settings`, `unregister-menu-login`, `host serve` and `host restart` are not in
+`login-settings`, `unregister-menu-login`, `unregister-host`, `host serve` and `host restart` are not in
 the usage text (the first two never were); the verb table marks them hidden so the
 text stays byte-for-byte, and a test pins it.
 `set-autostart on` with the agent not yet enabled leaves a one-use

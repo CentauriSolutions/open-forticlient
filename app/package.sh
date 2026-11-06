@@ -36,12 +36,17 @@ fi
 mkdir -p "$stage/Applications" "$stage/usr/local/bin" "$stage/usr/local/libexec/oftc" \
     "$stage/usr/local/share/man/man1"
 ditto "$app" "$stage/Applications/Open Forticlient.app"
+# The postinstall script deletes any Contents/Frameworks it finds in the installed
+# bundle (leftovers of older builds); the current bundle must therefore ship none.
+if [[ -n "$(find "$stage/Applications" -type d -name Frameworks -print -quit)" ]]; then
+    print -u2 'The app must not contain a Frameworks directory (postinstall removes stale ones)'; exit 2
+fi
 cp "$cli" "$stage/usr/local/bin/oftc"
 cp "$root/package-files/remove-package" "$stage/usr/local/libexec/oftc/remove-package"
 cp "$root/../client/man/oftc.1" "$stage/usr/local/share/man/man1/oftc.1"
 pkgbuild --root "$stage" --install-location / --ownership recommended \
     --identifier com.chris.openforticlient.oftc.pkg --version "$version" \
-    --scripts "$root/package-scripts" "$component"
+    --component-plist "$root/package-files/component.plist" --scripts "$root/package-scripts" "$component"
 # The component version comes from the app, so a version bump is one edit.
 mkdir -p "$build/package-resources"
 ditto "$root/package-resources" "$build/package-resources"
