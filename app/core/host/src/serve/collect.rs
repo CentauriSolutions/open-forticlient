@@ -18,6 +18,7 @@ use super::state::resolve_connection;
 use super::Services;
 use crate::agent::{agent_item, HOST_PLIST};
 use crate::profile;
+use crate::reason;
 use crate::snapshot::{self, ProfileFacts};
 use crate::status;
 use crate::vpn::owns_key;
@@ -221,7 +222,10 @@ impl<'a> Collector<'a> {
                 inner.since.get(&facts.id),
                 inner.stopping.contains_key(&facts.id),
             );
-            row.error = inner.errors.get(&facts.id).cloned();
+            // A failed op is the newer news; else the supervisor's recorded reason.
+            if let Some(op_error) = inner.errors.get(&facts.id) {
+                row.error = Some(op_error.clone());
+            }
             profiles.push(row);
         }
         inner
@@ -270,7 +274,10 @@ impl<'a> Collector<'a> {
             phase,
             connected_since: since.cloned(),
             traffic: None,
-            error: None,
+            error: (phase == Some(Phase::Failed))
+                .then(|| facts.failure.and_then(|f| reason::explain(f, facts.transport)))
+                .flatten()
+                .map(|(code, detail)| ProfileError { code, detail: detail.to_owned() }),
         }
     }
 

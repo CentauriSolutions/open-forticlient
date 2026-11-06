@@ -19,7 +19,7 @@
       "id": "lab", "name": "Lab", "gateway": "lab.example.com",
       "saml_port": 8443, "transport": "tcp", "auto_start": false,
       "state": "sign_in", "ne_status": "disconnected", "phase": "acquiring",
-      "connected_since": null, "traffic": null, "error": null
+      "connected_since": null, "traffic": null, "error": {"code": "network_blocked", "detail": "The gateway did not answer over UDP or over TCP. This network may block UDP."}
     }
   ]
 }

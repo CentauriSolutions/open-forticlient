@@ -53,6 +53,13 @@ pub enum ErrorCode {
     InvalidFile,
     /// The client asked for the op to stop (`cancel`).
     Cancelled,
+    /// `profiles[].error` only: why a connection failed or was lost (4.5).
+    NetworkBlocked,
+    GatewayNotFound,
+    GatewayNoAnswer,
+    GatewayRefused,
+    SignInRejected,
+    ConnectionLost,
     #[serde(other)]
     Internal,
 }
@@ -74,7 +81,14 @@ impl ErrorCode {
             | ErrorCode::HostUnavailable
             | ErrorCode::UnsupportedSchema => 5,
             ErrorCode::Busy => 6,
-            ErrorCode::Internal | ErrorCode::Cancelled => 1,
+            ErrorCode::Internal
+            | ErrorCode::Cancelled
+            | ErrorCode::NetworkBlocked
+            | ErrorCode::GatewayNotFound
+            | ErrorCode::GatewayNoAnswer
+            | ErrorCode::GatewayRefused
+            | ErrorCode::SignInRejected
+            | ErrorCode::ConnectionLost => 1,
         }
     }
 }
@@ -555,6 +569,12 @@ mod tests {
             (BadRequest, "bad_request", 2),
             (InvalidFile, "invalid_file", 3),
             (Cancelled, "cancelled", 1),
+            (NetworkBlocked, "network_blocked", 1),
+            (GatewayNotFound, "gateway_not_found", 1),
+            (GatewayNoAnswer, "gateway_no_answer", 1),
+            (GatewayRefused, "gateway_refused", 1),
+            (SignInRejected, "sign_in_rejected", 1),
+            (ConnectionLost, "connection_lost", 1),
             (Internal, "internal", 1),
         ] {
             assert_eq!(code.exit(), exit, "{name}");

@@ -20,6 +20,10 @@ fn status_documents() {
     assert_eq!(status.profiles[0].state, ConnectionState::Connected);
     assert_eq!(status.profiles[1].state, ConnectionState::SignIn);
     assert_eq!(status.profiles[1].phase, Some(Phase::Acquiring));
+    assert_eq!(status.profiles[0].error, None);
+    let error = status.profiles[1].error.as_ref().unwrap();
+    assert_eq!(error.code, oftc_ui_edge::ErrorCode::NetworkBlocked);
+    assert!(error.detail.contains("UDP"));
     let Event::Status { seq, status } = round_trips("event_status.json") else {
         panic!("not a status event");
     };

@@ -21,6 +21,7 @@ pub mod keychain;
 pub mod lease;
 pub mod out;
 pub mod profile;
+pub mod reason;
 pub mod registry;
 pub mod serve;
 pub mod snapshot;
