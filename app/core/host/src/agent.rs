@@ -116,6 +116,7 @@ impl Launchctl for SystemLaunchctl {
 /// A [`Launchctl`] that records the labels it was asked to enable or disable.
 pub struct RecordingLaunchctl {
     succeeds: bool,
+    kickstart_succeeds: bool,
     calls: Mutex<Vec<String>>,
     disabled: Mutex<Vec<String>>,
     kicked: Mutex<Vec<String>>,
@@ -125,9 +126,18 @@ impl RecordingLaunchctl {
     pub fn new(succeeds: bool) -> Self {
         RecordingLaunchctl {
             succeeds,
+            kickstart_succeeds: succeeds,
             calls: Mutex::new(Vec::new()),
             disabled: Mutex::new(Vec::new()),
             kicked: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `enable` and `disable` succeed but `kickstart` does not.
+    pub fn failing_kickstart() -> Self {
+        RecordingLaunchctl {
+            kickstart_succeeds: false,
+            ..Self::new(true)
         }
     }
 
@@ -160,7 +170,7 @@ impl Launchctl for RecordingLaunchctl {
 
     fn kickstart(&self, label: &str) -> bool {
         self.kicked.lock().unwrap().push(label.to_owned());
-        self.succeeds
+        self.kickstart_succeeds
     }
 }
 

@@ -18,6 +18,18 @@ fresh; passes "the fixture as shipped (a deleted file's baseline row is ignored)
 fresh; print 'import Security' >> "$work/t/Host/Clean.swift"
 fails "a new import in a clean file" "Clean.swift matches 'import Security'"
 
+fresh; print 'import Security // reviewed' >> "$work/t/Host/Clean.swift"
+fails "an import followed by a comment" "'import Security'"
+
+fresh; print '@_exported import NetworkExtension;' >> "$work/t/Host/Clean.swift"
+fails "an attributed import followed by a semicolon" "'import NetworkExtension'"
+
+fresh; print 'func run() { _ = Process() }' >> "$work/t/Host/Clean.swift"
+fails "a child process outside the edge" "'Process('"
+
+fresh; print 'import Foundation' > "$work/t/Host/New.swift"
+fails "a UI file that is neither listed nor exempt" "New.swift is in neither"
+
 fresh; print 'func again() { _ = SecItemAdd }' >> "$work/t/Host/Violating.swift"
 fails "a second match in a file the baseline allows one in" "allows 1"
 
@@ -26,6 +38,9 @@ fails "a different pattern in a baselined file" "NETunnelProviderManager"
 
 fresh; : > "$work/t/Host/Violating.swift"
 fails "a baseline that lists more than remains" "lower it"
+
+fresh; print 'let manager = NEVPNManager.shared()' >> "$work/t/Host/Clean.swift"
+fails "the older VPN manager API" "NEVPNManager"
 
 fresh; print 'import NetworkExtension' >> "$work/t/Host/HostEdge.swift"
 fails "HostEdge.swift importing NetworkExtension" "HostEdge.swift may not use 'import NetworkExtension'"

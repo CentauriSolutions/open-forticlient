@@ -31,18 +31,19 @@ baseline="$root/ui-edge-baseline.txt"
 
 # label<TAB>extended regex. A label is what the baseline names; a regex is matched per line.
 # `Keychain` matches an identifier, not the word in a user-facing sentence.
-# HostEdge.swift is exempt from the four that name what it exists to use.
+# HostEdge.swift is exempt from the five that name what it exists to use.
 patterns=(
-    $'import Security\t^[[:space:]]*import Security[[:space:]]*$'
-    $'import CryptoKit\t^[[:space:]]*import CryptoKit[[:space:]]*$'
-    $'import SystemExtensions\t^[[:space:]]*import SystemExtensions[[:space:]]*$'
-    $'import ServiceManagement\t^[[:space:]]*import ServiceManagement[[:space:]]*$'
-    $'import NetworkExtension\t^[[:space:]]*import NetworkExtension[[:space:]]*$'
-    $'import Network\t^[[:space:]]*import Network[[:space:]]*$'
+    $'import Security\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+Security([^A-Za-z0-9_]|$)'
+    $'import CryptoKit\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+CryptoKit([^A-Za-z0-9_]|$)'
+    $'import SystemExtensions\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+SystemExtensions([^A-Za-z0-9_]|$)'
+    $'import ServiceManagement\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+ServiceManagement([^A-Za-z0-9_]|$)'
+    $'import NetworkExtension\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+NetworkExtension([^A-Za-z0-9_]|$)'
+    $'import Network\t^[[:space:]]*(@[A-Za-z_]+[[:space:]]+)*import[[:space:]]+Network([^A-Za-z0-9_]|$)'
     $'SecItem\tSecItem'
     $'kSec\tkSec'
     $'Keychain\t[A-Za-z_.]Keychain|Keychain[A-Za-z_(.]'
     $'NETunnelProviderManager\tNETunnelProviderManager'
+    $'NEVPNManager\tNEVPNManager'
     $'saveToPreferences\tsaveToPreferences'
     $'loadAllFromPreferences\tloadAllFromPreferences'
     $'SMAppService\tSMAppService'
@@ -51,6 +52,7 @@ patterns=(
     $'NWConnection\tNWConnection'
     $'socket(\tsocket\\('
     $'connect(\tconnect\\('
+    $'Process(\t(^|[^A-Za-z0-9_])Process\\('
     $'profile.json\tprofile\\.json'
     $'supervisor.lock\tsupervisor\\.lock'
     $'supervisor-status\tsupervisor-status'
@@ -59,13 +61,13 @@ patterns=(
     $'oftc_provider\toftc_provider'
     $'oftc_host\toftc_host'
 )
-edge_may_use=("import Network" "NWConnection" "socket(" "connect(")
+edge_may_use=("import Network" "NWConnection" "socket(" "connect(" "Process(")
 
 # Current counts as "file<TAB>label<TAB>count" lines, nonzero only.
 counts() {
     local file entry label regex n
     while IFS= read -r file; do
-        [[ -z "$file" || "$file" == \#* ]] && continue
+        [[ -z "$file" || "$file" == \#* || "$file" == exempt:* ]] && continue
         [[ -f "$root/$file" ]] || continue
         for entry in "${patterns[@]}"; do
             label="${entry%%$'\t'*}"
@@ -104,6 +106,21 @@ grew)
 esac
 
 rc=0
+# Every Swift file in Host/ (but the checks) is either watched or named as exempt, so a new UI
+# file cannot escape the scan by never being listed.
+known=()
+while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    known+=("${line#exempt: }")
+done < "$list"
+for swiftfile in "$root"/Host/*.swift(N); do
+    rel="Host/${swiftfile:t}"
+    [[ "${swiftfile:t}" == check-*.swift ]] && continue
+    if (( ${known[(Ie)$rel]} == 0 )); then
+        print -u2 "$rel is in neither ui-files.txt nor its exempt list: list it, or exempt it with 'exempt: $rel' and say why"
+        rc=1
+    fi
+done
 current=$(counts)
 while IFS=$'\t' read -r file label n; do
     [[ -z "$file" ]] && continue

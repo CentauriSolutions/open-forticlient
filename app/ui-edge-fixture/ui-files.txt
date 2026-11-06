@@ -3,3 +3,4 @@ Host/Clean.swift
 Host/Violating.swift
 Host/HostEdge.swift
 Host/Gone.swift
+exempt: Host/Exempt.swift

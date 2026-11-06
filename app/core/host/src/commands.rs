@@ -1666,6 +1666,15 @@ mod tests {
             "Could not register OFTC host service: OFTC host service is unknown\n",
             1,
         );
+        // Registered and enabled, but launchd would not start it.
+        let mut h = Harness::new();
+        h.launchctl = RecordingLaunchctl::failing_kickstart();
+        h.login.set_status(&host, LoginStatus::NotRegistered);
+        h.expect(
+            &["host", "register"],
+            "OFTC host service registered, but it did not start\n",
+            1,
+        );
     }
 
     /// The verb protocol: stdout bytes and exit code per verb and branch.

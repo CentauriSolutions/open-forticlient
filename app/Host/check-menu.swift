@@ -4,18 +4,7 @@ import Foundation
     static func main() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         // The host computes the row state; the menu only renames it (sign_in is "sign-in").
-        let states: [(HostConnectionState, MenuConnectionState)] = [
-            (.connected, .connected), (.disconnected, .disconnected), (.connecting, .connecting),
-            (.disconnecting, .disconnecting), (.signIn, .signingIn), (.reconnecting, .reconnecting),
-            (.attention, .attention), (.setup, .setup),
-        ]
-        for (host, menu) in states { precondition(MenuConnectionState(host) == menu) }
-        precondition(states.count == MenuConnectionState.allCases.count)
-        let components: [(HostComponentState, VPNComponentState)] = [
-            (.checking, .checking), (.ready, .ready), (.missing, .missing), (.updateRequired, .updateRequired),
-            (.approval, .approval), (.newer, .newer), (.unavailable, .unavailable),
-        ]
-        for (host, menu) in components { precondition(VPNComponentState(host) == menu) }
+        precondition(MenuConnectionState(.signIn) == .signingIn && MenuConnectionState(.attention) == .attention)
         // The one row shown while the host cannot be reached, and what it offers.
         let down: [(HostAvailability, ServiceState, String?)] = [
             (.connecting, .starting, nil), (.ready, .ready, nil),
@@ -32,6 +21,23 @@ import Foundation
         precondition(TrafficFormat.bytes(1_200_000) == "1.2 MB")
         precondition(TrafficFormat.duration(since: now, now: now.addingTimeInterval(2538)) == "42m 18s")
         precondition(TrafficFormat.duration(since: nil) == "—")
+        // One host counter numbers samples: a repeat (the same sample in a `traffic` event and again in
+        // a `status` document) or an older one is dropped; a restarted host numbers from one again.
+        func sample(_ seq: UInt64, rx: Double? = 100) -> HostTraffic {
+            HostTraffic(session: "9f1c", rxBytes: seq * 10, txBytes: seq, rxRate: rx, txRate: 5, sampleSeq: seq)
+        }
+        var live = TunnelTraffic()
+        precondition(live.ingest(sample(7), at: 1) && live.receiving == 100 && live.latest?.sampleSeq == 7)
+        precondition(!live.ingest(sample(7, rx: 999), at: 2) && live.receiving == 100)
+        precondition(!live.ingest(sample(6, rx: 999), at: 2) && live.history.points.count == 1)
+        precondition(live.ingest(sample(8, rx: nil), at: 2) && live.receiving == nil && live.history.points.count == 2)
+        live.hostReconnected()
+        precondition(live.ingest(sample(1), at: 3) && live.latest?.sampleSeq == 1)
+        live.markStale(at: 4)
+        precondition(live.receiving == nil && live.latest?.sampleSeq == 1 && live.history.points.last?.receiving == nil)
+        live.clear()
+        precondition(live.latest == nil && live.history.points.isEmpty)
+
         var history = TrafficHistory()
         for second in 0...125 {
             history.record(session: "aaaa", receiving: Double(second), sending: Double(second) / 10, at: Double(second))

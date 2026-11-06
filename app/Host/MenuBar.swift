@@ -391,11 +391,11 @@ final class OFTCMenuViewController: NSViewController {
         }
         for tunnel in presentation.tunnels { rows[tunnel.id]?.update(tunnel) }
         allControls.isHidden = presentation.tunnels.count < 2
-        connectAll.isEnabled = !presentation.busy && presentation.tunnels.contains { !$0.state.active && $0.state != .setup }
-        disconnectAll.isEnabled = !presentation.busy && presentation.anyActive
+        connectAll.isEnabled = !presentation.busy && presentation.service == .ready && presentation.tunnels.contains { !$0.state.active && $0.state != .setup }
+        disconnectAll.isEnabled = !presentation.busy && presentation.service == .ready && presentation.anyActive
         addButton.isEnabled = !presentation.busy || presentation.anyActive
         quitButton.title = presentation.anyActive && presentation.service == .ready ? "Disconnect and Quit OFTC" : "Quit OFTC"
-        quitButton.isEnabled = !presentation.busy || presentation.service != .ready
+        quitButton.isEnabled = !presentation.busy
         view.layoutSubtreeIfNeeded()
     }
 
@@ -424,40 +424,11 @@ private final class TunnelRuntime {
     var errorMessage: String?
     var stoppingSince: Date?
     var busy = false
-    var receiving: Double?
-    var sending: Double?
-    var latest: HostTraffic?
-    var trafficHistory = TrafficHistory()
-    var trafficReceivedAt: Date?
-    var lastSampleSeq: UInt64 = 0
+    var traffic = TunnelTraffic()
     var connectedSince: Date?
     var state = MenuConnectionState.disconnected
 
     init(profile: HostProfile) { self.profile = profile }
-
-    // A sample older than the last one seen is dropped; the host's counter is one per host.
-    func ingest(_ sample: HostTraffic) {
-        guard sample.sampleSeq > lastSampleSeq else { return }
-        lastSampleSeq = sample.sampleSeq
-        latest = sample
-        receiving = sample.rxRate
-        sending = sample.txRate
-        trafficReceivedAt = Date()
-        trafficHistory.record(session: sample.session, receiving: sample.rxRate, sending: sample.txRate,
-                              at: TrafficHistoryClock.now)
-    }
-
-    func resetTraffic(clearHistory: Bool = false) {
-        trafficReceivedAt = nil
-        receiving = nil
-        sending = nil
-        if clearHistory {
-            latest = nil
-            trafficHistory.reset()
-        } else {
-            trafficHistory.markUnavailable(at: TrafficHistoryClock.now)
-        }
-    }
 }
 
 // The menu shows what the host says (HostEdge) and asks it to act; it reads no file and
@@ -591,13 +562,13 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             guard let self else { return }
             self.service = ServiceState(availability)
             // A restarted host numbers its traffic samples from one again.
-            if availability == .ready { for runtime in self.runtimes.values { runtime.lastSampleSeq = 0 } }
+            if availability == .ready { for runtime in self.runtimes.values { runtime.traffic.hostReconnected() } }
             self.reconcile()
         }
         created.onStatus = { [weak self] status in self?.apply(status) }
         created.onTraffic = { [weak self] event in
             guard let self, let runtime = self.runtimes[event.profile] else { return }
-            runtime.ingest(event.sample)
+            runtime.traffic.ingest(event.sample, at: TrafficHistoryClock.now)
             self.reconcile()
         }
         edge = created
@@ -611,7 +582,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for profile in status.profiles {
             if let existing = runtimes[profile.id] { existing.profile = profile }
             else { runtimes[profile.id] = TunnelRuntime(profile: profile) }
-            if let sample = profile.traffic { runtimes[profile.id]?.ingest(sample) }
+            if let sample = profile.traffic { runtimes[profile.id]?.traffic.ingest(sample, at: TrafficHistoryClock.now) }
         }
         let ids = status.profiles.map(\.id)
         for id in runtimes.keys where !ids.contains(id) { runtimes[id] = nil }
@@ -701,10 +672,10 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let since = profile.connectedDate
         if runtime.connectedSince != since || state != .connected {
             runtime.connectedSince = since
-            runtime.resetTraffic(clearHistory: true)
+            runtime.traffic.clear()
         }
         let now = TrafficHistoryClock.now
-        runtime.trafficHistory.prune(now: now)
+        runtime.traffic.pruneHistory(now: now)
         var row = TunnelPresentation(id: profile.id, name: profile.name)
         row.state = state
         row.description = state.detail
@@ -719,14 +690,14 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if state == .connected {
             row.description = place
             row.duration = TrafficFormat.duration(since: profile.connectedDate)
-            if let receivedAt = runtime.trafficReceivedAt, Date().timeIntervalSince(receivedAt) > 3 {
-                runtime.resetTraffic()
+            if let receivedAt = runtime.traffic.receivedAt, Date().timeIntervalSince(receivedAt) > 3 {
+                runtime.traffic.markStale(at: now)
             }
-            row.receiving = TrafficFormat.rate(runtime.receiving)
-            row.sending = TrafficFormat.rate(runtime.sending)
-            row.history = runtime.trafficHistory.points
+            row.receiving = TrafficFormat.rate(runtime.traffic.receiving)
+            row.sending = TrafficFormat.rate(runtime.traffic.sending)
+            row.history = runtime.traffic.history.points
             row.historyTime = now
-            if let sample = runtime.latest {
+            if let sample = runtime.traffic.latest {
                 row.totals = TrafficFormat.bytes(Double(sample.rxBytes)) + " / " + TrafficFormat.bytes(Double(sample.txBytes))
             }
         }
@@ -738,7 +709,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         var next = MenuPresentation()
         next.service = service
         next.tunnels = orderedRuntimes.map(tunnelPresentation)
-        next.busy = bulkBusy || onboarding != nil || service != .ready
+        // The host being down greys the rows and the bulk buttons, not Add VPN: setup works without it.
+        next.busy = bulkBusy || onboarding != nil
         next.notice = globalError
         next.update = updateOffer.flatMap { updateStore.shouldShow($0) ? $0.version : nil }
         presentation = next
@@ -770,7 +742,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 NSWorkspace.shared.open(url)
             }
         }
-        edge?.retryNow()
+        edge?.retryNow(startService: service == .notRunning)
     }
 
     private func showLaunchExperience(forceWelcome: Bool = false) {
@@ -991,11 +963,11 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showSettings(_ sender: NSButton) {
         let menu = NSMenu()
         let ready = preview == nil && !bulkBusy && service == .ready
-        func add(_ title: String, action: Selector, checked: Bool? = nil) {
+        func add(_ title: String, action: Selector, checked: Bool? = nil, needsHost: Bool = true) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             if let checked { item.state = checked ? .on : .off }
-            item.isEnabled = ready
+            item.isEnabled = needsHost ? ready : (preview == nil && !bulkBusy)
             menu.addItem(item)
         }
         menu.autoenablesItems = false
@@ -1005,7 +977,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             checked: preview == nil && updateStore.automatic)
         add("Check for Updates Now…", action: #selector(checkUpdatesNow))
         menu.addItem(.separator())
-        add("Add VPN…", action: #selector(openSetup))
+        add("Add VPN…", action: #selector(openSetup), needsHost: false)
         add("Export VPNs…", action: #selector(exportVPNs))
         menu.items.last?.isEnabled = ready && !runtimes.isEmpty
         add("Login Items & Extensions…", action: #selector(openLoginSettings))

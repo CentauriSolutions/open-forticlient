@@ -62,6 +62,52 @@ struct TrafficHistory {
     }
 }
 
+// One profile's traffic as the menu shows it: the newest sample from the host, its rates, and
+// the ring of recent rates. The host numbers samples with one counter (`sample_seq`).
+struct TunnelTraffic {
+    private(set) var latest: HostTraffic?
+    private(set) var receiving: Double?
+    private(set) var sending: Double?
+    private(set) var receivedAt: Date?
+    private(set) var history = TrafficHistory()
+    private var lastSampleSeq: UInt64 = 0
+
+    // A sample that is not newer than the last one seen is dropped (the same sample arrives in
+    // a `traffic` event and again inside a `status` document).
+    @discardableResult
+    mutating func ingest(_ sample: HostTraffic, at time: TimeInterval, date: Date = Date()) -> Bool {
+        guard sample.sampleSeq > lastSampleSeq else { return false }
+        lastSampleSeq = sample.sampleSeq
+        latest = sample
+        receiving = sample.rxRate
+        sending = sample.txRate
+        receivedAt = date
+        history.record(session: sample.session, receiving: sample.rxRate, sending: sample.txRate, at: time)
+        return true
+    }
+
+    /// A restarted host numbers its samples from one again.
+    mutating func hostReconnected() { lastSampleSeq = 0 }
+
+    /// No sample lately: the rates are unknown, the totals stay, and the trace gets a gap.
+    mutating func markStale(at time: TimeInterval) {
+        receivedAt = nil
+        receiving = nil
+        sending = nil
+        history.markUnavailable(at: time)
+    }
+
+    mutating func pruneHistory(now: TimeInterval) { history.prune(now: now) }
+
+    mutating func clear() {
+        latest = nil
+        receivedAt = nil
+        receiving = nil
+        sending = nil
+        history.reset()
+    }
+}
+
 // Unit coordinates keep the drawing independent of view size. A nil rate or
 // a missing sampling interval breaks the trace instead of inventing traffic.
 struct RateSparkline {

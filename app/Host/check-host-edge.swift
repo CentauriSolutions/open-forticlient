@@ -6,6 +6,20 @@ import Foundation
 // unix socket. No real host, launchd, Network Extension or user directory is touched: the
 // socket lives under /private/tmp and the "starter" is a double that counts its calls.
 
+// A failed check removes this run's own scratch directory before it stops (a trap would skip the
+// `defer` that normally does).
+var scratch: String?
+
+func failNow(_ message: String = "", line: UInt = #line) -> Never {
+    FileHandle.standardError.write(Data("host-edge check failed (\(line)): \(message)\n".utf8))
+    if let scratch { try? FileManager.default.removeItem(atPath: scratch) }
+    exit(1)
+}
+
+func require(_ condition: @autoclosure () -> Bool, _ message: String = "", line: UInt = #line) {
+    if !condition() { failNow(message, line: line) }
+}
+
 // MARK: Scripted host
 
 final class FakeHost {
@@ -20,6 +34,8 @@ final class FakeHost {
     /// Replies for ops the standard script does not know: return a line, or nil to stay silent.
     var custom: (([String: Any]) -> [String]?)?
     var rejectHello = false
+    /// Answers `hello`, then closes: a host that dies as soon as it is reached.
+    var dropAfterHello = false
 
     init(directory: String) { path = directory + "/h.sock" }
 
@@ -38,7 +54,7 @@ final class FakeHost {
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        precondition(bound == 0 && listen(listener, 8) == 0, "fake host could not listen")
+        require(bound == 0 && listen(listener, 8) == 0, "fake host could not listen")
         let fd = listener
         Thread.detachNewThread { [self] in
             while true {
@@ -111,6 +127,7 @@ final class FakeHost {
                 shutdown(client, SHUT_RDWR)
             } else {
                 write(#"{"id":\#(id),"ok":true,"result":{"protocol":1,"host":{"version":"0.9.0","build":"\#(build)","provider_build":"24"}}}"#, to: client)
+                if dropAfterHello { shutdown(client, SHUT_RDWR) }
             }
         case "subscribe"?:
             write(#"{"id":\#(id),"ok":true,"result":{}}"#, to: client)
@@ -138,7 +155,7 @@ final class FakeStarter: HostStarter {
     static func wait(_ what: String, timeout: TimeInterval = 5, _ condition: () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
-        precondition(condition(), "timed out waiting for \(what)")
+        require(condition(), "timed out waiting for \(what)")
     }
 
     static func pause(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
@@ -150,10 +167,13 @@ final class FakeStarter: HostStarter {
         framing()
         let directory = "/private/tmp/oftc-he-\(UUID().uuidString.prefix(8))"
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        scratch = directory
         defer { try? FileManager.default.removeItem(atPath: directory) }
         var count = 0
         for scenario in [handshakeAndRequests, unsupportedSchema, olderHostIsRestarted,
-                         reconnectAfterTheHostRestarts, notRunningAndApproval, requestTimeout, inactiveMenuDoesNotRetry] {
+                         reconnectAfterTheHostRestarts, notRunningAndApproval, requestTimeout, inactiveMenuDoesNotRetry,
+                         staleHostIsRestartedOnlyOnce, startsAreFloored, aHostThatDiesAtOnceIsNotStartedInALoop,
+                         approvalPendingIsNotRegisteredAgain] {
             count += 1
             try FileManager.default.createDirectory(atPath: "\(directory)/\(count)", withIntermediateDirectories: true)
             scenario("\(directory)/\(count)")
@@ -161,9 +181,9 @@ final class FakeStarter: HostStarter {
         print("host edge checks passed: golden documents, framing and \(count) scripted-host scenarios")
     }
 
-    static func edge(_ host: FakeHost, starter: FakeStarter, build: String = "24") -> HostEdge {
+    static func edge(_ host: FakeHost, starter: FakeStarter, build: String = "24", floor: TimeInterval = 60) -> HostEdge {
         HostEdge(configuration: .init(socketPath: host.path, clientVersion: "0.9.0", clientBuild: build,
-                                      backoff: [0.05, 0.05, 0.1], steadyRetry: 0.1, requestTimeout: 5),
+                                      backoff: [0.05, 0.05, 0.1], steadyRetry: 0.1, startFloor: floor, requestTimeout: 5),
                  starter: starter)
     }
 
@@ -176,36 +196,36 @@ final class FakeStarter: HostStarter {
     static func goldenDocuments(_ dir: URL) throws {
         let status = try HostWire.decoder.decode(HostStatus.self,
             from: Data(contentsOf: dir.appendingPathComponent("status.json")))
-        precondition(status.schema == 1 && status.seq == 1771 && status.host.build == "24")
-        precondition(status.component.state == .ready && status.component.installedBuild == "24")
-        precondition(status.login.menuItem == .enabled && status.login.hostAgent == .enabled)
+        require(status.schema == 1 && status.seq == 1771 && status.host.build == "24")
+        require(status.component.state == .ready && status.component.installedBuild == "24")
+        require(status.login.menuItem == .enabled && status.login.hostAgent == .enabled)
         let first = status.profiles[0], second = status.profiles[1]
-        precondition(first.id == "c2" && first.samlPort == 9443 && first.transport == "udp" && first.autoStart)
-        precondition(first.state == .connected && first.connectedDate == Date(timeIntervalSince1970: 1_793_791_080))
-        precondition(first.traffic == HostTraffic(session: "9f1c2e7a", rxBytes: 842_000_000, txBytes: 96_000_000,
+        require(first.id == "c2" && first.samlPort == 9443 && first.transport == "udp" && first.autoStart)
+        require(first.state == .connected && first.connectedDate == Date(timeIntervalSince1970: 1_793_791_080))
+        require(first.traffic == HostTraffic(session: "9f1c2e7a", rxBytes: 842_000_000, txBytes: 96_000_000,
                                                   rxRate: 1_200_000, txRate: 84_000, sampleSeq: 12))
-        precondition(second.state == .signIn && second.traffic == nil && second.error == nil && !second.autoStart)
+        require(second.state == .signIn && second.traffic == nil && second.error == nil && !second.autoStart)
 
         func frame(_ name: String) throws -> HostFrame { HostFrame.parse(try golden(dir, name)) }
-        guard case .status(let event) = try frame("event_status.json") else { preconditionFailure("status event") }
-        precondition(event.seq == 1772 && event.component.state == .checking && event.component.installedBuild == nil
+        guard case .status(let event) = try frame("event_status.json") else { failNow("status event") }
+        require(event.seq == 1772 && event.component.state == .checking && event.component.installedBuild == nil
                      && event.login.agent == .requiresApproval && event.login.hostAgent == .notFound && event.profiles.isEmpty)
-        guard case .traffic(let traffic) = try frame("event_traffic.json") else { preconditionFailure("traffic event") }
-        precondition(traffic.profile == "c2" && traffic.sample.rxRate == 1_100_000 && traffic.sample.txRate == nil
+        guard case .traffic(let traffic) = try frame("event_traffic.json") else { failNow("traffic event") }
+        require(traffic.profile == "c2" && traffic.sample.rxRate == 1_100_000 && traffic.sample.txRate == nil
                      && traffic.sample.sampleSeq == 13)
         let progress = try frame("event_progress.json")
-        precondition(progress == .progress(id: 9, HostProgress(step: "extension_approval", state: "waiting")))
-        guard case .reply(1, let hello?, nil) = try frame("hello_reply.json") else { preconditionFailure("hello reply") }
+        require(progress == .progress(id: 9, HostProgress(step: "extension_approval", state: "waiting")))
+        guard case .reply(1, let hello?, nil) = try frame("hello_reply.json") else { failNow("hello reply") }
         let host = try HostWire.decoder.decode(HostInfo.self, from: JSONSerialization.data(
             withJSONObject: (JSONSerialization.jsonObject(with: hello) as! [String: Any])["host"]!))
-        precondition(host == HostInfo(version: "0.9.0", build: "24", providerBuild: "24"))
-        guard case .reply(1, nil, let schema?) = try frame("error_unsupported_schema.json") else { preconditionFailure("schema error") }
-        precondition(schema.code == .unsupportedSchema && schema.exit == 5)
-        guard case .reply(10, nil, let configured?) = try frame("error_already_configured.json") else { preconditionFailure("configured") }
-        precondition(configured.code == .alreadyConfigured && configured.profileId == "c2")
-        guard case .reply(11, let preview?, nil) = try frame("import_preview_reply.json") else { preconditionFailure("preview") }
+        require(host == HostInfo(version: "0.9.0", build: "24", providerBuild: "24"))
+        guard case .reply(1, nil, let schema?) = try frame("error_unsupported_schema.json") else { failNow("schema error") }
+        require(schema.code == .unsupportedSchema && schema.exit == 5)
+        guard case .reply(10, nil, let configured?) = try frame("error_already_configured.json") else { failNow("configured") }
+        require(configured.code == .alreadyConfigured && configured.profileId == "c2")
+        guard case .reply(11, let preview?, nil) = try frame("import_preview_reply.json") else { failNow("preview") }
         let items = try HostWire.decoder.decode(HostImportPreview.self, from: preview).profiles
-        precondition(items == [HostImportItem(name: "Office VPN", gateway: "vpn.example.com", alreadyConfigured: true)])
+        require(items == [HostImportItem(name: "Office VPN", gateway: "vpn.example.com", alreadyConfigured: true)])
 
         // A newer host within one protocol number: unknown values and fields never break a reader.
         let future = Data(#"""
@@ -217,26 +237,26 @@ final class FakeStarter: HostStarter {
           "state":"levitating","new_field":true,"connected_since":null,"traffic":null,
           "error":{"code":"brand_new","detail":"d"}}]}}
         """#.utf8)
-        guard case .status(let newer) = HostFrame.parse(future) else { preconditionFailure("future status") }
-        precondition(newer.component.state == .unavailable && newer.login.menuItem == .notFound
+        guard case .status(let newer) = HostFrame.parse(future) else { failNow("future status") }
+        require(newer.component.state == .unavailable && newer.login.menuItem == .notFound
                      && newer.profiles[0].state == .attention && newer.profiles[0].error?.code == .internalFailure)
-        precondition(HostFrame.parse(Data(#"{"event":"surprise","x":1}"#.utf8)) == .ignored)
+        require(HostFrame.parse(Data(#"{"event":"surprise","x":1}"#.utf8)) == .ignored)
     }
 
     // MARK: Framing
 
     static func framing() {
-        precondition(HostFrame.encode(id: 7, op: "connect", args: ["profile": "c2"])
+        require(HostFrame.encode(id: 7, op: "connect", args: ["profile": "c2"])
             == Data(#"{"id":7,"op":"connect","profile":"c2"}"#.utf8 + [0x0A]))
         var buffer = HostLineBuffer()
-        precondition(buffer.feed(Data(#"{"a":1}"#.utf8 + [0x0A] + #"{"b""#.utf8))?.count == 1)
-        precondition(buffer.feed(Data(#":2}"#.utf8 + [0x0A, 0x0A]))?.map { String(decoding: $0, as: UTF8.self) } == [#"{"b":2}"#])
+        require(buffer.feed(Data(#"{"a":1}"#.utf8 + [0x0A] + #"{"b""#.utf8))?.count == 1)
+        require(buffer.feed(Data(#":2}"#.utf8 + [0x0A, 0x0A]))?.map { String(decoding: $0, as: UTF8.self) } == [#"{"b":2}"#])
         var long = HostLineBuffer()
-        precondition(long.feed(Data(repeating: 0x61, count: HostFrame.maxLine + 1)) == nil) // no newline in sight
+        require(long.feed(Data(repeating: 0x61, count: HostFrame.maxLine + 1)) == nil) // no newline in sight
         var long2 = HostLineBuffer()
-        precondition(long2.feed(Data(repeating: 0x61, count: HostFrame.maxLine + 1) + [0x0A]) == nil)
+        require(long2.feed(Data(repeating: 0x61, count: HostFrame.maxLine + 1) + [0x0A]) == nil)
         var edge = HostLineBuffer()
-        precondition(edge.feed(Data(repeating: 0x61, count: HostFrame.maxLine) + [0x0A])?.count == 1)
+        require(edge.feed(Data(repeating: 0x61, count: HostFrame.maxLine) + [0x0A])?.count == 1)
     }
 
     // MARK: Scenarios against the scripted host
@@ -264,31 +284,31 @@ final class FakeStarter: HostStarter {
         client.onTraffic = { samples.append($0) }
         client.start()
         wait("the first status") { !statuses.isEmpty }
-        precondition(states == [.ready] && statuses[0].profiles[0].state == .connected)
+        require(states == [.ready] && statuses[0].profiles[0].state == .connected)
         let hello = host.ops("hello")[0]
-        precondition(hello["id"] as? Int == 1 && hello["protocol"] as? [Int] == [1, 1])
+        require(hello["id"] as? Int == 1 && hello["protocol"] as? [Int] == [1, 1])
         let who = hello["client"] as? [String: String]
-        precondition(who == ["kind": "ui", "version": "0.9.0", "build": "24"])
-        precondition(host.ops("subscribe")[0]["topics"] as? [String] == ["status", "traffic"])
-        precondition(starter.startCount == 0, "a host that is there is never started")
+        require(who == ["kind": "ui", "version": "0.9.0", "build": "24"])
+        require(host.ops("subscribe")[0]["topics"] as? [String] == ["status", "traffic"])
+        require(starter.startCount == 0, "a host that is there is never started")
 
         host.broadcast(#"{"event":"traffic","profile":"c2","session":"9f1c","rx_bytes":5,"tx_bytes":6,"rx_rate":1.5,"tx_rate":null,"sample_seq":3}"#)
         wait("a traffic event") { !samples.isEmpty }
-        precondition(samples[0].profile == "c2" && samples[0].sample.rxRate == 1.5)
+        require(samples[0].profile == "c2" && samples[0].sample.rxRate == 1.5)
         // An older status document (seq not above the last) is ignored.
         host.statusSeq = 3
         host.broadcast(host.statusLine())
         pause(0.2)
-        precondition(statuses.count == 1)
+        require(statuses.count == 1)
 
         var progress: [HostProgress] = [], failure: HostError?
         client.request("connect", args: ["profile": "c2"], progress: { progress.append($0) }) { result in
             if case .failure(let error) = result { failure = error }
         }
         wait("the typed error") { failure != nil }
-        precondition(failure?.code == .approvalRequired && failure?.exit == 4)
-        precondition(progress == [HostProgress(step: "keychain", state: "running")])
-        precondition(host.ops("connect")[0]["profile"] as? String == "c2")
+        require(failure?.code == .approvalRequired && failure?.exit == 4)
+        require(progress == [HostProgress(step: "keychain", state: "running")])
+        require(host.ops("connect")[0]["profile"] as? String == "c2")
 
         var removed = false
         client.request("remove", args: ["profile": "c2"]) { if case .success = $0 { removed = true } }
@@ -298,10 +318,10 @@ final class FakeStarter: HostStarter {
             if case .success(let value) = $0 { added = value.added }
         }
         wait("a typed result") { added != nil }
-        precondition(added == ["lab"])
+        require(added == ["lab"])
         // Ids are distinct and increase on one connection.
         let ids = host.requests.compactMap { $0["id"] as? Int }
-        precondition(ids == Array(1...ids.count))
+        require(ids == Array(1...ids.count))
         client.stop()
     }
 
@@ -316,11 +336,11 @@ final class FakeStarter: HostStarter {
         client.start()
         wait("unsupported") { state == .unavailable(.unsupported("host speaks protocol 2")) }
         pause(0.5)
-        precondition(host.connections == 1, "no retry for an unsupported schema")
+        require(host.connections == 1, "no retry for an unsupported schema")
         var refused: HostError?
         client.request("status") { if case .failure(let error) = $0 { refused = error } }
         wait("the refused request") { refused != nil }
-        precondition(refused?.code == .hostUnavailable && refused?.exit == 5)
+        require(refused?.code == .hostUnavailable && refused?.exit == 5)
         // A window opening tries once more (the host is still too new, so the state stays).
         client.retryNow()
         wait("one more attempt") { host.connections == 2 }
@@ -339,8 +359,8 @@ final class FakeStarter: HostStarter {
         client.onAvailability = { states.append($0) }
         client.start()
         wait("the restarted host") { states.last == .ready }
-        precondition(states == [.unavailable(.updating), .ready])
-        precondition(starter.restartCount == 1 && host.connections == 2)
+        require(states == [.unavailable(.updating), .ready])
+        require(starter.restartCount == 1 && host.connections == 2)
         // A host that stays older is used rather than restarted in a loop.
         client.stop()
     }
@@ -365,18 +385,18 @@ final class FakeStarter: HostStarter {
         host.stop()
         wait("unavailable") { states.last == .unavailable(.notRunning) }
         wait("the in-flight failure") { inFlight != nil }
-        precondition(inFlight?.code == .hostUnavailable, "a dropped request is not retried by the UI")
-        precondition(host.ops("connect").count == 1)
+        require(inFlight?.code == .hostUnavailable, "a dropped request is not retried by the UI")
+        require(host.ops("connect").count == 1)
         wait("the service start") { starter.startCount == 1 }
         pause(0.4) // several retries with nothing listening
-        precondition(starter.startCount == 1, "the service is started once per outage")
+        require(starter.startCount == 1, "the service is started once per outage")
 
         host.statusSeq = 1 // a new host numbers its documents from 1 again
         host.start(); defer { host.stop() }
         wait("ready again") { states.last == .ready && statuses.count == 2 }
-        precondition(statuses[1].seq == 1)
-        precondition(host.ops("hello").count == 2 && host.ops("subscribe").count == 2)
-        precondition(starter.startCount == 1)
+        require(statuses[1].seq == 1)
+        require(host.ops("hello").count == 2 && host.ops("subscribe").count == 2)
+        require(starter.startCount == 1)
         client.stop()
     }
 
@@ -390,8 +410,8 @@ final class FakeStarter: HostStarter {
         client.onAvailability = { states.append($0) }
         client.start()
         wait("approval") { states.last == .unavailable(.needsApproval) }
-        precondition(states == [.unavailable(.notRunning), .unavailable(.needsApproval)])
-        precondition(starter.startCount == 1)
+        require(states == [.unavailable(.notRunning), .unavailable(.needsApproval)])
+        require(starter.startCount == 1)
         // The user approves; the service now answers; a window opening finds it.
         host.start(); defer { host.stop() }
         client.retryNow()
@@ -412,9 +432,9 @@ final class FakeStarter: HostStarter {
         var failure: HostError?
         client.request("connect", args: ["profile": "c2"], timeout: 0.2) { if case .failure(let e) = $0 { failure = e } }
         wait("the timeout") { failure != nil }
-        precondition(failure?.code == .timeout)
+        require(failure?.code == .timeout)
         wait("the cancel") { !host.ops("cancel").isEmpty }
-        precondition(host.ops("cancel")[0]["target"] as? Int == host.ops("connect")[0]["id"] as? Int)
+        require(host.ops("cancel")[0]["target"] as? Int == host.ops("connect")[0]["id"] as? Int)
         client.stop()
     }
 
@@ -429,10 +449,69 @@ final class FakeStarter: HostStarter {
         client.start()
         wait("unavailable") { states == [.unavailable(.notRunning)] }
         pause(0.4)
-        precondition(starter.startCount == 0 && host.connections == 0)
+        require(starter.startCount == 0 && host.connections == 0)
         host.start(); defer { host.stop() }
         client.setActive(true)
         wait("ready after the window opens") { states.last == .ready }
+        client.stop()
+    }
+
+    /// A host that is still older after the restart is used, not restarted in a loop.
+    static func staleHostIsRestartedOnlyOnce(_ directory: String) {
+        let host = FakeHost(directory: directory)
+        host.build = "23"
+        host.start(); defer { host.stop() }
+        let starter = FakeStarter() // `restart` changes nothing: the host stays build 23
+        let client = edge(host, starter: starter)
+        var states: [HostAvailability] = []
+        client.onAvailability = { states.append($0) }
+        client.start()
+        wait("the old host to be used") { states.last == .ready }
+        pause(0.3)
+        require(starter.restartCount == 1 && host.connections == 2)
+        client.stop()
+    }
+
+    /// Opening the menu while the host is down does not start the service each time; only the
+    /// user's own "Start service" does.
+    static func startsAreFloored(_ directory: String) {
+        let host = FakeHost(directory: directory) // never started
+        let starter = FakeStarter()
+        let client = edge(host, starter: starter)
+        client.start()
+        wait("the first start") { starter.startCount == 1 }
+        for _ in 0..<3 { client.retryNow(); client.setActive(true); pause(0.15) }
+        require(starter.startCount == 1, "menu opens and wakes do not re-arm the start")
+        client.retryNow(startService: true)
+        wait("the user's start") { starter.startCount == 2 }
+        client.stop()
+    }
+
+    /// A host that answers hello and dies each time is started once, not on every cycle.
+    static func aHostThatDiesAtOnceIsNotStartedInALoop(_ directory: String) {
+        let host = FakeHost(directory: directory)
+        host.dropAfterHello = true
+        host.start(); defer { host.stop() }
+        let starter = FakeStarter()
+        let client = edge(host, starter: starter)
+        client.start()
+        wait("several connections") { host.connections >= 4 }
+        require(starter.startCount == 1, "started \(starter.startCount) times")
+        client.stop()
+    }
+
+    /// While macOS waits for the user's approval the service is not registered again.
+    static func approvalPendingIsNotRegisteredAgain(_ directory: String) {
+        let host = FakeHost(directory: directory)
+        let starter = FakeStarter()
+        starter.result = .needsApproval
+        let client = edge(host, starter: starter, floor: 0) // only the approval holds it back
+        var state: HostAvailability?
+        client.onAvailability = { state = $0 }
+        client.start()
+        wait("approval") { state == .unavailable(.needsApproval) }
+        for _ in 0..<3 { client.retryNow(); client.retryNow(startService: true); pause(0.15) }
+        require(starter.startCount == 1 && state == .unavailable(.needsApproval))
         client.stop()
     }
 }

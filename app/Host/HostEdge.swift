@@ -369,6 +369,9 @@ final class HostEdge {
         var clientBuild: String
         var backoff: [TimeInterval] = [0.5, 1, 2, 5]
         var steadyRetry: TimeInterval = 30
+        /// The least time between two attempts to start the service, however often the menu opens
+        /// or a host answers and dies; only the user's own "Start service" skips it.
+        var startFloor: TimeInterval = 30
         var requestTimeout: TimeInterval = 30
     }
 
@@ -399,7 +402,11 @@ final class HostEdge {
     private var pending: [UInt64: Pending] = [:]
     private var availability = HostAvailability.connecting
     private var attempt = 0
-    private var startTried = false
+    private var lastStartAt: Date?
+    private var forceStart = false
+    /// `host register` said macOS holds the service for the user's approval: it is not run again
+    /// until a host answers.
+    private var approvalPending = false
     private var restartedForBuild = false
     private var active = true
     private var retryScheduled = false
@@ -449,11 +456,15 @@ final class HostEdge {
         }
     }
 
-    func retryNow() {
+    /// Tries to connect now (a window opened, a wake). `startService` is the user's own request to
+    /// start the service and is the one thing that skips the floor between starts.
+    func retryNow(startService: Bool = false) {
         queue.async {
-            guard self.connection == nil, self.availability != .connecting else { return }
+            // An older host is being replaced; a connect now could only reach it again.
+            guard self.connection == nil, self.availability != .connecting,
+                  self.availability != .unavailable(.updating) else { return }
             self.attempt = 0
-            self.startTried = false
+            if startService { self.forceStart = true }
             self.connect()
         }
     }
@@ -577,7 +588,7 @@ final class HostEdge {
                 return
             }
             attempt = 0
-            startTried = false
+            approvalPending = false
             lastSeq = 0
             setAvailability(.ready)
             let topics: [String: Any] = ["topics": ["status", "traffic"]]
@@ -640,18 +651,24 @@ final class HostEdge {
         for (_, entry) in waiting { complete(entry, .failure(error)) }
     }
 
-    /// No server answered. Start it once per outage, then retry with backoff.
+    /// No server answered. Start it unless it was started (or is waiting for approval) lately,
+    /// then retry with backoff.
     private func unreachable() {
         if availability != .unavailable(.needsApproval) { setAvailability(.unavailable(.notRunning)) }
         guard active else { return }
-        if !startTried {
-            startTried = true
+        let due = lastStartAt.map { Date().timeIntervalSince($0) >= configuration.startFloor } ?? true
+        if !approvalPending && (due || forceStart) {
+            forceStart = false
+            lastStartAt = Date()
             starterQueue.async {
                 let result = self.starter.start()
                 self.queue.async {
                     switch result {
                     case .started: self.scheduleRetry(after: self.configuration.backoff.first ?? 0.5)
-                    case .needsApproval: self.setAvailability(.unavailable(.needsApproval))
+                    case .needsApproval:
+                        self.approvalPending = true
+                        self.setAvailability(.unavailable(.needsApproval))
+                        self.scheduleRetry(after: self.nextDelay()) // the service starts itself once allowed
                     case .failed: self.scheduleRetry(after: self.nextDelay())
                     }
                 }
