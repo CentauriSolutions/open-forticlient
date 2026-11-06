@@ -60,9 +60,13 @@ else
   if lc_live; then
     expect_eq "installer exit status is nonzero (refused)" "$([[ $LC_RC != 0 ]] && print refused || print ran)" refused
     expect_eq "bundle version unchanged by the refused install" "$(app_version)" "$ver_before"
+    # With a tunnel connected, the package's install check refuses on the installer's own
+    # output and the preinstall script never runs, so that output is the primary evidence.
+    reason=$(print -r -- "$LC_OUT" | grep -oE 'Disconnect every OFTC VPN|OFTC is running|An OFTC VPN is active' | tail -1)
+    [[ -n $reason ]] && lc_pass "installer refused with an OFTC message: $reason" || lc_fail "no OFTC refusal message in the installer output"
     lc_run -q tail -n 400 "$INSTALL_LOG"
     reason=$(print -r -- "$LC_OUT" | grep -oE 'OFTC is running|An OFTC VPN is active' | tail -1)
-    [[ -n $reason ]] && lc_pass "preinstall refusal recorded in install.log: $reason" || lc_fail "no OFTC refusal message found in install.log"
+    [[ -n $reason ]] && lc_info "preinstall script also logged in install.log: $reason" || lc_info "no preinstall line in install.log (expected when the install check refuses first)"
     lc_run -q pgrep -fl "$guard_re"
     lc_info "processes the preinstall guard matches (any OFTCAgent: menu, supervisors and the host service all match): $(print -r -- "$LC_OUT" | wc -l | tr -d ' ') process(es)"
   fi
@@ -93,6 +97,7 @@ if lc_live; then
   (( LC_RC == 0 )) && installed=1
 fi
 if (( installed )) || (( LC_DRY )); then
+  lc_open_app_after_install
   lc_step "bundle after install"
   if lc_live; then
     ver_after=$(app_version); build_after=$(app_build); prov_after=$(provider_build)
