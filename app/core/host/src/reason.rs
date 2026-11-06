@@ -23,7 +23,7 @@ pub fn explain(code: i32) -> Option<(ErrorCode, &'static str)> {
         // Resolve: no address for the gateway name.
         200 => (ErrorCode::GatewayNotFound, "The gateway's address could not be found. Check the network connection and the gateway name."),
         // Socket after the UDP attempt timed out and the TCP fallback failed too.
-        201 => (ErrorCode::NetworkBlocked, "Could not reach the gateway. This network may block UDP, and the gateway did not accept TCP."),
+        201 => (ErrorCode::NetworkBlocked, "The gateway did not answer over UDP or over TCP. This network may block UDP."),
         // Timeout with no fallback left, or after the gateway had answered.
         202 => (ErrorCode::GatewayNoAnswer, "The gateway did not answer in time."),
         // SA_INIT refused, CHILD_SA refused, ESP/control/inactive during setup.

@@ -304,7 +304,7 @@ stable part and replaces the substring match in `MenuCommandFailure.classify`:
 | `tunnels_active` | 3 | new |
 | `busy` | 6 | new; another op holds that profile's lock |
 | `unknown_op` | 2 | new |
-| `network_blocked` | 1 | `profiles[].error` only: the UDP attempt got no answer and the TCP 4443 fallback failed (provider code 201, the log line `OFTC provider stage 201 failed`) |
+| `network_blocked` | 1 | `profiles[].error` only: the UDP attempt got no answer and the TCP 4443 fallback was refused or unanswered (provider code 201, the log line `OFTC provider stage 201 failed`) |
 | `gateway_not_found` | 1 | `profiles[].error` only: the gateway name did not resolve (200) |
 | `gateway_no_answer` | 1 | `profiles[].error` only: no answer in time (202) |
 | `gateway_refused` | 1 | `profiles[].error` only: IKE_SA_INIT, the pre-shared key check or CHILD_SA was refused (203, 204, 209 to 212) |
