@@ -210,7 +210,8 @@ Details PR 3 settled where this document was silent:
   and nothing else (no sign-in, no connection); macOS holding it for approval shows as
   `requires_approval` in the Login Items UI, not as a failed setup. The host records the offer in
   `menu-login-default.json` in its support directory (the file the Swift first-launch default used
-  to write), and any `settings_set menu_login` writes it too, so nothing registers it a second
+  to write, as `{}` or `[]`; only the file's existence counts, whatever it holds, and it never means
+  on or off), and any `settings_set menu_login` writes it too, so nothing registers it a second
   time or against the user's choice; repairs, extra profiles and `oftc uninstall` never offer it.
   Turn it off in the menu's Settings ("OFTC at login") or `OFTCAgent unregister-menu-login`.
 - `settings_set auto_update` is stored by the host in `host-settings.json` in its own

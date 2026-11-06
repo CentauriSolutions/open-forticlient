@@ -13,7 +13,11 @@ use oftc_apple::login::{LoginItem, LoginItems, LoginStatus};
 
 use crate::lease;
 
-/// Present once the default was offered or the user chose; its content is not read.
+/// Present once the default was offered or the user chose. Only its existence counts, never its
+/// content: earlier Swift builds wrote this file (`{}` or `[]`) when they decided the first-run
+/// choice, whatever it was, so an existing file of any content means "already decided" and
+/// says nothing about whether the item is on or off. The host's own marker text
+/// (`offered`, `chosen`) is for a human reading it.
 pub const MARKER: &str = "menu-login-default.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +93,20 @@ mod tests {
         assert_eq!(offer(&dir.0, &items, false), Outcome::Skipped);
         assert_eq!(items.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
         assert!(!&dir.0.join(MARKER).exists(), "a skipped offer does not spend it");
+    }
+
+    /// The file name is already in the wild (older Swift builds wrote `{}` or `[]`): whatever
+    /// it holds, it means "decided", is left byte for byte as found, and registers nothing.
+    #[test]
+    fn a_marker_from_an_older_build_means_decided_whatever_it_holds() {
+        for legacy in ["[]", "{}", "", "garbage \u{0}"] {
+            let dir = root();
+            let items = MockLoginItems::new();
+            std::fs::write(dir.0.join(MARKER), legacy).unwrap();
+            assert_eq!(offer(&dir.0, &items, true), Outcome::Skipped, "{legacy:?}");
+            assert_eq!(items.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
+            assert_eq!(std::fs::read_to_string(dir.0.join(MARKER)).unwrap(), legacy);
+        }
     }
 
     #[test]
