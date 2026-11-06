@@ -57,8 +57,9 @@ Plain observations, not a diagnosis of FortiOS; your gateway may differ.
 
 All we conclude: TCP fallback is a gateway requirement. On the observed 7.4.11 gateway
 an explicit local-in policy for the IKE TCP port was needed; on 7.6.6 with `transport
-auto` it was not. In production, scope that policy's source to the networks your users
-connect from rather than `all`. Do not trust the configuration alone: verify with a TCP
+auto` it was not. If your users connect from known networks, you can scope the policy's source to them; a
+dial-up gateway that serves users anywhere normally allows any source and relies on the
+phase1's authentication (PSK, EAP with SAML, an authorised user group) and DPD. Do not trust the configuration alone: verify with a TCP
 connect to `<ike-tcp-port>` from outside the gateway's network.
 
 ## Verify from the gateway
