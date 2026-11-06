@@ -514,10 +514,12 @@ final class HostEdge {
     func retryNow(startService: Bool = false) {
         queue.async {
             // An older host is being replaced; a connect now could only reach it again.
-            guard self.connection == nil, self.availability != .connecting,
-                  self.availability != .unavailable(.updating) else { return }
-            self.attempt = 0
+            guard self.availability != .unavailable(.updating), self.availability != .ready else { return }
+            // Recorded even while a connect is in flight: that connect's failure consumes it,
+            // so the user's request is never lost to a retry that happened to be mid-connect.
             if startService { self.forceStart = true }
+            guard self.connection == nil, self.availability != .connecting else { return }
+            self.attempt = 0
             self.connect()
         }
     }
@@ -642,6 +644,7 @@ final class HostEdge {
             }
             attempt = 0
             approvalPending = false
+            forceStart = false
             lastSeq = 0
             setAvailability(.ready)
             let topics: [String: Any] = ["topics": ["status", "traffic"]]

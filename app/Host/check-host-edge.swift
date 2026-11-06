@@ -149,6 +149,23 @@ final class FakeStarter: HostStarter {
     func restart() -> Bool { lock.lock(); restarts += 1; lock.unlock(); onRestart?(); return true }
 }
 
+/// A connection whose connect is held until the test decides how it ends, so a request can be
+/// made at exactly the moment a connect is in flight.
+final class HeldConnection: HostConnection {
+    var onData: ((Data) -> Void)?
+    var onClosed: (() -> Void)?
+    private let lock = NSLock()
+    private var ready: ((Error?) -> Void)?
+    var isHeld: Bool { lock.lock(); defer { lock.unlock() }; return ready != nil }
+    func start(_ ready: @escaping (Error?) -> Void) { lock.lock(); self.ready = ready; lock.unlock() }
+    func fail() {
+        lock.lock(); let handler = ready; ready = nil; lock.unlock()
+        handler?(NSError(domain: "check", code: 1))
+    }
+    func send(_ data: Data) {}
+    func cancel() {}
+}
+
 // MARK: Check
 
 @main enum HostEdgeCheck {
@@ -172,7 +189,7 @@ final class FakeStarter: HostStarter {
         var count = 0
         for scenario in [handshakeAndRequests, unsupportedSchema, olderHostIsRestarted,
                          reconnectAfterTheHostRestarts, notRunningAndApproval, requestTimeout, inactiveMenuDoesNotRetry,
-                         staleHostIsRestartedOnlyOnce, startsAreFloored, aHostThatDiesAtOnceIsNotStartedInALoop,
+                         staleHostIsRestartedOnlyOnce, startsAreFloored, anExplicitStartDuringAConnectIsKept, aHostThatDiesAtOnceIsNotStartedInALoop,
                          approvalPendingIsNotRegisteredAgain] {
             count += 1
             try FileManager.default.createDirectory(atPath: "\(directory)/\(count)", withIntermediateDirectories: true)
@@ -485,6 +502,38 @@ final class FakeStarter: HostStarter {
         require(starter.startCount == 1, "menu opens and wakes do not re-arm the start")
         client.retryNow(startService: true)
         wait("the user's start") { starter.startCount == 2 }
+        client.stop()
+    }
+
+    /// The user's "Start service" lands while a retry's connect is in flight: it is kept, and the
+    /// failing connect starts the service even though the floor has not passed.
+    static func anExplicitStartDuringAConnectIsKept(_ directory: String) {
+        let host = FakeHost(directory: directory)
+        let starter = FakeStarter()
+        let lock = NSLock()
+        var held: [HeldConnection] = []
+        let client = HostEdge(configuration: .init(socketPath: host.path, clientVersion: "0.9.0", clientBuild: "24",
+                                                   backoff: [0.05], steadyRetry: 0.05, startFloor: 60, requestTimeout: 5),
+                              starter: starter,
+                              makeConnection: { _, _ in
+                                  let connection = HeldConnection()
+                                  lock.lock(); held.append(connection); lock.unlock()
+                                  return connection
+                              })
+        func connection(_ index: Int) -> HeldConnection? {
+            lock.lock(); defer { lock.unlock() }
+            return index < held.count ? held[index] : nil
+        }
+        client.start()
+        wait("the first connect") { connection(0)?.isHeld == true }
+        connection(0)?.fail()
+        wait("the first start") { starter.startCount == 1 }
+        wait("a retry's connect in flight") { connection(1)?.isHeld == true }
+        client.retryNow(startService: true)
+        pause(0.1) // let the request reach the edge's queue while the connect is still held
+        require(starter.startCount == 1)
+        connection(1)?.fail()
+        wait("the user's start, inside the floor") { starter.startCount == 2 }
         client.stop()
     }
 
