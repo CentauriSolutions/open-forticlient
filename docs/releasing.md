@@ -58,15 +58,22 @@ than every build ever activated.
   keeps `main` from shipping below it.
 - The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
   update notice use it. It is not subject to the extension rule.
-- The first generally available release is 1.0.0, host build 44, provider 1.3.2 build 52.
-  The host's display version restarts at 1.0.0 for the public release; its build number
+- Until the release is cut the host is numbered 0.9.0, build 44, and the provider 1.3.2
+  build 52. The release commit changes the host's display version to 1.0.0 (one plist
+  edit) once the team agrees the build is the one to ship. A suffix such as `1.0.0~b1` or
+  `1.0.0-beta1` is not used: git refuses `~` in a tag, `app/package.sh` accepts only dotted
+  numbers, and the update check cannot read the installed version at all when it has a
+  suffix, so such an install would never be offered the final release. A numeric 0.9.x
+  keeps the notice working: 0.9.0 sees 1.0.0 as an upgrade.
+- The host's display version restarts for the public release; its build number
   (`CFBundleVersion`) keeps rising from the private builds (1.2.2 was build 41), because
   the app compares builds, not display versions, to tell a stale host from a current one.
   The package does not version-check the bundle (`BundleIsVersionChecked` is false), so a
   lower display version still installs over an older private build. Builds shared before
   1.3.0 have no in-app update notice, so the first public release reaches those users by
-  being handed to them. The provider is separate: it must stay above the activated floor
-  (here 1.3.1 build 51, the highest activated on a maintained Mac), so it is 1.3.2/52.
+  being handed to them.
+- The provider is separate: it must stay above the activated floor (here 1.3.1 build 51,
+  the highest activated on a maintained Mac), so it is 1.3.2/52.
 
 ## Cutting a release
 
