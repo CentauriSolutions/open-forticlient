@@ -37,6 +37,9 @@ jobs:
       - name: Provider version above the activated floor
         run: zsh app/check-versions.sh
 
+      - name: Installer script checks
+        run: zsh app/check-package-scripts.sh
+
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:

@@ -1,13 +1,42 @@
 #!/bin/sh
 set -eu
 
+# OFTC_POSTINSTALL_ROOT only exists so app/check-package-scripts.sh can run the
+# cleanup against a temporary tree; the installer never sets it. With it set the
+# script stops after the cleanup and touches no user session.
+root=${OFTC_POSTINSTALL_ROOT:-}
+bundle_id=com.chris.openforticlient.oftc
+
+# True only for a real directory (not a symlink) that is exactly our bundle.
+is_our_bundle() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+    [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null)" = "$bundle_id" ]
+}
+
 # Before the app was renamed it installed as OFTC.app. Remove that copy only if
 # it is exactly our bundle, so two apps never share one bundle identifier.
-old=/Applications/OFTC.app
-if [ -d "$old" ] && [ ! -L "$old" ] &&
-   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$old/Contents/Info.plist" 2>/dev/null)" = com.chris.openforticlient.oftc ]; then
+old="$root/Applications/OFTC.app"
+if is_our_bundle "$old"; then
     /bin/rm -rf "$old"
 fi
+
+# Builds before the Rust host and provider shipped dylibs in Contents/Frameworks (the
+# app's and the system extension's). The installer replaces the whole bundle, so
+# these normally vanish with the old one; if anything left them behind (a bundle
+# merged by hand, say) they would be sealed-resource strays that break the code
+# signature, and macOS then refuses the extension (error 8). The current bundle ships
+# no Frameworks directory (app/package.sh checks), so removing them cannot remove
+# anything of ours. Only these exact directories inside our own installed bundle.
+app="$root/Applications/Open Forticlient.app"
+if is_our_bundle "$app"; then
+    for stale in "$app/Contents/Frameworks" \
+                 "$app"/Contents/Library/SystemExtensions/*.systemextension/Contents/Frameworks; do
+        if [ -e "$stale" ] || [ -L "$stale" ]; then
+            /bin/rm -rf "$stale"
+        fi
+    done
+fi
+[ -z "$root" ] || exit 0
 
 console_user=$(/usr/bin/stat -f %Su /dev/console)
 case "$console_user" in
@@ -33,7 +62,6 @@ esac
 if [ -n "${COMMAND_LINE_INSTALL:-}" ] && ! /usr/bin/pgrep -x Installer >/dev/null 2>&1; then
     exit 0
 fi
-app="/Applications/Open Forticlient.app"
 if [ -d "$app" ]; then
     # launchctl must be root to enter the user's session (it fails with
     # "Operation not permitted" when run as the user); sudo then drops to the user.
