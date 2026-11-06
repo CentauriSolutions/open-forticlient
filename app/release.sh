@@ -24,6 +24,8 @@ export DEVELOPER_ID_IDENTITY DEVELOPER_ID_INSTALLER_IDENTITY NOTARY_PROFILE APP_
 
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$root/Host/Info.plist")
 tag="v$version"
+# The provider must be above every build ever activated (macOS never downgrades it).
+zsh "$root/check-versions.sh"
 cd "$repo"
 [[ -z "$(git status --porcelain)" ]] || { print -u2 'Working tree is not clean'; exit 2; }
 [[ "$(git tag --points-at HEAD)" == *"$tag"* ]] || {

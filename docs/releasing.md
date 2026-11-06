@@ -37,10 +37,37 @@ zsh app/gate-build.sh   # fresh /private/tmp/oftc-build-gate-*, sign, notarize; 
 It uses the same environment as `release.sh` (`~/.config/oftc/release.env`), needs no
 installer identity, and installs nothing. Afterwards run `zsh app/release-dev-assets.sh`.
 
+## Version policy
+
+macOS moves a system extension forward only. It will not replace an activated
+provider with one whose version is not higher, and a rollback is not a downgrade: a
+rollback build must be numbered **higher than the build it replaces**, which is higher
+than every build ever activated.
+
+- `app/Provider/Info.plist` (`CFBundleVersion`, and `CFBundleShortVersionString`)
+  must be higher than every provider build activated on any maintained Mac.
+  `app/provider-version-floor` records that highest build and version (36 / 1.0.13:
+  the dev Mac's gate builds 1.0.8/31, 1.0.10/33 and 1.0.13/36 came from local
+  uncommitted plist bumps, while `main` still said 1.0.5/29).
+- `app/check-versions.sh` fails unless the provider is above that floor. `release.sh`
+  runs it first and CI runs it in the lint job.
+- Gate builds (`app/gate-build.sh`) do not bump anything. When a gate needs a newer
+  provider than `main` has, bump `app/Provider/Info.plist` locally, uncommitted, to a
+  build above everything activated so far. Once such a build is activated, raise
+  `app/provider-version-floor` to it in a PR before the next release; the check then
+  keeps `main` from shipping below it.
+- The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
+  update notice use it. It is not subject to the extension rule.
+- The first generally available release is 1.3.0, host build 42, provider build 50. The
+  host continues from 1.2.2/41 (the last shipped host, so the update notice sees an
+  upgrade). The provider takes 1.3.0 to match the product and build 50, which is above
+  the floor of 36 with room for further local gate bumps before release.
+
 ## Cutting a release
 
 1. Bump the version in `app/Host/Info.plist` (`CFBundleShortVersionString`,
-   `CFBundleVersion`) and, if the provider changed, `app/Provider/Info.plist`.
+   `CFBundleVersion`) and, if the provider changed, `app/Provider/Info.plist`, keeping
+   the provider above `app/provider-version-floor` (see Version policy).
    Scripts read the version from there; nothing else needs editing.
 2. Update `docs/` and the update-feed expectations if behaviour changed, commit, and
    merge to `main`.
@@ -60,6 +87,48 @@ installer identity, and installs nothing. Afterwards run `zsh app/release-dev-as
 The DMG attached to a release is the generic one. A DMG with a team's default VPNs
 (`OFTC_VPNS_FILE=vpns.oftc zsh app/make-dmg.sh`) is for first installs and is not
 published.
+
+## How the package upgrades an installed app
+
+`app/package.sh` builds the component package with `app/package-files/component.plist`:
+the app bundle is replaced as a whole (`BundleOverwriteAction` `upgrade`, so files the
+new bundle lacks, such as an old `Frameworks` directory, are deleted rather than merged
+into), is not relocatable (Installer never updates a `/private/tmp` build in its
+place), requires the identifier to match, and is installed even when the disk holds a
+higher build. `postinstall` also removes `Contents/Frameworks` left in the installed
+bundle by older builds, only inside `/Applications/Open Forticlient.app` and only if its
+identifier is ours; `package.sh` refuses a bundle that ships any `Frameworks` directory.
+`zsh app/check-package-scripts.sh` (CI, lint job) tests that cleanup and the installer's
+active-VPN test offline. What offline cannot show is that Installer really replaces an
+old bundle this way: see the checklist.
+
+The distribution file still sets `allow-external-scripts` (its `checkUpdate` runs
+`system.run`); `productbuild` warns that Apple will break this in a future macOS. The
+preinstall script makes the same checks, so removing the distribution script loses only
+the earlier, friendlier message.
+
+## Live checklist before publishing a draft
+
+Run on a Mac, with the signed, notarized pkg from `dist/<version>/`; these are the claims
+CI and the offline checks cannot make.
+
+1. **Clean install** (no OFTC, no `/Applications/Open Forticlient.app`): install; the
+   app opens and the menu bar icon appears; `pkgutil --pkg-info com.chris.openforticlient.oftc.pkg`
+   shows the version; `codesign --verify --deep --strict "/Applications/Open Forticlient.app"` and
+   `spctl --assess --type execute` pass; approve the extension; connect a VPN.
+   `systemextensionsctl list` shows the provider `activated enabled` at build 50 or higher.
+2. **Upgrade over an old build** (a Swift-provider build installed, VPNs saved):
+   disconnect every VPN, install; `ls "/Applications/Open Forticlient.app/Contents"` has
+   no `Frameworks`; the codesign check passes; the saved VPNs are still listed; activate
+   the new provider (Settings, Add VPN...); `systemextensionsctl list` shows the new
+   version `activated enabled` with the old one `terminated`/removed and no error 8.
+   Repeat once with a VPN connected: Installer must refuse and name the VPN.
+3. **Uninstall**: `oftc uninstall`. Expect: VPNs stop; the system extension is
+   deactivated (approve or reboot if macOS asks, then rerun); `/Applications/Open Forticlient.app`,
+   `/usr/local/bin/oftc`, `/usr/local/libexec/oftc` and the receipt are gone;
+   System Settings, General, Login Items & Extensions lists no OFTC item
+   (no `...oftc.host`, no `...oftc.agent`, no OFTC app item); profiles, Keychain PSKs
+   and `~/Library/Logs/OFTC` remain unless `--erase-profile`.
 
 ## Local signing setup
 

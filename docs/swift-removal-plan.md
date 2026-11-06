@@ -1,23 +1,41 @@
 # Swift removal plan
 
 Goal: minimise Swift in OFTC, and where it stays, keep it behind a narrow,
-documented edge. Tracked as Issues 41 to 50.
+documented edge. Tracked as #41 to #50. The plan below is kept as the record of
+the decisions; this section says where it stands.
+
+## Status
+
+| Lane | State on `main` |
+| --- | --- |
+| #41 seams and workspace | Done: `Tunnel` and `VpnControl` traits, the app Cargo workspace. |
+| #42 crypto | Done: Rust crypto, no `libcrypto_swift.dylib`. |
+| #43 provider logic, #44 NetworkExtension backend | Done offline: the `OFTCTunnel` Rust system extension; the C ABI crate `core/provider-ffi` is unused by the bundle and still in the workspace. |
+| #45 bindings, #46 host logic | Done: every host verb, the supervisor, gateway trust and profiles are Rust (`core/host`, linked statically through `core/hostlib`); login item, SystemExtensions and NetworkExtension through `core/apple`. |
+| #47 UI edge | Edge defined ([ui-edge.md](ui-edge.md)); the host serves it as a local socket and the CLI's `status` and `profiles` use it. The menu bar is still Swift and does not yet read the socket. |
+| #48 live gate | Open: the development Mac has run Rust provider candidates; the release candidate is not yet gated. |
+| #49 integrate, delete Swift | Open: `app/Provider/*.swift` is no longer built and awaits deletion, with the C ABI crate; the Swift `check-*.swift` that cover live Swift code remain. |
+| #50 simplification | Open. |
+
+Where this plan says "~30-line Swift `main`", the stub is now 68 lines
+(`app/Host/main.swift`): besides handing verbs to Rust it runs the UI entry points
+(menu bar, review-certificate, quit-menu, launcher alias, update check).
 
 ## Decisions already made
 
 1. **Keep NetworkExtension.** The provider stays a `NEPacketTunnelProvider`
    system extension. Dropping it for a root `utun` daemon is a separate project
    (it trades away the entitlement and approval friction for owning routes, DNS
-   cleanup and gateway pinning) and is out of scope. The `Tunnel` trait (Issue 41)
+   cleanup and gateway pinning) and is out of scope. The `Tunnel` trait (#41)
    keeps that door open without building it.
 2. **Add a `Tunnel` trait** between the engine and the OS packet interface.
 3. **UI stays native.** Native look comes from using AppKit, not from the language.
    AppKit through `objc2` renders the same widgets, so the decision is about
-   maintainability. Default: UI stays Swift behind a clean edge unless Issue 47
+   maintainability. Default: UI stays Swift behind a clean edge unless #47
    shows Rust reaches parity at acceptable cost.
 4. **The live gate replaces the installed provider** on the development Mac
-   (same bundle id), with a written rollback (Issue 48).
-5. **A project-wide simplification pass follows** (Issue 50), and every lane
+   (same bundle id), with a written rollback (#48).
+5. **A project-wide simplification pass follows** (#50), and every lane
    carries spike hygiene rules (below) so that pass has less to remove.
 
 ## Target end state
@@ -25,13 +43,13 @@ documented edge. Tracked as Issues 41 to 50.
 | Piece | Language | Notes |
 | --- | --- | --- |
 | Engine (IKE, EAP, ESP, transport) | Rust | unchanged except crypto backend |
-| Crypto (P-384, AES-CBC, HMAC, RNG) | Rust | Issue 42; no `libcrypto_swift.dylib` |
-| Provider executable (`OFTCTunnel`) | Rust | Issues 43, 44; engine linked statically, no C ABI |
-| Host logic (profiles, Keychain, supervisor, NE manager, SystemExtensions, SMAppService) | Rust | Issues 45, 46 |
+| Crypto (P-384, AES-CBC, HMAC, RNG) | Rust | #42; no `libcrypto_swift.dylib` |
+| Provider executable (`OFTCTunnel`) | Rust | #43, #44; engine linked statically, no C ABI |
+| Host logic (profiles, Keychain, supervisor, NE manager, SystemExtensions, SMAppService) | Rust | #45, #46 |
 | `oftc` CLI | Rust | unchanged role |
-| UI (menu bar, popover, welcome, onboarding, trust prompt, sparkline) | Swift unless Issue 47 says otherwise | thin main executable plus UI only |
+| UI (menu bar, popover, welcome, onboarding, trust prompt, sparkline) | Swift unless #47 says otherwise | thin main executable plus UI only |
 
-Process model (Issue 45): the recommended and adopted choice is **Option A**: a
+Process model (#45): the recommended and adopted choice is **Option A**: a
 thin Swift `main` plus one Rust staticlib inside the entitled `OFTCAgent`. The
 maintainer started its implementation. The alternatives, named once: **Option B**
 is a Rust `main` executable that loads the Swift UI as a dylib; **Option C** is
@@ -39,7 +57,7 @@ Rust host logic in a nested entitled helper under `Contents/Helpers`.
 
 Under Option A, `OFTCAgent` remains the bundle's main executable, so the
 restricted entitlements, which are bound to `Contents/MacOS/OFTCAgent` when the
-bundle is signed, stay where they are today. It becomes a ~30-line Swift `main`
+bundle is signed, stay where they are today. It becomes a small Swift `main` (about 30 lines when planned; 68 now)
 that links one Rust host static library, the pattern `liboftc_migration.a`
 already uses. With arguments it calls `oftc_host_main(argc, argv)`. With none it
 starts the Swift UI. In-process libraries inherit the process's entitlements, so
@@ -51,9 +69,9 @@ Consequences:
   remove); the Swift UI only reads them. UI-side enable and create paths move
   behind an idempotent `install-config` verb.
 - The host libraries (migration, host, later engine) go into a single staticlib
-  crate: one panic and allocator state and a smaller binary. The Issue 46 change
+  crate: one panic and allocator state and a smaller binary. The #46 change
   that introduces it owns the `build.sh` and signing-script edits.
-- Option B adds a signed artifact; revisit it only if Issue 47 chooses a Rust UI.
+- Option B adds a signed artifact; revisit it only if #47 chooses a Rust UI.
   Option C is ruled out by the placement test below.
 
 Entitlement-placement test (run on the development Mac, signed with the existing
@@ -72,12 +90,12 @@ A probe called `NETunnelProviderManager.loadAllFromPreferences`:
   ruled out as tested. The kill cause is inferred from T1 against T2, not read
   from a log.
 - An unentitled binary can call `loadAllFromPreferences` but sees a different
-  scope. Issue 46 must not rely on that scoping (writes were not tested).
+  scope. #46 must not rely on that scoping (writes were not tested).
 
 ## The UI edge
 
 Swift UI may depend on exactly three things, all documented in `docs/ui-edge.md`
-(Issue 47):
+(#47):
 
 1. The `oftc` CLI commands the menu already invokes.
 2. The nonsecret supervisor status record and profile registry JSON.
@@ -91,28 +109,28 @@ internals, or call engine functions.
 ## Dependency graph
 
 ```
-   Issue 40 (concurrent tunnels is committed; its open route and DNS
+   #40 (concurrent tunnels is committed; its open route and DNS
    policy tasks touch SettingsMapper and the host, so land or park them first)
                               |
-                        Issue 41  seams + workspace          (serial)
+                        #41  seams + workspace          (serial)
         ______________________|______________________________________
        |          |            |             |            |
-   Issue 42   Issue 43     Issue 44      Issue 45     Issue 47
+   #42   #43     #44      #45     #47
    crypto     provider     NE backend    manager      UI edge +
               logic        + hello ext   bindings     parity study
                  \            |             |
-                  \           |        Issue 46 host logic
+                  \           |        #46 host logic
                    \__________|          (mock VpnControl; no wait on 45)
                               |
-                        Issue 48  live gate                  (serial, user-attended)
+                        #48  live gate                  (serial, user-attended)
                               |
-                        Issue 49  integrate, delete Swift
+                        #49  integrate, delete Swift
                               |
-                        Issue 50  project-wide simplification
+                        #50  project-wide simplification
 ```
 
-Lanes 42 to 47 run in parallel, each in its own git worktree off the Issue 41
-commit. Only the live gate (Issue 48) is serial, because one system extension per
+Lanes 42 to 47 run in parallel, each in its own git worktree off the #41
+commit. Only the live gate (#48) is serial, because one system extension per
 bundle id can be active and approval needs the user.
 
 ## Merge order
@@ -121,7 +139,7 @@ bundle id can be active and approval needs the user.
 then 47's edge doc. 48 validates the merged provider before 49 deletes Swift.
 Merge as each passes its own offline gate; do not hold lanes for each other.
 
-## Spike hygiene (applies to Issues 42 to 47)
+## Spike hygiene (applies to #42 to #47)
 
 Exploratory work leaves residue. These rules keep it from reaching `main`:
 
@@ -149,26 +167,26 @@ Exploratory work leaves residue. These rules keep it from reaching `main`:
    carried over; see "Every test earns its place" in `AGENTS.md`.
 8. **Residue report.** At the end of a lane, write in the issue: scaffolding still
    present, anything that looked clever but should be simpler, anything you
-   would cut. Issue 50 starts from these reports.
+   would cut. #50 starts from these reports.
 
 ## Evidence levels
 
 Per `AGENTS.md`, these are separate claims and each issue records which it
 reached: offline build, unit/mock tests, Developer ID signing, notarization,
 installation, extension activation, live traffic. Lanes 42 to 47 claim at most
-offline build plus tests. Only Issue 48 claims activation and live traffic.
+offline build plus tests. Only #48 claims activation and live traffic.
 
 ## Risks
 
 - **Class registration.** `NEProviderClasses` names the principal class; a Rust
   `objc2` class must be registered under a plain Objective-C name before
-  `startSystemExtensionMode`. Issue 44 answers this first.
-- **Entitlement placement.** Answered by the Issue 45 test (above): a nested
+  `startSystemExtensionMode`. #44 answers this first.
+- **Entitlement placement.** Answered by the #45 test (above): a nested
   helper claiming the entitlements without its own profile is killed, so the
   entitled calls stay in the main executable (Option A).
 - **Missing crates.** `objc2-network-extension`, `objc2-system-extensions`,
   `objc2-service-management` and `p384` are not in the offline cargo cache.
-  Hand-write the small binding slice or vendor the crates; Issue 41 decides once.
-- **Concurrent edits.** Issue 40's remaining route-overlap and DNS policy work
+  Hand-write the small binding slice or vendor the crates; #41 decides once.
+- **Concurrent edits.** #40's remaining route-overlap and DNS policy work
   touches `SettingsMapper` and the host. Land it, or decide to port it later,
-  before Issue 41 so the parallel lanes do not rebase over it.
+  before #41 so the parallel lanes do not rebase over it.

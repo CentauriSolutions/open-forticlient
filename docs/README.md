@@ -8,7 +8,9 @@
 - [Roadmap](ROADMAP.md): distribution and rollout work.
 - [Releasing](releasing.md): CI, and building, signing and publishing a release.
 - [Live checks](livecheck.md): staged scripts for the live release checks.
-- [Swift removal plan](swift-removal-plan.md): Issues 41 to 50, seams, lanes, and hygiene rules.
+- [Swift removal plan](swift-removal-plan.md): #41 to #50: decisions, what is done, what remains.
+- [FortiGate requirements](fortigate.md): what a gateway admin must enable, including TCP fallback.
+- [Support](support.md): what to send when something fails.
 
 ## Historical research
 
