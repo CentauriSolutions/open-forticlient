@@ -36,6 +36,22 @@ gateway's own address (local-in).
 Editing a phase1 can briefly reset tunnels that use it; make the change in a quiet
 window.
 
+## Observed in our lab
+
+Plain observations, not a diagnosis of FortiOS; your gateway may differ.
+
+- On a 7.4.11 gateway, with `ike-tcp-port` 4443 and `transport` set to
+  `udp-fallback-tcp`, and again with `tcp`: `diagnose sys tcpsock` showed `iked`
+  listening on TCP 4500 and 11443 and nothing on 4443. Restarting the daemon did not
+  change that. TCP connects to 4443 and to 4500 got no SYN-ACK and were dropped by the
+  implicit local-in policy (`iprope_in_check() check failed on policy 0, drop` in
+  `diagnose debug flow`).
+- The same client reached TCP 4443 and 4500 on a 7.6.6 gateway with `transport auto`.
+
+All we conclude: TCP fallback is a gateway requirement. It worked on 7.6.6 and did not
+work on 7.4.11 with those settings. Do not trust the configuration alone: verify with a
+TCP connect to `<ike-tcp-port>` from outside the gateway's network (below).
+
 ## Verify from the gateway
 
 With a client connecting from `<client-ip>`:

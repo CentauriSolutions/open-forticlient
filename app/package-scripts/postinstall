@@ -17,7 +17,7 @@ is_our_bundle() {
 # it is exactly our bundle, so two apps never share one bundle identifier.
 old="$root/Applications/OFTC.app"
 if is_our_bundle "$old"; then
-    /bin/rm -rf "$old"
+    /bin/rm -rf "$old" || true
 fi
 
 # Builds before the Rust host and provider shipped dylibs in Contents/Frameworks (the
@@ -32,7 +32,8 @@ if is_our_bundle "$app"; then
     for stale in "$app/Contents/Frameworks" \
                  "$app"/Contents/Library/SystemExtensions/*.systemextension/Contents/Frameworks; do
         if [ -e "$stale" ] || [ -L "$stale" ]; then
-            /bin/rm -rf "$stale"
+            # Best effort: a failed cleanup must never fail the install.
+            /bin/rm -rf "$stale" || true
         fi
     done
 fi

@@ -52,6 +52,17 @@ run "$r"
 [[ ! -e "$app/Contents/Frameworks" && ! -L "$app/Contents/Frameworks" && -f "$tmp/target/keep" ]] \
     || fail 'did not unlink a Frameworks symlink safely'
 
+# 3b. A cleanup that cannot delete (here: a read-only Frameworks directory holding a
+# file) is reported by nothing and must not fail the install.
+if [[ $(id -u) != 0 ]]; then
+    r="$tmp/undeletable"; app="$r/Applications/Open Forticlient.app"
+    fake_bundle "$app" com.chris.openforticlient.oftc
+    mkdir -p "$app/Contents/Frameworks"; : > "$app/Contents/Frameworks/lib.dylib"
+    chmod 555 "$app/Contents/Frameworks"
+    run "$r"
+    chmod 755 "$app/Contents/Frameworks"
+fi
+
 # 4. A clean current bundle, and an absent app, are untouched / fine.
 r="$tmp/clean"; fake_bundle "$r/Applications/Open Forticlient.app" com.chris.openforticlient.oftc
 run "$r"; [[ -f "$r/Applications/Open Forticlient.app/Contents/MacOS/OFTCAgent" ]] || fail 'clean bundle changed'
