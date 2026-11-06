@@ -232,39 +232,13 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         }
     }
 
-    private func hasPSK(gateway: String) -> Bool {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword,
-                                      kSecAttrService: appID + ".psk",
-                                      kSecAttrAccount: gateway,
-                                      kSecReturnData: true,
-                                      kSecMatchLimit: kSecMatchLimitOne]
-        var item: CFTypeRef?
-        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
-    }
+    private func hasPSK(gateway: String) -> Bool { OFTCPSKStore.has(appID: appID, gateway: gateway) }
 
     private func savePSK(_ psk: Data, gateway: String) throws {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword,
-                                      kSecAttrService: appID + ".psk",
-                                      kSecAttrAccount: gateway]
-        var item = query
-        item[kSecValueData] = psk
-        let result = SecItemAdd(item as CFDictionary, nil)
-        let final = result == errSecDuplicateItem
-            ? SecItemUpdate(query as CFDictionary, [kSecValueData: psk] as CFDictionary)
-            : result
-        guard final == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain,
-                                                         code: Int(final)) }
+        try OFTCPSKStore.save(psk, appID: appID, gateway: gateway)
     }
 
-    @objc private func openSettings() {
-        // Undocumented route that macOS's own frameworks use for other
-        // extension points. It presents the Network Extensions sheet with
-        // OFTC's switch (observed on macOS 27.0.1). open() also succeeds when
-        // Settings ignores the query, so the status text keeps the ⓘ path.
-        if let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences?extensionPointIdentifier=com.apple.system_extension.network_extension.extension-point"),
-           NSWorkspace.shared.open(url) { return }
-        SMAppService.openSystemSettingsLoginItems()
-    }
+    @objc private func openSettings() { OFTCSettingsLink.open() }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         // OFTC is listed under Extensions before it is enabled; if the sheet

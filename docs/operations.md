@@ -28,6 +28,13 @@ request. If the provider needs an update, follow **Update VPN component** or
 does not establish that the provider update is complete. OFTC does not replace
 a connected provider or downgrade a newer provider from this setup flow.
 
+For a VPN that is already saved, **Set up…**, **Continue setup** and **Update VPN
+component** show no form: OFTC activates the component and finishes each VPN's
+entry itself, and shows "Waiting for approval in System Settings" until you turn
+OFTC on. It asks for a PSK only if that VPN has none saved. When OFTC starts and
+saved VPNs exist but the component is not ready, it does this once on its own
+(never for a login-item launch).
+
 Intentional app opening reveals the welcome window for an unacknowledged
 build, or a compact controls window after acknowledgement. Automatic login/service
 launch stays quiet; acknowledging a welcome does not enable VPN connection

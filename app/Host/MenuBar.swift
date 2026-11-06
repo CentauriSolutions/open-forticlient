@@ -466,6 +466,15 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let componentProbe = ProviderReadiness()
     private var componentState = VPNComponentState.checking
     private var componentCheckPending = false
+    private var autoRepairTried = false
+    private var popoverAfterSetup = false
+    private lazy var repair: OFTCSetupRepair = {
+        let repair = OFTCSetupRepair(appID: appID, expectedBuild: providerBuild)
+        repair.onChange = { [weak self] in self?.reconcile() }
+        repair.onComponent = { [weak self] in self?.componentState = $0 }
+        repair.onFinish = { [weak self] in self?.setupFinished($0) }
+        return repair
+    }()
     private var root: URL { OFTCProfileScope.defaultRoot(bundleID: appID) }
     private var updateStore: UpdateStore { UpdateStore(directory: experienceStore.directory) }
     private var experienceStore: LaunchExperienceStore {
@@ -732,7 +741,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         row.description = state.detail
         row.autoStart = runtime.autoStart
         row.busy = runtime.command != nil || bulkCommand != nil || onboarding != nil
-            || runtime.statusError != nil || (componentCheckPending && !state.active)
+            || runtime.statusError != nil || (componentCheckPending && !state.active) || repair.isWorking
         let gateway = runtime.entry.profile.gateway
         let transport = runtime.entry.profile.transport.rawValue.uppercased()
         if state == .disconnected { row.description = "\(gateway) · \(transport)" }
@@ -753,6 +762,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 row.totals = TrafficFormat.bytes(Double(sample.receivedBytes)) + " / " + TrafficFormat.bytes(Double(sample.sentBytes))
             }
         }
+        if state == .setup, let text = repair.statusText { row.description = text }
         if let message = runtime.statusError ?? runtime.errorMessage { row.description = message }
         return row
     }
@@ -760,7 +770,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func reconcile() {
         var next = MenuPresentation()
         next.tunnels = orderedRuntimes.map(tunnelPresentation)
-        next.busy = bulkCommand != nil || onboarding != nil
+        next.busy = bulkCommand != nil || onboarding != nil || repair.isWorking
         next.notice = globalError
         next.update = updateOffer.flatMap { updateStore.shouldShow($0) ? $0.version : nil }
         presentation = next
@@ -781,6 +791,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             self.componentCheckPending = false
             self.componentState = state
             self.reconcile()
+            self.autoRepairIfNeeded()
         }
         reconcile()
     }
@@ -816,8 +827,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 guard let self else { return }
                 switch action {
                 case .setup:
-                    self.welcome?.window?.orderOut(nil)
-                    self.showSetup()
+                    self.startSetup()
                 case .controls:
                     guard self.presentation.anyActive || self.componentState == .ready else { return }
                     self.welcome?.close()
@@ -919,7 +929,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
         guard let runtime = runtimes[id] else { return }
-        if runtime.state == .setup { showSetup(); return }
+        if runtime.state == .setup { startSetup(); return }
         if !runtime.state.active && componentState != .ready { showWelcome(); return }
         guard runtime.command == nil, bulkCommand == nil else { return }
         let disconnect = runtime.state.active
@@ -1183,7 +1193,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func importProfiles(from url: URL) {
-        guard bulkCommand == nil else {
+        guard bulkCommand == nil, !repair.isRunning else {
             present("OFTC is busy", "Try opening the file again in a moment.")
             return
         }
@@ -1216,16 +1226,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         globalError = nil
-        runCommand(["setup", "--from", url.path], for: nil) { [weak self] result in
-            guard let self else { return }
-            if case .failure(let failure) = result {
-                self.globalError = failure.message(action: "add")
-            }
-            self.checkComponent()
-            self.refresh()
-            self.reconcile()
-            if case .success = result { self.showPopover() }
-        }
+        popoverAfterSetup = true
+        repair.start(arguments: ["setup", "--from", url.path])
     }
 
     @objc private func exportVPNs() {
@@ -1317,5 +1319,68 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         print("Native offline menu previews rendered; no VPN or login services were accessed.")
         try OFTCWelcome.renderPreviews(to: directory)
+    }
+}
+
+// Issue 88: finishing setup for profiles that already exist, with no form.
+extension OFTCMenuBar {
+    private func setupPlan() -> SetupPlan {
+        let entries = OFTCProfileScope.entries(root: root)
+        return SetupPlan.decide(
+            profileCount: entries.count,
+            missingPSK: entries.filter { !OFTCPSKStore.has(appID: appID, gateway: $0.profile.gateway) }.map(\.id),
+            component: componentState,
+            entriesMissing: runtimes.values.contains { $0.manager?.isEnabled != true },
+            anyActive: presentation.anyActive)
+    }
+
+    fileprivate func startSetup() {
+        guard preview == nil else { return }
+        if repair.isRunning {
+            if repair.phase == .waiting { repair.reopenSettings() }
+            return
+        }
+        switch setupPlan() {
+        case .addForm: showSetup()
+        case .newerInstalled, .waitForDisconnect: showWelcome()
+        case .nothingToDo: checkComponent(); refresh()
+        case .askPSK(let ids):
+            let entries = OFTCProfileScope.entries(root: root)
+            for id in ids {
+                guard let entry = entries.first(where: { $0.id == id }),
+                      OFTCPSKStore.prompt(appID: appID, entry: entry) else {
+                    globalError = "Setup needs the VPN key. Choose Set up… to enter it."
+                    reconcile()
+                    return
+                }
+            }
+            runRepair()
+        case .repair: runRepair()
+        }
+    }
+
+    private func runRepair() {
+        globalError = nil
+        repair.start(arguments: ["setup"])
+    }
+
+    fileprivate func autoRepairIfNeeded() {
+        guard preview == nil, !repair.isRunning,
+              SetupPlan.mayAutoRepair(component: componentState, automaticLaunch: automaticLaunch,
+                                      alreadyTried: autoRepairTried),
+              setupPlan() == .repair
+        else { return }
+        autoRepairTried = true
+        runRepair()
+    }
+
+    fileprivate func setupFinished(_ outcome: SetupOutcome) {
+        if case .failure(let failure) = outcome { globalError = failure.message(action: "set up") }
+        else { globalError = nil }
+        checkComponent()
+        refresh()
+        reconcile()
+        if outcome == .done, popoverAfterSetup { showPopover() }
+        popoverAfterSetup = false
     }
 }
