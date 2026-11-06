@@ -272,6 +272,21 @@ expect_pstate() {
   else lc_info "SKIP $desc: tunnel state cannot be read (this CLI has no working 'status --json')"; fi
 }
 
+# True when every configured profile has been set up: its state is not `setup` and, when the
+# document reports a component, the component is ready. After a clean uninstall and reinstall
+# the VPN configurations are gone ("OFTC configuration absent") until the app's setup repairs them.
+lc_all_configured() {
+  local id s c
+  lc_state_readable || return 1
+  c=$(lc_json component.state <<< "$LC_STATUS")
+  [[ -z $c || $c == ready ]] || return 1
+  for id in ${=PROFILES}; do
+    s=$(lc_pfield "$id" state)
+    [[ -n $s && $s != setup ]] || return 1
+  done
+  return 0
+}
+
 lc_pstate() { lc_refresh_status; lc_pfield "$1" state; }
 lc_is_connected() { [[ $(lc_pstate "$1") == connected ]]; }
 lc_is_not_connected() { [[ $(lc_pstate "$1") != connected ]]; }
@@ -510,6 +525,36 @@ lc_verify_pkg() {   # pkg
 }
 
 # Installs a package; the evidence is the installer's own exit status and output.
+# ---- the product's system extension and Login Items records -----------------------------------
+# Other products' extensions can be on the same Mac (a leftover test provider, say), so every
+# extension check selects by the provider's bundle id, never by the word "oftc".
+LC_PROVIDER_ID="$LC_BUNDLE_ID.provider"
+lc_ext_lines() { systemextensionsctl list 2>/dev/null | grep -F "$LC_PROVIDER_ID (" || true; }
+# Build of the bundled provider (it need not equal the host's); systemextensionsctl lists it as (ver/build).
+lc_provider_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP"/Contents/Library/SystemExtensions/*/Contents/Info.plist(N[1]) 2>/dev/null; }
+lc_provider_active() {   # [build]: our provider, at this build if given, is 'activated enabled'
+  local l; l=$(lc_ext_lines)
+  [[ -n ${1:-} ]] && l=$(grep -F "/$1)" <<< "$l" || true)
+  grep -q 'activated enabled' <<< "$l"
+}
+# From a `sfltool dumpbtm` dump on stdin: the file URLs of the entries that belong to this app.
+# An entry starts at a "#N:" line; its identifier and URL lines may come in any order.
+lc_btm_oftc_urls() {
+  awk -v id="$LC_BUNDLE_ID" '
+    /^ *#[0-9]+:/ { if (hit && url != "") print url; hit = 0; url = ""; next }
+    index($0, id) { hit = 1 }
+    /^ *URL:/ { u = $0; sub(/^ *URL: */, "", u); url = u }
+    END { if (hit && url != "") print url }'
+}
+# Prints the paths those entries point at that no longer exist.
+lc_btm_missing_paths() {
+  local url p
+  lc_btm_oftc_urls | while IFS= read -r url; do
+    p=${url#file://}; p=${p//\%20/ }; p=${p%/}
+    [[ -e $p ]] || print -r -- "$p"
+  done
+}
+
 lc_install_pkg() {   # pkg
   lc_sudo installer -pkg "$1" -target /
 }

@@ -422,10 +422,15 @@ run s5-uninstall-reboot.sh --yes --no-reinstall --phase post --run-dir "$PRE_RUN
 eq "S5 post bad: stale extension survives reboot" "$RC" 1; has "S5 post names it" "$OUT" "FAIL extension list has no stale"
 [[ -f "$HOME/Library/Application Support/oftc-livecheck/s5.marker" ]] && ok || bad "S5 marker must stay after a failed post"
 [[ ! -e "$HOME/Library/LaunchAgents/local.oftc-livecheck.s5-resume.plist" ]] && ok || bad "S5 plist must be removed first"
+# post: a BTM record that points at a path that no longer exists -> FAIL (existing path -> fine)
+write_procs 300; put ext ''; put btm $'#1:\n Identifier: com.chris.openforticlient.oftc.host\n URL: file:///nonexistent-oftc/Open%20Forticlient.app/\n#2:\n Identifier: com.example.other\n URL: file:///nonexistent-other'
+run s5-uninstall-reboot.sh --yes --no-reinstall --phase post --run-dir "$PRE_RUN"
+has "S5 post bad: BTM record points at a missing path" "$OUT" "FAIL Login Items/BTM records point at missing paths: 1 record(s)"
 # post good
+put btm $'#1:\n Identifier: com.chris.openforticlient.oftc.host\n URL: file://'"$T"$'/\n'
 write_procs 300; put ext ''
 run s5-uninstall-reboot.sh --yes --no-reinstall --phase post --run-dir "$PRE_RUN"
-eq "S5 post good" "$RC" 0; has "S5 post host" "$OUT" "PASS host service running after login"; has "S5 post extension cleared" "$OUT" "PASS no OFTC extension entries remain"
+eq "S5 post good" "$RC" 0; has "S5 post BTM record with an existing path passes" "$OUT" "PASS no Login Items/BTM record for this app points at a missing path"; has "S5 post host" "$OUT" "PASS host service running after login"; has "S5 post extension cleared" "$OUT" "PASS no OFTC extension entries remain"
 [[ ! -e "$HOME/Library/Application Support/oftc-livecheck/s5.marker" ]] && ok || bad "S5 marker must be removed after a good post"
 
 reset_world; put sig $'Package "OFTC.pkg":\n   Status: no signature'; rule '^oftc uninstall' '' 0 ''
@@ -433,6 +438,46 @@ run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
 eq "S5 bad signature stops before uninstalling" "$RC" 1; has "S5 says nothing was uninstalled" "$OUT" "nothing was uninstalled"
 lacks "S5 never uninstalls after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "oftc uninstall"
 lacks "S5 never installs after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "installer -pkg"
+
+# S5: another product's provider on the same Mac must not count as ours; BTM is information right after uninstall
+GATE=$'*\t*\tcom.chris.openforticlient.gate0.provider (0.4/15)\tOFTC Gate 4 Provider\t[activated enabled]'
+BTM1=$'#1:\n Identifier: com.chris.openforticlient.oftc.host\n URL: file:///nonexistent-oftc/Open%20Forticlient.app/'
+export GATE BTM1
+UNINST='write_status; : > "$SHIM_STATE/procs"; rm -rf "$FAKE_APP" "$OFTC_CLI"; put pkgs ""; put launchctl ""; rule "^launchctl (print|list|print-disabled)" "" 113 ""'
+reset_world; rule '^oftc uninstall' '' 0 "$UNINST; put ext \"\$GATE\"; put btm \"\$BTM1\""
+run s5-uninstall-reboot.sh --yes --no-reinstall --no-reboot
+lacks "S5 pre: a leftover other-product provider is not 'our extension left activated'" "$OUT" "FAIL extension is not left activated"
+has "S5 pre: only our provider is looked at" "$OUT" "PASS no OFTC extension entries remain"
+has "S5 pre: BTM right after uninstall is INFO with counts" "$OUT" "INFO BTM right after uninstall: 1 record(s) for this app, 1 pointing at a missing path"
+lacks "S5 pre: BTM is not asserted before the reboot" "$OUT" "FAIL Login Items"
+# S5 reinstall: the repair wait, and the approval wait that only OUR provider can satisfy
+s5_reinstall_world() {
+  reset_world; put ext ''; rm -rf "$T/keep-app.app"; cp -R "$FAKE_APP" "$T/keep-app.app"; export KEEP_APP="$T/keep-app.app"
+  rule '^oftc uninstall' '' 0 "$UNINST; put ext ''; put btm ''"
+  rule '^installer' installer 0 'cp -R "$KEEP_APP" "$FAKE_APP"; ln -sf "$(readlink "$KEEP_APP/Contents/Helpers/oftc")" "$OFTC_CLI"; set_version 41; write_procs 201; write_status p1:setup p2:setup; print 0 > "$SHIM_STATE/n"; : > "$SHIM_STATE/flip"'
+  rule '^(oftc|OFTCAgent) status --json' status.json 0 'if [[ -f "$SHIM_STATE/flip" ]]; then n=$(( $(cat "$SHIM_STATE/n") + 1 )); print $n > "$SHIM_STATE/n"; (( n >= 4 )) && { rm -f "$SHIM_STATE/flip"; write_status p1:connected p2:connected; }; fi; true'
+}
+s5_reinstall_world
+run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
+has "S5 asks the human to run Set up after the reinstall" "$OUT" "ACTION REQUIRED (one act): open OFTC from Applications and complete Set up for every profile"
+has "S5 observes the repair" "$OUT" "PASS human act observed: every profile is configured"
+has "S5 arms the reboot only after the repair" "$OUT" "PASS resume LaunchAgent written"
+s5_reinstall_world; rule '^(oftc|OFTCAgent) status --json' status.json 0 'true'
+rm -f "$HOME/Library/Application Support/oftc-livecheck/s5.marker" "$HOME/Library/LaunchAgents/local.oftc-livecheck.s5-resume.plist"
+run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
+has "S5 repair never happens" "$OUT" "FAIL human act not observed within 900s: every profile is configured"
+has "S5 then does not arm the reboot" "$OUT" "not arming the resume agent and not rebooting"; eq "S5 no resume plist without a repair" "$([[ -e $HOME/Library/LaunchAgents/local.oftc-livecheck.s5-resume.plist ]] && print yes || print no)" no
+# approval: only another product's provider is activated -> S5 must wait for ours (and fail here, nobody approves)
+s5_reinstall_world; rm -f "$HOME/Library/Application Support/oftc-livecheck/s5.marker"
+rule '^installer' installer 0 'cp -R "$KEEP_APP" "$FAKE_APP"; ln -sf "$(readlink "$KEEP_APP/Contents/Helpers/oftc")" "$OFTC_CLI"; set_version 41; put ext "$GATE"; write_procs 201'
+rule '^OFTCAgent activate' act 0; put act 'macOS approval required for com.chris.openforticlient.oftc.provider'
+run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
+has "S5 approval waits for our provider (build 49), not any oftc line" "$OUT" "FAIL human act not observed within 300s: the OFTC provider (build 49) is 'activated enabled'"
+# S4: the same rule
+s4_world; put ext "$GATE"; rule '^OFTCAgent activate' act 0; put act 'macOS approval required for com.chris.openforticlient.oftc.provider'
+rule '^installer' installer 0 'if [[ $(cat "$SHIM_STATE/count.0") == 1 ]]; then :; else set_version 42; put ext "$GATE"; write_procs 201 ; fi'
+run s4-installer.sh --yes
+has "S4 does not take another product's provider as ours" "$OUT" "FAIL human act not observed within 300s: extension build 50 is 'activated enabled'"
 
 # S6
 reset_world; write_status p1:connected p2:connected p3:disconnected
