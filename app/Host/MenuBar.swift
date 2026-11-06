@@ -1317,6 +1317,7 @@ extension OFTCMenuBar {
     private func setupPlan() -> SetupPlan {
         let profiles = orderedRuntimes.map(\.profile)
         return SetupPlan.decide(
+            hostReady: service == .ready,
             profileCount: profiles.count,
             missingPSK: profiles.filter { !OFTCPSKStore.has(appID: appID, gateway: $0.gateway) }.map(\.id),
             component: componentState,
@@ -1332,6 +1333,7 @@ extension OFTCMenuBar {
         }
         switch setupPlan() {
         case .addForm: showSetup()
+        case .waitForHost: serviceAction()   // start it, or open Login Items for its approval
         case .newerInstalled, .waitForDisconnect: showWelcome()
         case .nothingToDo: refresh()
         case .askPSK(let ids):

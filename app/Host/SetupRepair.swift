@@ -83,7 +83,6 @@ final class OFTCSetupRepair {
     var component: () -> VPNComponentState = { .unavailable }
     var refresh: () -> Void = {}
 
-
     var isRunning: Bool { phase == .working || phase == .waiting }
     var isWorking: Bool { phase == .working }
 
@@ -112,7 +111,8 @@ final class OFTCSetupRepair {
             self.runner = nil
             self.poll?.invalidate()
             self.poll = nil
-            let outcome = SetupOutcome.resolve(MenuCommandResult(end), sawApproval: self.sawApproval)
+            let outcome = SetupOutcome.resolve(MenuCommandResult(end), sawApproval: self.sawApproval,
+                                                component: self.component())
             self.phase = outcome == .waitingForApproval ? .stillWaiting : .idle
             self.onChange?()
             self.onFinish?(outcome)
