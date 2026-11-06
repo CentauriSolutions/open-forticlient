@@ -261,6 +261,17 @@ lc_pfield() {   # id keypath-under-profile
   return 1
 }
 
+# True when the last status read parsed. An older CLI has no `status --json`, so the
+# state cannot be read at all: that is not the same as "no tunnel is connected".
+lc_state_readable() { lc_refresh_status; [[ -n $LC_STATUS ]] && lc_json profiles <<< "$LC_STATUS" >/dev/null; }
+
+# expect_pstate id value: asserts a profile state, or reports INFO when state is unreadable.
+expect_pstate() {
+  local id=$1 want=$2 desc=$3
+  if lc_state_readable; then expect_eq "$desc" "$(lc_pfield "$id" state)" "$want"
+  else lc_info "SKIP $desc: tunnel state cannot be read (this CLI has no working 'status --json')"; fi
+}
+
 lc_pstate() { lc_refresh_status; lc_pfield "$1" state; }
 lc_is_connected() { [[ $(lc_pstate "$1") == connected ]]; }
 lc_is_not_connected() { [[ $(lc_pstate "$1") != connected ]]; }

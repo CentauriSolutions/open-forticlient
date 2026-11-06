@@ -24,6 +24,9 @@ guard_re='^/Applications/(OFTC|Open Forticlient)\.app/Contents/MacOS/OFTCAgent([
 host_pids() { ps -axo pid,command 2>/dev/null | awk '/OFTCAgent host serve/ && !/awk/ {print $1}' | sort | tr '\n' ' '; }
 host_pid_changed() { local now; now=$(host_pids); [[ -n $now && $now != "$1" ]]; }
 app_version() { /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null; }
+# The provider has its own build number (it need not equal the host's); systemextensionsctl
+# lists the provider build, so read it from the bundled extension.
+provider_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP"/Contents/Library/SystemExtensions/*/Contents/Info.plist(N[1]) 2>/dev/null; }
 app_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist" 2>/dev/null; }
 none_matches_guard() { ! pgrep -f "$guard_re" >/dev/null 2>&1; }
 user_lines() { grep -E '^(profile#|profile dirs:|pins:|logs:)' "$1" | sed -E 's/logs: [0-9]+ files/logs/'; }
@@ -48,6 +51,8 @@ fi
 lc_step "installer guard with a tunnel connected"
 if (( skip_guard )); then
   lc_info "--skip-guard: not testing the refusal"
+elif lc_live && ! lc_state_readable; then
+  lc_info "SKIP guard test: tunnel state cannot be read (this CLI has no working 'status --json'); connect a tunnel and use --skip-guard to proceed, or test the guard by hand"
 elif lc_live && lc_none_connected; then
   lc_fail "guard test needs a connected tunnel (run S1 --connect first, or pass --skip-guard)"
 else
@@ -82,14 +87,16 @@ lc_install_pkg "$LC_PKG"
 installed=0
 if lc_live; then
   expect_rc "installer exit status" "$LC_RC" 0
-  expect_contains "installer says it succeeded" "$LC_OUT" "The install was successful"
+  # A fresh install says "install", an upgrade says "upgrade".
+  if [[ $LC_OUT == *"The install was successful"* || $LC_OUT == *"The upgrade was successful"* ]]; then lc_pass "installer says it succeeded"
+  else lc_fail "installer says it succeeded (neither 'The install was successful' nor 'The upgrade was successful' found)"; fi
   (( LC_RC == 0 )) && installed=1
 fi
 if (( installed )) || (( LC_DRY )); then
   lc_step "bundle after install"
   if lc_live; then
-    ver_after=$(app_version); build_after=$(app_build)
-    lc_info "installed after: $ver_after build $build_after"
+    ver_after=$(app_version); build_after=$(app_build); prov_after=$(provider_build)
+    lc_info "installed after: $ver_after build $build_after (provider build ${prov_after:-unknown})"
     [[ -n $EXPECT_VERSION ]] && expect_eq "installed version is the DMG's" "$ver_after" "$EXPECT_VERSION"
     [[ $build_after != "$build_before" ]] && lc_pass "bundle replaced (build $build_before -> $build_after)" || lc_info "same build as before: a reinstall, not an upgrade"
     expect_eq "Frameworks directories in the bundle" "$(find "$APP" -name Frameworks -maxdepth 6 2>/dev/null | wc -l | tr -d ' ')" 0
@@ -111,20 +118,20 @@ if (( installed )) || (( LC_DRY )); then
   lc_step "system extension replaced"
   lc_run -q systemextensionsctl list
   if lc_live; then
-    ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep "$build_after" | grep -q 'activated enabled'; }
+    ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -F "/$prov_after)" | grep -q 'activated enabled'; }
     if ext_active; then
       lc_info "approval requested: no (the new build's extension is already activated enabled)"
     else
       lc_activate
       if (( LC_APPROVAL )); then
         lc_info "approval requested: yes (OFTCAgent activate reported macOS approval required)"
-        human "approve the OFTC Network Extension in System Settings > General > Login Items & Extensions > Network Extensions" "extension build $build_after is 'activated enabled'" 300 ext_active
+        human "approve the OFTC Network Extension in System Settings > General > Login Items & Extensions > Network Extensions" "extension build $prov_after is 'activated enabled'" 300 ext_active
       else
         lc_info "approval requested: no"
       fi
       lc_activate_finish
       [[ $LC_ACT_RC == 3 ]] && lc_info "extension replacement accepted but a reboot is required (activate exit 3); S5 finishes the cleanup"
-      ext_active || wait_for "extension build $build_after is 'activated enabled'" 60 3 ext_active
+      ext_active || wait_for "extension build $prov_after is 'activated enabled'" 60 3 ext_active
     fi
     lc_run -q systemextensionsctl list
     lc_info "extension entries now: $(print -r -- "$LC_OUT" | grep -ic oftc) OFTC line(s); $(print -r -- "$LC_OUT" | grep -ic 'terminated waiting') terminated waiting"
