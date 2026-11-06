@@ -278,8 +278,12 @@ expect_pstate() {
 lc_all_configured() {
   local id s c
   lc_state_readable || return 1
-  c=$(lc_json component.state <<< "$LC_STATUS")
-  [[ -z $c || $c == ready ]] || return 1
+  # Only look at the component when the document has one: extracting a missing key is
+  # not portable across plutil versions.
+  if [[ $LC_STATUS == *'"component"'* ]]; then
+    c=$(lc_json component.state <<< "$LC_STATUS")
+    [[ $c == ready ]] || return 1
+  fi
   for id in ${=PROFILES}; do
     s=$(lc_pfield "$id" state)
     [[ -n $s && $s != setup ]] || return 1
