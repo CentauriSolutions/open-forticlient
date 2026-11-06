@@ -1348,7 +1348,11 @@ extension OFTCMenuBar {
             let entries = OFTCProfileScope.entries(root: root)
             for id in ids {
                 guard let entry = entries.first(where: { $0.id == id }),
-                      OFTCPSKStore.prompt(appID: appID, entry: entry) else { return }
+                      OFTCPSKStore.prompt(appID: appID, entry: entry) else {
+                    globalError = "Setup needs the VPN key. Choose Set up… to enter it."
+                    reconcile()
+                    return
+                }
             }
             runRepair()
         case .repair: runRepair()
@@ -1362,8 +1366,9 @@ extension OFTCMenuBar {
 
     fileprivate func autoRepairIfNeeded() {
         guard preview == nil, !repair.isRunning,
-              SetupPlan.shouldAutoRepair(setupPlan(), component: componentState,
-                                         automaticLaunch: automaticLaunch, alreadyTried: autoRepairTried)
+              SetupPlan.mayAutoRepair(component: componentState, automaticLaunch: automaticLaunch,
+                                      alreadyTried: autoRepairTried),
+              setupPlan() == .repair
         else { return }
         autoRepairTried = true
         runRepair()

@@ -34,6 +34,8 @@ import Foundation
         precondition(auto(.repair, .missing))
         precondition(auto(.repair, .updateRequired))
         precondition(auto(.repair, .approval))
+        precondition(!SetupPlan.mayAutoRepair(component: .ready, automaticLaunch: false, alreadyTried: false),
+                     "the cheap guards must refuse before any plan (Keychain read) is computed")
         precondition(!auto(.repair, .ready), "a ready component needs no automatic activation")
         precondition(!auto(.repair, .unavailable), "unknown state must not trigger activation")
         precondition(!auto(.repair, .missing, automatic: true), "login-item launches never open System Settings")

@@ -20,8 +20,9 @@ enum OFTCPSKStore {
         let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword,
                                       kSecAttrService: appID + ".psk",
                                       kSecAttrAccount: gateway,
-                                      kSecReturnData: true,
+                                      kSecReturnAttributes: true,
                                       kSecMatchLimit: kSecMatchLimitOne]
+        // Attributes only: presence is checked without reading the secret.
         var item: CFTypeRef?
         return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
     }

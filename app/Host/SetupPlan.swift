@@ -25,9 +25,17 @@ enum SetupPlan: Equatable {
     // Repair once on launch so the user's only job is approving in System Settings.
     // Never for a login-item launch (nothing asked for it), and never again once
     // tried in this process, so a failure cannot loop.
+    // The cheap guards come first so the caller can skip computing a plan (which
+    // reads the Keychain) on the many checks that cannot lead to a repair.
+    static func mayAutoRepair(component: VPNComponentState, automaticLaunch: Bool,
+                              alreadyTried: Bool) -> Bool {
+        component.needsSetup && !automaticLaunch && !alreadyTried
+    }
+
     static func shouldAutoRepair(_ plan: Self, component: VPNComponentState,
                                  automaticLaunch: Bool, alreadyTried: Bool) -> Bool {
-        plan == .repair && component.needsSetup && !automaticLaunch && !alreadyTried
+        mayAutoRepair(component: component, automaticLaunch: automaticLaunch, alreadyTried: alreadyTried)
+            && plan == .repair
     }
 }
 
