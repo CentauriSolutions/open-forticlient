@@ -41,6 +41,12 @@ launch stays quiet; acknowledging a welcome does not enable VPN connection
 at login. Choosing **Later** leaves setup available from the menu. Closing
 the controls window leaves the menu app running; reopening OFTC brings it back.
 
+An interactive install through the Installer app opens OFTC when it finishes, so
+the tray icon appears. `installer(8)` and MDM installs deliberately do not open
+the app (the postinstall skips it when `COMMAND_LINE_INSTALL` is set and no
+Installer window is open); open OFTC once from Applications to get the icon. That
+is intended. The Installer-app path has not been verified live on 1.3.x yet.
+
 Terminal setup remains available with `oftc setup`; see `man oftc` for explicit
 setup options.
 
