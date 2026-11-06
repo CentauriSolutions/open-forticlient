@@ -235,7 +235,7 @@ impl<'a> Collector<'a> {
         inner.errors.retain(|id, _| facts.iter().any(|p| &p.id == id));
         self.hub.set_entries(tunnels);
         let (state, installed) = self.hub.component();
-        let expected = &services.host.build;
+        let expected = &services.host.provider_build;
         self.hub.publish(StatusDocument {
             schema: PROTOCOL,
             generated: rfc3339(unix),
