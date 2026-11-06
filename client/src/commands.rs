@@ -909,10 +909,10 @@ fn status_json(socket: Option<&Path>) -> Result<String, Box<dyn Error>> {
     Ok(text.unwrap_or_default())
 }
 
-/// `--version`: this client's version; with `--json`, the host's `hello` result.
+/// `--version`: the app's version and build (from its Info.plist at build time); with `--json`, the host's `hello` result.
 fn version_output(json: bool, socket: Option<&Path>) -> Result<String, Box<dyn Error>> {
     if !json {
-        return Ok(format!("oftc {}", env!("CARGO_PKG_VERSION")));
+        return Ok(crate::edge::version_line());
     }
     let text = via_socket(socket, None, true, |reply| Ok(reply.hello_result.clone()))?;
     Ok(text.unwrap_or_default())
@@ -1637,7 +1637,7 @@ mod tests {
     fn version_is_local_and_with_json_the_hosts_hello() {
         assert_eq!(
             version_output(false, None).unwrap(),
-            format!("oftc {}", env!("CARGO_PKG_VERSION"))
+            format!("oftc {} (build {})", env!("OFTC_APP_VERSION"), env!("OFTC_APP_BUILD"))
         );
         let dir = TempDir::new();
         double::host(&dir, |_| unreachable!("--version asks only hello"));

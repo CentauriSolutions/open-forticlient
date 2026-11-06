@@ -19,6 +19,15 @@ use serde_json::value::RawValue;
 use serde_json::json;
 
 /// How long the host has to answer one line.
+/// The app's version and build, read from `app/Host/Info.plist` by build.rs.
+pub const APP_VERSION: &str = env!("OFTC_APP_VERSION");
+pub const APP_BUILD: &str = env!("OFTC_APP_BUILD");
+
+/// What `oftc --version` prints.
+pub fn version_line() -> String {
+    format!("oftc {APP_VERSION} (build {APP_BUILD})")
+}
+
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Lines without our id (events, late replies) tolerated before giving up.
 const SKIPPED_LINES: usize = 64;
@@ -183,7 +192,7 @@ pub fn call(socket: &Path, op: Option<&str>, timeout: Duration) -> Result<Reply,
 
     let hello = json!({
         "id": 1, "op": "hello", "protocol": [PROTOCOL_MIN, PROTOCOL],
-        "client": {"kind": "cli", "version": env!("CARGO_PKG_VERSION"), "build": ""},
+        "client": {"kind": "cli", "version": APP_VERSION, "build": APP_BUILD},
     });
     connection
         .send(&hello)
@@ -432,7 +441,7 @@ mod tests {
             *seen,
             [
                 serde_json::json!({"id":1,"op":"hello","protocol":[1,1],
-                    "client":{"kind":"cli","version":env!("CARGO_PKG_VERSION"),"build":""}}),
+                    "client":{"kind":"cli","version":APP_VERSION,"build":APP_BUILD}}),
                 serde_json::json!({"id":2,"op":"status"}),
             ]
         );

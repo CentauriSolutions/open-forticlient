@@ -131,6 +131,8 @@ CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"
 cp "$build/client-target/release/oftc" "$build/oftc"
 cp "$build/oftc" "$app/Contents/Helpers/oftc"
+# Every version shown (oftc --version, the man page) is the one in Host/Info.plist.
+zsh "$root/check-version-parity.sh" "$app" "$app/Contents/Helpers/oftc"
 # The host links no OFTC dylib: the Rust host is static in the executable.
 if otool -L "$app/Contents/MacOS/OFTCAgent" | grep -E '@rpath|liboftc'; then
     print -u2 'OFTCAgent must not depend on an OFTC dylib or an @rpath library'; exit 1

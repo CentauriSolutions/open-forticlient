@@ -149,9 +149,9 @@ order of completion, not of arrival; a client matches by `id`.
 ### 4.2 Handshake and versioning
 
 First line from the client:
-`{"id":1,"op":"hello","protocol":[1,1],"client":{"kind":"ui","version":"0.9.0","build":"24"}}`
+`{"id":1,"op":"hello","protocol":[1,1],"client":{"kind":"ui","version":"1.0.0","build":"24"}}`
 where `protocol` is `[min, max]` supported. Reply:
-`{"id":1,"ok":true,"result":{"protocol":1,"host":{"version":"0.9.0","build":"24","provider_build":"24"}}}`.
+`{"id":1,"ok":true,"result":{"protocol":1,"host":{"version":"1.0.0","build":"24","provider_build":"24"}}}`.
 The server picks the highest protocol both support. No overlap, a range
 with `min` above `max`, or no `protocol` at all:
 `{"ok":false,"error":{"code":"unsupported_schema","exit":5,...}}` and the server
@@ -246,7 +246,7 @@ payload of `status` events.
   "schema": 1,
   "generated": "2026-11-04T12:00:00Z",
   "seq": 1771,
-  "host": { "version": "0.9.0", "build": "24", "provider_build": "50" },
+  "host": { "version": "1.0.0", "build": "24", "provider_build": "50" },
   "component": { "state": "ready", "installed_build": "50", "expected_build": "50" },
   "login": { "menu_item": "enabled", "agent": "enabled", "host_agent": "enabled" },
   "profiles": [
