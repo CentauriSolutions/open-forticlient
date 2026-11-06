@@ -102,8 +102,10 @@ if teams[0] != teams[1]:
 print('Exact-ID Developer ID profiles authorize host and provider')
 PY
 
-cp "$APP_PROFILE" "$app/Contents/embedded.provisionprofile"
-cp "$EXTENSION_PROFILE" "$extension/Contents/embedded.provisionprofile"
+# 0644, not cp: the source profiles are 0600, and a root-owned 0600 profile in the
+# installed bundle makes `codesign --verify --deep` fail for a normal user.
+install -m 644 "$APP_PROFILE" "$app/Contents/embedded.provisionprofile"
+install -m 644 "$EXTENSION_PROFILE" "$extension/Contents/embedded.provisionprofile"
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$cli"
 codesign --verify --strict --verbose=2 "$cli"
 codesign --force --sign "$DEVELOPER_ID_IDENTITY" --timestamp --options runtime "$app/Contents/Helpers/oftc"

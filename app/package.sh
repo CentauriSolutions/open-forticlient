@@ -36,6 +36,11 @@ fi
 mkdir -p "$stage/Applications" "$stage/usr/local/bin" "$stage/usr/local/libexec/oftc" \
     "$stage/usr/local/share/man/man1"
 ditto "$app" "$stage/Applications/Open Forticlient.app"
+# An installed profile must be readable by every user, or codesign --verify --deep
+# fails for a non-root user (the signing script installs them 0644).
+if [[ -n "$(find "$stage/Applications" -name embedded.provisionprofile ! -perm -004 -print -quit)" ]]; then
+    print -u2 'An embedded.provisionprofile in the bundle is not world-readable'; exit 2
+fi
 # The postinstall script deletes any Contents/Frameworks it finds in the installed
 # bundle (leftovers of older builds); the current bundle must therefore ship none.
 if [[ -n "$(find "$stage/Applications" -type d -name Frameworks -print -quit)" ]]; then
