@@ -246,8 +246,8 @@ payload of `status` events.
   "schema": 1,
   "generated": "2026-11-04T12:00:00Z",
   "seq": 1771,
-  "host": { "version": "0.9.0", "build": "24", "provider_build": "24" },
-  "component": { "state": "ready", "installed_build": "24", "expected_build": "24" },
+  "host": { "version": "0.9.0", "build": "24", "provider_build": "50" },
+  "component": { "state": "ready", "installed_build": "50", "expected_build": "50" },
   "login": { "menu_item": "enabled", "agent": "enabled", "host_agent": "enabled" },
   "profiles": [
     {
@@ -268,7 +268,7 @@ payload of `status` events.
 | `schema` | int | equals the negotiated `protocol` |
 | `seq` | int | starts at 1 when the host first builds the document and increases by one on every change of the document, **not** counting `profiles[].traffic` (a change of `generated` alone is not a change). A reconnecting client ignores older. |
 | `host.version`, `host.build`, `host.provider_build` | string | marketing version, `CFBundleVersion`, bundled provider build. Feeds About. |
-| `component.state` | enum | `checking` until the first answer of the read-only system extension request (`properties`, 10 s timeout, repeated at most every 30 s), then `ready`, `missing`, `update_required`, `approval`, `newer` or `unavailable` (`VPNComponentState.resolve`, computed in Rust). `expected_build` is `host.build`; an unreadable bundle gives `null` and `unavailable`. |
+| `component.state` | enum | `checking` until the first answer of the read-only system extension request (`properties`, 10 s timeout, repeated at most every 30 s), then `ready`, `missing`, `update_required`, `approval`, `newer` or `unavailable` (`VPNComponentState.resolve`, computed in Rust). `expected_build` is `host.provider_build` (the bundled provider's `CFBundleVersion`, which differs from the host's `build`); an unreadable bundle gives `null` and `unavailable`. |
 | `component.installed_build`, `expected_build` | string or null | for the "Details" line and the update view |
 | `login.*` | enum | `enabled`, `disabled` (`SMAppService` `notRegistered`), `requires_approval`, `not_found` (also an unknown status); read at most every 10 s |
 | `profiles[].id` | string | 1 to 32 of `[a-z0-9-]` |
@@ -657,8 +657,8 @@ link, not an error. PR 7 replaced this with the update view above (`ComponentUpd
 Today a click opens the popover and the options sit behind its gear button; the
 app has no visible main menu (accessory policy) and no About item. Design for
 later work: add **About OFTC** (`NSApp.orderFrontStandardAboutPanel`, plus a short "Details" line reading
-`Extension build X, provider build Y` from `host.build`, `component.installed_build`
-and `host.provider_build`) and the
+`Extension build X, provider build Y` from `component.installed_build`
+and `host.provider_build`; `host.build` is the host's own and is never compared with the extension) and the
 existing options (login, updates, add, export, Login Items & Extensions) to one
 shared `NSMenu`, used both by the gear button and by right-click or ctrl-click on
 the status item, and mirrored in the application menu shown while a window

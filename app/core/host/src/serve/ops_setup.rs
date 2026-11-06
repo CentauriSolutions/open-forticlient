@@ -106,7 +106,7 @@ fn ensure_profile(
 fn ensure_extension(cx: &OpCx) -> Result<(), Failure> {
     let services = cx.services;
     let provider = services.env.provider_id();
-    let expected = &services.host.build;
+    let expected = &services.host.provider_build;
     if !expected.is_empty() {
         let (state, _) = component_from_request(
             expected,

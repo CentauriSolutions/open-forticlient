@@ -181,7 +181,7 @@ fn refresh_loop<'scope, 'env>(
         collector.refresh();
         if hub.claim_component_check(COMPONENT_MAX_AGE) {
             scope.spawn(move || {
-                let expected = &services.host.build;
+                let expected = &services.host.provider_build;
                 let result = if expected.is_empty() {
                     (oftc_ui_edge::ComponentState::Unavailable, None)
                 } else {
@@ -468,7 +468,7 @@ pub(super) mod tests {
                 &env.provider_id(),
                 Ok(vec![ExtensionProperties {
                     short_version: "1.0".into(),
-                    build: "24".into(),
+                    build: "50".into(),
                     enabled: true,
                     awaiting_approval: false,
                     uninstalling: false,
@@ -525,7 +525,7 @@ pub(super) mod tests {
                 host: HostBlock {
                     version: "0.9.0".into(),
                     build: "24".into(),
-                    provider_build: "24".into(),
+                    provider_build: "50".into(),
                 },
                 now: &|| SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_794_800),
                 hello_timeout: Duration::from_millis(400),
@@ -645,7 +645,7 @@ pub(super) mod tests {
             assert_eq!(
                 reply,
                 json!({"id":1,"ok":true,"result":{"protocol":1,
-                    "host":{"version":"0.9.0","build":"24","provider_build":"24"}}})
+                    "host":{"version":"0.9.0","build":"24","provider_build":"50"}}})
             );
             // A newer client range is negotiated down; hello again is answered again.
             let again = client.call(r#"{"id":2,"op":"hello","protocol":[1,9]}"#);
@@ -751,7 +751,7 @@ pub(super) mod tests {
             assert_eq!(status["component"]["state"], "ready");
             assert_eq!(status["schema"], 1);
             assert_eq!(status["generated"], "2026-11-04T12:20:00Z");
-            assert_eq!(status["host"]["provider_build"], "24");
+            assert_eq!(status["host"]["provider_build"], "50");
             assert_eq!(
                 status["login"],
                 json!({"menu_item":"enabled","agent":"disabled","host_agent":"requires_approval"})
@@ -832,11 +832,45 @@ pub(super) mod tests {
                     .unwrap()
                     .to_owned();
                 if component == "ready" {
-                    assert_eq!(event["status"]["component"]["installed_build"], "24");
-                    assert_eq!(event["status"]["component"]["expected_build"], "24");
+                    assert_eq!(event["status"]["component"]["installed_build"], "50");
+                    assert_eq!(event["status"]["component"]["expected_build"], "50");
                 }
             }
             assert_eq!(component, "ready");
+        });
+    }
+
+    /// The installed extension is compared with the bundled provider's build, never the
+    /// host's: here they differ (host 24, provider 50), so an extension at the host's build is
+    /// out of date, and one at the provider's build is ready (the test above).
+    #[test]
+    fn the_extension_is_compared_with_the_provider_build_not_the_host_build() {
+        let rig = Rig::new();
+        rig.extensions.mock.set_properties(
+            &rig.env.provider_id(),
+            Ok(vec![ExtensionProperties {
+                short_version: "1.0".into(),
+                build: "24".into(),
+                enabled: true,
+                awaiting_approval: false,
+                uninstalling: false,
+            }]),
+        );
+        rig.serving(&me, |socket| {
+            let mut client = Client::connect(socket);
+            client.hello();
+            client.call(r#"{"id":2,"op":"subscribe","topics":["status"]}"#);
+            let mut component = String::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while component != "update_required" && Instant::now() < deadline {
+                let event = client.next().expect("events");
+                component = event["status"]["component"]["state"].as_str().unwrap().to_owned();
+                if component == "update_required" {
+                    assert_eq!(event["status"]["component"]["installed_build"], "24");
+                    assert_eq!(event["status"]["component"]["expected_build"], "50");
+                }
+            }
+            assert_eq!(component, "update_required");
         });
     }
 
