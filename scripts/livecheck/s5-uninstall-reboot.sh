@@ -97,6 +97,7 @@ if [[ $phase == pre ]]; then
     lc_step "reinstall so connect-at-login has an app"
     lc_install_pkg "$LC_PKG"
     expect_rc "installer exit status" "$LC_RC" 0
+    (( LC_RC == 0 )) && lc_open_app_after_install
     lc_detach_dmg
     ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -q 'activated enabled'; }
     lc_activate

@@ -97,6 +97,7 @@ if lc_live; then
   (( LC_RC == 0 )) && installed=1
 fi
 if (( installed )) || (( LC_DRY )); then
+  lc_open_app_after_install
   lc_step "bundle after install"
   if lc_live; then
     ver_after=$(app_version); build_after=$(app_build); prov_after=$(provider_build)
