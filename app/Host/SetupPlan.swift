@@ -64,17 +64,7 @@ enum SetupOutcome: Equatable {
 }
 
 enum SetupProgress {
-    // `oftc setup` blocks in activation until the user approves. Properties
-    // report approval directly; if they do not, an extension still missing or
-    // old after a few seconds of waiting means the same thing.
-    static func isWaitingForApproval(component: VPNComponentState, elapsed: TimeInterval) -> Bool {
-        switch component {
-        case .approval: return true
-        case .missing, .updateRequired: return elapsed >= 8
-        default: return false
-        }
-    }
-
+    // Approval is reported by the host's `waiting` progress line (OFTCSetupRepair).
     static let working = "Setting up OFTC…"
     static let waiting = "Waiting for approval in System Settings. Turn on OFTC under Network Extensions (click ⓘ next to OFTC if you only see a list); setup then finishes on its own."
     static let stillWaiting = "Still waiting for approval in System Settings. Once OFTC is on, choose Set up… again."

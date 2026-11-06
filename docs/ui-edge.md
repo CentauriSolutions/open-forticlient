@@ -438,12 +438,10 @@ PR 6 settled, where this section was silent:
   Approval shows as `unavailable(approval)` with a row linking to Login Items; it is not retried
   into a loop. `oftc setup` does not register the service yet.
 - #105's first-run repair (`SetupPlan`, `SetupRepair`) stays, reading the host's document (profile
-  count, per-profile `setup` state, component state) instead of the system. Two things it still
-  does itself, both in `app/ui-edge-baseline.txt`: the Keychain presence check and prompt for a
-  PSK (no op reports it), and `oftc setup`, run by `HostCLI` in `HostEdge.swift` with only its exit
-  status read (4 is approval). No op finishes every existing profile (`add_profile` needs one,
-  `component_update` skips the VPN entries); PR 7 adds it and removes both. The `.oftc` import
-  uses the `import` op, not the CLI.
+  count, per-profile `setup` state, component state) instead of the system. PR 6 still did two
+  things itself (the Keychain presence check and prompt for a PSK, and `oftc setup` run by
+  `HostCLI`) because no op finished every existing profile; PR 7 made `component_update` do that
+  and removed both (see "PR 7 settled"). The `.oftc` import uses the `import` op, not the CLI.
 - The UI starts the host once per outage (kickstart, then register), not on every retry; a
   window opening or a wake starts the count again. An unsupported protocol is not retried.
 - `HostEdge` ignores a `status` whose `seq` is not above the last one of that connection and

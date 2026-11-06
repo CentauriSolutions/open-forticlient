@@ -1,4 +1,4 @@
-//! The connection profile: `profile.json`, as the Swift `OFTCProfile` wrote it.
+//! The connection profile: `profile.json`, as the former Swift `OFTCProfile` wrote it.
 //!
 //! Only nonsecret settings live here; the PSK stays in the Keychain, addressed by
 //! the gateway name. The file is read by the Swift UI and by older builds, so its
@@ -330,7 +330,7 @@ mod tests {
         Profile::new(gateway, port, Transport::Udp, None, None)
     }
 
-    /// Both files were written by the shipped Swift `OFTCProfileStore`.
+    /// Both files were written by the former Swift `OFTCProfileStore`.
     #[test]
     fn decodes_what_swift_wrote() {
         let minimal = fs::read(fixture("swift/profile-minimal.json")).unwrap();

@@ -61,7 +61,7 @@ fn secure_psk(cx: &OpCx, args: &AddProfileArgs) -> Result<(), Failure> {
         }
     }
     // The FortiClient profile had no importable key; an item stored earlier still
-    // counts, as it did in the setup window.
+    // counts, as the setup window did.
     keychain.get(&args.gateway).map(|_| ()).map_err(|_| {
         Failure::new(
             ErrorCode::PskUnavailable,

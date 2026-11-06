@@ -59,16 +59,6 @@ import Foundation
         precondition(O.resolve(fail(.timeout), sawApproval: false) == .failure(.timeout), "a real hang is still a failure")
         precondition(O.resolve(fail(.tunnelsActive), sawApproval: true) == .failure(.tunnelsActive))
 
-        // The waiting state: reported approval at once; a still-missing or old
-        // extension only after a few seconds; never once ready or unknown.
-        typealias P = SetupProgress
-        precondition(P.isWaitingForApproval(component: .approval, elapsed: 0))
-        precondition(!P.isWaitingForApproval(component: .missing, elapsed: 2))
-        precondition(P.isWaitingForApproval(component: .missing, elapsed: 9))
-        precondition(P.isWaitingForApproval(component: .updateRequired, elapsed: 9))
-        precondition(!P.isWaitingForApproval(component: .ready, elapsed: 60), "ready means installing the VPN entry")
-        precondition(!P.isWaitingForApproval(component: .unavailable, elapsed: 60))
-
         // The component window: what it offers follows the host's document alone.
         func document(_ state: HostComponentState, installed: String? = "35",
                       login: HostLoginState = .enabled) -> HostStatus {
@@ -83,6 +73,7 @@ import Foundation
         precondition(idle.builds == "Installed: build 35. This app: build 36.")
         precondition(!W(status: document(.updateRequired), phase: .idle, anyActive: true).canRun, "never under a live tunnel")
         precondition(!W(status: document(.updateRequired), phase: .working, anyActive: false).canRun, "one run at a time")
+        precondition(!W(status: document(.newer), phase: .idle, anyActive: false).canRun, "never replace a newer component")
         let waiting = W(status: document(.updateRequired), phase: .waiting, anyActive: false)
         precondition(waiting.showSettings && waiting.pane == .extensions && waiting.status == SetupProgress.waiting)
         precondition(W(status: document(.updateRequired), phase: .stillWaiting, anyActive: false).canRun, "run again after a wait")

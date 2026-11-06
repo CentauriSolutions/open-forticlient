@@ -2,7 +2,7 @@
 //! "latest release" document and offers only a final release with an https page; the
 //! UI opens the page, nothing is downloaded or run.
 //!
-//! This is the Swift `UpdateFeed` and `AppVersion` (`Host/UpdateCheck.swift`), ported.
+//! This is the Swift `UpdateFeed` and `AppVersion` (since deleted), ported.
 //! The fetch is `/usr/bin/curl` limited to https, a size and a time (the same
 //! child-process edge as the certificate check), not an HTTP client in the host.
 

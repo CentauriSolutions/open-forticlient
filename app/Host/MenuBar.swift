@@ -1009,7 +1009,9 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         reconcile()
     }
 
-    private func showComponentUpdate() {
+    // `fromSetup`: opened by the first-run or Set up… flow, which returns to Welcome when closed;
+    // from the options menu it just closes.
+    private func showComponentUpdate(fromSetup: Bool = false) {
         guard preview == nil else { return }
         popover.performClose(nil)
         controls?.window?.orderOut(nil)
@@ -1023,7 +1025,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
                         guard let self else { return }
                         self.componentWindow = nil
                         self.refresh()
-                        self.showWelcome()
+                        if fromSetup { self.showWelcome() } else { self.restoreAccessoryPolicyIfNeeded() }
                     }
                 })
         }
@@ -1436,7 +1438,7 @@ extension OFTCMenuBar {
         case .waitForHost: serviceAction()   // start it, or open Login Items for its approval
         case .newerInstalled, .waitForDisconnect: showWelcome()
         case .nothingToDo: refresh()
-        case .repair: showComponentUpdate()
+        case .repair: showComponentUpdate(fromSetup: true)
         }
     }
 
