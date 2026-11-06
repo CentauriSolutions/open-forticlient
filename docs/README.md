@@ -7,6 +7,7 @@
 - [Host verbs](host-verbs.md): the `OFTCAgent` verbs implemented in Rust and their output and exit codes.
 - [Roadmap](ROADMAP.md): distribution and rollout work.
 - [Releasing](releasing.md): CI, and building, signing and publishing a release.
+- [Live checks](livecheck.md): staged scripts for the live release checks.
 - [Swift removal plan](swift-removal-plan.md): Issues 41 to 50, seams, lanes, and hygiene rules.
 
 ## Historical research
