@@ -5,10 +5,6 @@ enum VPNComponentState: Equatable {
 
     var needsSetup: Bool { [.missing, .updateRequired, .approval].contains(self) }
 
-    static func canReplace(existing: String, replacement: String) -> Bool {
-        replacement.compare(existing, options: .numeric) != .orderedAscending
-    }
-
     var detail: String {
         switch self {
         case .checking: return "Checking the VPN component…"
@@ -126,4 +122,69 @@ struct LaunchExperienceStore {
         try JSONEncoder().encode(Record(acknowledgedBuild: build)).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
+}
+
+/// What the host's `check_update` found: a newer release and its https page, which the app opens
+/// in the browser. Nothing is downloaded or run.
+struct UpdateOffer: Equatable {
+    let version: String
+    let page: URL
+
+    init?(_ offer: HostUpdateOffer) {
+        guard let url = URL(string: offer.page), url.scheme == "https", url.host?.isEmpty == false else { return nil }
+        version = offer.version
+        page = url
+    }
+
+    init(version: String, page: URL) {
+        self.version = version
+        self.page = page
+    }
+}
+
+// UI-private, like the records above: the host fetches the feed (`check_update`); whether to check,
+// when we last did, and which version the user skipped.
+struct UpdateStore {
+    private struct Record: Codable {
+        var lastChecked: Date?
+        var skippedVersion: String?
+        var automatic: Bool?
+    }
+
+    let directory: URL
+    static let interval: TimeInterval = 24 * 60 * 60
+    private var url: URL { directory.appendingPathComponent("update.json") }
+
+    private var record: Record {
+        get {
+            guard let data = try? Data(contentsOf: url), data.count <= 4096,
+                  let value = try? JSONDecoder().decode(Record.self, from: data) else { return Record() }
+            return value
+        }
+        nonmutating set {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+    }
+
+    var automatic: Bool {
+        get { record.automatic ?? true }
+        nonmutating set { var value = record; value.automatic = newValue; record = value }
+    }
+    var skippedVersion: String? { record.skippedVersion }
+    var lastChecked: Date? { record.lastChecked }
+
+    func skip(_ version: String) { var value = record; value.skippedVersion = version; record = value }
+    func markChecked(at date: Date = Date()) { var value = record; value.lastChecked = date; record = value }
+
+    func isDue(now: Date = Date()) -> Bool {
+        guard automatic else { return false }
+        guard let last = lastChecked else { return true }
+        return now.timeIntervalSince(last) >= Self.interval || last > now
+    }
+
+    func shouldShow(_ offer: UpdateOffer) -> Bool { skippedVersion != offer.version }
 }

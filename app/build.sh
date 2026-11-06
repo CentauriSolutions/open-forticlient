@@ -79,14 +79,11 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     -framework AppKit -framework Foundation -framework NetworkExtension -framework Security \
     -framework SecurityInterface -framework ServiceManagement -framework SystemExtensions \
     "$build/liboftc_hostlib.a" \
-    "$root/Host/MigrationBridge.swift" \
-    "$root/Host/OFTCProfile.swift" \
-    "$root/Host/ProfileScope.swift" \
     "$root/Host/LauncherAlias.swift" \
-    "$root/Host/UpdateCheck.swift" \
     "$root/Host/GatewayTrust.swift" \
     "$root/Host/GatewayTrustPrompt.swift" \
     "$root/Host/Onboarding.swift" \
+    "$root/Host/ComponentUpdate.swift" \
     "$root/Host/LaunchExperience.swift" \
     "$root/Host/SetupPlan.swift" \
     "$root/Host/SetupRepair.swift" \
@@ -101,20 +98,8 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/main.swift" \
     -o "$app/Contents/MacOS/OFTCAgent"
 xcrun swiftc -swift-version 5 -target "$target" \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/LauncherAlias.swift" \
-    "$root/Host/UpdateCheck.swift" "$root/Host/check-misc.swift" -o "$build/misc-check"
+    "$root/Host/LauncherAlias.swift" "$root/Host/check-misc.swift" -o "$build/misc-check"
 "$build/misc-check"
-xcrun swiftc -swift-version 5 -target "$target" \
-    "$root/Host/OFTCProfile.swift" "$root/Host/check-profile.swift" \
-    -o "$build/profile-check"
-"$build/profile-check"
-# The setup window still reads the profiles the Rust host writes; it must accept them.
-# This goes with that reader when the window moves onto the host's add_profile.
-xcrun swiftc -swift-version 5 -target "$target" \
-    -framework Foundation -framework NetworkExtension \
-    "$root/Host/OFTCProfile.swift" "$root/Host/ProfileScope.swift" "$root/Host/check-host-compat.swift" \
-    -o "$build/host-compat-check"
-"$build/host-compat-check" "$root/core/host/tests/fixtures/rust"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/GatewayTrust.swift" "$root/Host/check-trust-compat.swift" \
     -o "$build/trust-compat-check"
@@ -124,7 +109,7 @@ xcrun swiftc -swift-version 5 -target "$target" -framework Foundation \
     "$root/Host/LaunchExperience.swift" "$root/Host/check-menu.swift" -o "$build/menu-check"
 "$build/menu-check"
 xcrun swiftc -swift-version 5 -target "$target" \
-    "$root/Host/LaunchExperience.swift" "$root/Host/check-experience.swift" \
+    "$root/Host/LaunchExperience.swift" "$root/Host/HostEdge.swift" "$root/Host/check-experience.swift" \
     -o "$build/experience-check"
 "$build/experience-check"
 xcrun swiftc -swift-version 5 -target "$target" \
@@ -138,7 +123,8 @@ xcrun swiftc -swift-version 5 -target "$target" \
 "$build/host-edge-check" "$root/core/ui-edge/tests/golden"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/LaunchExperience.swift" "$root/Host/MenuCommand.swift" "$root/Host/HostEdge.swift" \
-    "$root/Host/SetupPlan.swift" "$root/Host/check-setup-plan.swift" \
+    "$root/Host/SetupPlan.swift" "$root/Host/SetupRepair.swift" "$root/Host/MenuModel.swift" \
+    "$root/Host/TrafficHistory.swift" "$root/Host/check-setup-plan.swift" \
     -o "$build/setup-plan-check"
 "$build/setup-plan-check"
 CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \

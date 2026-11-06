@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 // The UI edge. Every host verb is Rust (liboftc_hostlib.a: core/host); only what needs
-// AppKit, bookmarks or URLSession stays here. The menu reads nothing from the host's files:
+// AppKit or bookmarks stays here. The menu reads nothing from the host's files:
 // it asks the host over its socket (HostEdge.swift). Keep `swift` rows of `VERBS` in
 // core/host/src/commands.rs equal to the verbs below; a Rust test compares them.
 private let appID = Bundle.main.bundleIdentifier ?? ""
@@ -38,20 +38,6 @@ case ("quit-menu", 1):
 case ("launcher-alias", 2) where ["ensure", "remove"].contains(args[1]):
     if args[1] == "ensure" { LauncherAlias.ensure() } else { LauncherAlias.remove() }
     finish("Launcher alias \(args[1] == "ensure" ? "checked" : "removed")")
-case ("check-update", 1...2):
-    // Fetches the update feed (the configured one, or the URL given) and says what it
-    // would offer. Nothing is downloaded or installed.
-    let feed = args.count == 2 ? URL(string: args[1]) : UpdateFeed.configuredURL()
-    guard let feed else { finish("No update feed is configured", code: 1) }
-    let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-    UpdateFeed.fetch(feed, current: installed) { result in
-        switch result {
-        case .success(let offer?): finish("Update available: \(offer.version) (\(offer.page.absoluteString)); installed \(installed)")
-        case .success(nil): finish("Up to date: installed \(installed) is the latest")
-        case .failure(let failure): finish("Could not check for updates (\(failure))", code: 1)
-        }
-    }
-    dispatchMain()
 default:
     // Everything else, including the usage text and `--profile`, is the Rust host's.
     var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) } + [nil]

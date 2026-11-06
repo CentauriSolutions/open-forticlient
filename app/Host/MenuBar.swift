@@ -434,7 +434,7 @@ private final class TunnelRuntime {
 // The menu shows what the host says (HostEdge) and asks it to act; it reads no file and
 // holds no Network Extension object. Preview mode never creates the edge, so it
 // reaches no host and invokes nothing.
-final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSMenuDelegate {
     private let appID: String
     private let preview: MenuConnectionState?
     private let content = OFTCMenuViewController()
@@ -453,6 +453,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var globalError: String?
     private var bulkBusy = false
     private var onboarding: OFTCOnboarding?
+    private var componentWindow: OFTCComponentUpdate?
     private var updateOffer: UpdateOffer?
     private var updateTimer: Timer?
     private var updateInFlight = false
@@ -463,7 +464,6 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var loginDefaultPending = true
     private var welcome: OFTCWelcome?
     private var controls: OFTCControlsWindow?
-    private var applicationQuitItem: NSMenuItem?
     private var welcomeIsUpgrade = false
     private var componentState = VPNComponentState.checking
     private var supportDirectory: URL {
@@ -473,9 +473,11 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var autoRepairTried = false
     private lazy var repair: OFTCSetupRepair = {
         let repair = OFTCSetupRepair()
-        repair.component = { [weak self] in self?.componentState ?? .unavailable }
-        repair.refresh = { [weak self] in self?.refresh() }
-        repair.onChange = { [weak self] in self?.reconcile() }
+        repair.edge = { [weak self] in self?.edge }
+        repair.onChange = { [weak self] in
+            self?.reconcile()
+            self?.updateComponentWindow()
+        }
         repair.onFinish = { [weak self] in self?.setupFinished($0) }
         return repair
     }()
@@ -526,7 +528,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item?.button?.target = self
-        item?.button?.action = #selector(togglePopover)
+        item?.button?.action = #selector(statusItemClicked)
+        item?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = content
@@ -588,6 +591,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func apply(_ status: HostStatus) {
         loginMenuItem = status.login.menuItem
         componentState = VPNComponentState(status.component.state)
+        updateComponentWindow()
         for profile in status.profiles {
             if let existing = runtimes[profile.id] { existing.profile = profile }
             else { runtimes[profile.id] = TunnelRuntime(profile: profile) }
@@ -615,23 +619,36 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.onService = { [weak self] in self?.serviceAction() }
     }
 
+    // The application menu, shown while a window is open, carries the same options as the gear
+    // button, rebuilt each time it opens so its checkmarks are current.
     private func installApplicationMenu() {
         let main = NSMenu()
         let root = NSMenuItem()
         let application = NSMenu(title: "OFTC")
-        let item = NSMenuItem(title: "Quit OFTC", action: #selector(quitFromApplicationMenu), keyEquivalent: "q")
-        item.target = self
-        application.addItem(item)
-        applicationQuitItem = item
+        application.delegate = self
+        application.autoenablesItems = false
         root.submenu = application
         main.addItem(root)
         NSApp.mainMenu = main
+        menuNeedsUpdate(application)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        populateOptions(menu)
+        menu.addItem(.separator())
+        let stopsTunnels = presentation.anyActive && presentation.service == .ready
+        let quit = NSMenuItem(title: stopsTunnels ? "Disconnect and Quit OFTC" : "Quit OFTC",
+                              action: #selector(quitFromApplicationMenu), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
     }
 
     @objc private func quitFromApplicationMenu() { quit() }
 
     private func restoreAccessoryPolicyIfNeeded() {
-        if welcome?.window?.isVisible != true && controls?.window?.isVisible != true && onboarding == nil {
+        if welcome?.window?.isVisible != true && controls?.window?.isVisible != true && onboarding == nil
+            && componentWindow == nil {
             NSApp.setActivationPolicy(.accessory)
         }
     }
@@ -658,7 +675,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // must not stay stale because the host was a second late.
     private func tick() {
         let visible = popover.isShown || controls?.window?.isVisible == true
-            || welcome?.window?.isVisible == true || onboarding != nil || launchExperiencePending
+            || welcome?.window?.isVisible == true || onboarding != nil || componentWindow != nil
+            || launchExperiencePending
         if visible != edgeActive { edgeActive = visible; edge?.setActive(visible) }
         reconcile()
     }
@@ -762,6 +780,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showLaunchExperience(forceWelcome: Bool = false) {
         guard preview == nil else { showPopover(); return }
         if let onboarding { onboarding.show(); return }
+        if let componentWindow { componentWindow.show(); return }
         if welcome != nil { updateWelcome(); welcome?.present(); return }
         if experienceStore.shouldWelcome(build: hostBuild, automatic: false, afterInstall: forceWelcome) {
             showWelcome()
@@ -824,15 +843,28 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         content.update(presentation)
         controls?.update(presentation)
         popover.contentSize = content.view.fittingSize
-        let stopsTunnels = presentation.anyActive && presentation.service == .ready
-        applicationQuitItem?.title = stopsTunnels ? "Disconnect and Quit OFTC" : "Quit OFTC"
         item?.button?.image = TunnelMenuIcon.image(connected: presentation.anyConnected,
                                                    attention: presentation.anyAttention)
         item?.button?.toolTip = "OFTC VPN: " + presentation.summary
         item?.button?.setAccessibilityLabel("OFTC VPN: " + presentation.summary)
     }
 
-    @objc private func togglePopover() {
+    // Left click toggles the popover; right or control click opens the same options menu as the
+    // gear button.
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            guard let button = item?.button else { return }
+            popover.performClose(nil)
+            let menu = NSMenu()
+            populateOptions(menu)
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 4), in: button)
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func togglePopover() {
         if popover.isShown { popover.performClose(nil) }
         else { showPopover() }
     }
@@ -840,7 +872,9 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showPopover() {
         guard let button = item?.button else { return }
         controls?.window?.orderOut(nil)
-        if onboarding == nil && welcome?.window?.isVisible != true { NSApp.setActivationPolicy(.accessory) }
+        if onboarding == nil && componentWindow == nil && welcome?.window?.isVisible != true {
+            NSApp.setActivationPolicy(.accessory)
+        }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         edge?.retryNow()
@@ -949,8 +983,10 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    // The Add VPN form: only for a VPN that does not exist yet. Finishing the profiles that do
+    // exist is the component window (`showComponentUpdate`), which has no form.
     private func showSetup() {
-        guard preview == nil else { return }
+        guard preview == nil, let edge else { return }
         guard componentState != .newer else { showWelcome(); return }
         // Adding a VPN is fine beside live tunnels; replacing the provider is not.
         guard !(presentation.anyActive && componentState == .updateRequired) else { showWelcome(); return }
@@ -958,7 +994,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controls?.window?.orderOut(nil)
         welcome?.window?.orderOut(nil)
         if onboarding == nil {
-            onboarding = OFTCOnboarding(appID: appID, updating: componentState == .updateRequired) { [weak self] in
+            onboarding = OFTCOnboarding(edge: edge) { [weak self] in
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.onboarding = nil
@@ -973,8 +1009,53 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         reconcile()
     }
 
+    // `fromSetup`: opened by the first-run or Set up… flow, which returns to Welcome when closed;
+    // from the options menu it just closes.
+    private func showComponentUpdate(fromSetup: Bool = false) {
+        guard preview == nil else { return }
+        popover.performClose(nil)
+        controls?.window?.orderOut(nil)
+        welcome?.window?.orderOut(nil)
+        if componentWindow == nil {
+            componentWindow = OFTCComponentUpdate(
+                onRun: { [weak self] in self?.runRepair() },
+                onSettings: { [weak self] pane in self?.edge?.openSettings(pane) },
+                onClose: { [weak self] in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.componentWindow = nil
+                        self.refresh()
+                        if fromSetup { self.showWelcome() } else { self.restoreAccessoryPolicyIfNeeded() }
+                    }
+                })
+        }
+        updateComponentWindow()
+        componentWindow?.show()
+    }
+
+    fileprivate func updateComponentWindow() {
+        componentWindow?.update(ComponentUpdatePresentation(
+            status: edge?.lastStatus, phase: repair.phase, anyActive: presentation.anyActive))
+    }
+
     private func showSettings(_ sender: NSButton) {
         let menu = NSMenu()
+        populateOptions(menu)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    private var detailsLine: String {
+        AboutDetails.line(appVersion: appVersion, appBuild: hostBuild, status: service == .ready ? edge?.lastStatus : nil)
+    }
+
+    // The one options menu: About with its Details line, then login, updates, adding and exporting
+    // VPNs, the VPN component, and Login Items. The gear button, a right click on the status item
+    // and the application menu all show it.
+    private func populateOptions(_ menu: NSMenu) {
         let ready = preview == nil && !bulkBusy && service == .ready
         func add(_ title: String, action: Selector, checked: Bool? = nil, needsHost: Bool = true) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -984,18 +1065,32 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             menu.addItem(item)
         }
         menu.autoenablesItems = false
+        add("About OFTC", action: #selector(showAbout), needsHost: false)
+        let details = NSMenuItem(title: detailsLine, action: nil, keyEquivalent: "")
+        details.isEnabled = false
+        menu.addItem(details)
+        menu.addItem(.separator())
         add("Launch OFTC at login", action: #selector(toggleMenuLogin),
             checked: preview == nil && loginMenuItem == .enabled)
         add("Check for Updates Automatically", action: #selector(toggleAutoUpdates),
-            checked: preview == nil && updateStore.automatic)
+            checked: preview == nil && updateStore.automatic, needsHost: false)
         add("Check for Updates Now…", action: #selector(checkUpdatesNow))
         menu.addItem(.separator())
         add("Add VPN…", action: #selector(openSetup), needsHost: false)
         add("Export VPNs…", action: #selector(exportVPNs))
         menu.items.last?.isEnabled = ready && !runtimes.isEmpty
+        add("VPN Component…", action: #selector(openComponent), needsHost: false)
         add("Login Items & Extensions…", action: #selector(openLoginSettings))
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
     }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        let credits = NSAttributedString(string: detailsLine, attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits, .applicationName: "OFTC"])
+    }
+
+    @objc private func openComponent() { showComponentUpdate() }
 
     @objc private func toggleMenuLogin() {
         guard preview == nil else { return }
@@ -1034,8 +1129,14 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         Bundle.main.bundleURL.standardizedFileURL.path == LauncherAlias.installedApp.path
     }
 
+    // The host fetches the feed (`check_update`); a build with no feed configured has nothing to
+    // ask, and says so when the user asks.
+    private var updatesConfigured: Bool {
+        (Bundle.main.object(forInfoDictionaryKey: "OFTCUpdateFeedURL") as? String)?.hasPrefix("https://") == true
+    }
+
     private func scheduleUpdateChecks() {
-        guard installedCopy, UpdateFeed.configuredURL() != nil else { return }
+        guard installedCopy, updatesConfigured else { return }
         // Not at the instant of login; then hourly, but at most once a day.
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.checkIfDue() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
@@ -1050,24 +1151,27 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func checkForUpdates(manual: Bool) {
         guard preview == nil, !updateInFlight else { return }
-        guard let feed = UpdateFeed.configuredURL() else {
+        guard updatesConfigured else {
             if manual { present("Updates aren’t set up", "This build has no update feed configured.") }
             return
         }
+        guard let edge else { return }
         let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         updateInFlight = true
-        UpdateFeed.fetch(feed, current: current) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.updateInFlight = false
-                switch result {
-                case .success(let offer):
-                    self.updateStore.markChecked()
-                    self.updateOffer = offer
-                    self.reconcile()
-                    if manual { self.reportManualCheck(offer, current: current) }
-                case .failure:
-                    if manual { self.present("Couldn’t check for updates", "Check your connection and try again.") }
+        edge.checkUpdate { [weak self] result in
+            guard let self else { return }
+            self.updateInFlight = false
+            switch result {
+            case .success(let found):
+                self.updateStore.markChecked()
+                self.updateOffer = found.available.flatMap { UpdateOffer($0) }
+                self.reconcile()
+                if manual { self.reportManualCheck(self.updateOffer, current: current) }
+            case .failure(let error):
+                if manual {
+                    let text = error.code == .hostUnavailable ? "OFTC’s VPN service is not running. Choose Start service, then try again."
+                        : "Check your connection and try again."
+                    self.present("Couldn’t check for updates", text)
                 }
             }
         }
@@ -1308,18 +1412,16 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
 // Issue 88: finishing setup for profiles that already exist, with no form.
 //
-// The decision reads the host's document (profile count and gateways, per-profile `setup`
-// state, component state); only the Keychain presence of a PSK is read here, because the host
-// has no op that reports it. The repair itself is `oftc setup`, run through HostEdge's CLI
-// runner: no host op takes "finish every existing profile" yet (`add_profile` needs a profile
-// and `component_update` skips the VPN entries). PR 7 moves this onto a host op.
+// The decision reads the host's document (profile count, per-profile `setup` state, component
+// state). The repair is the host's `component_update` (keys, system extension, each VPN entry);
+// a profile with no saved key comes back as `psk_unavailable` with its id, the key is asked for
+// here and stored by the host's own verb (HostPSK), and the repair runs again.
 extension OFTCMenuBar {
     private func setupPlan() -> SetupPlan {
         let profiles = orderedRuntimes.map(\.profile)
         return SetupPlan.decide(
             hostReady: service == .ready,
             profileCount: profiles.count,
-            missingPSK: profiles.filter { !OFTCPSKStore.has(appID: appID, gateway: $0.gateway) }.map(\.id),
             component: componentState,
             entriesMissing: profiles.contains { $0.state == .setup },
             anyActive: presentation.anyActive)
@@ -1336,23 +1438,13 @@ extension OFTCMenuBar {
         case .waitForHost: serviceAction()   // start it, or open Login Items for its approval
         case .newerInstalled, .waitForDisconnect: showWelcome()
         case .nothingToDo: refresh()
-        case .askPSK(let ids):
-            for id in ids {
-                guard let profile = runtimes[id]?.profile,
-                      OFTCPSKStore.prompt(appID: appID, name: profile.name, gateway: profile.gateway) else {
-                    globalError = "Setup needs the VPN key. Choose Set up… to enter it."
-                    reconcile()
-                    return
-                }
-            }
-            runRepair()
-        case .repair: runRepair()
+        case .repair: showComponentUpdate(fromSetup: true)
         }
     }
 
-    private func runRepair() {
+    fileprivate func runRepair() {
         globalError = nil
-        repair.start(arguments: ["setup"])
+        repair.start()
     }
 
     fileprivate func autoRepairIfNeeded() {
@@ -1366,9 +1458,32 @@ extension OFTCMenuBar {
     }
 
     fileprivate func setupFinished(_ outcome: SetupOutcome) {
-        if case .failure(let failure) = outcome { globalError = failure.message(action: "set up") }
-        else { globalError = nil }
+        switch outcome {
+        case .failure(let failure): globalError = failure.message(action: "set up")
+        case .needsKey(let id): askForKey(profileID: id)
+        default: globalError = nil
+        }
         refresh()
         reconcile()
+        updateComponentWindow()
+    }
+
+    private func askForKey(profileID: String?) {
+        guard let id = profileID, let profile = runtimes[id]?.profile,
+              var psk = OFTCKeyPrompt.ask(name: profile.name, gateway: profile.gateway) else {
+            globalError = "Setup needs the VPN key. Choose Set up… to enter it."
+            return
+        }
+        let executable = Bundle.main.executableURL
+        let typed = psk
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let stored = HostPSK.store(typed, gateway: profile.gateway, executable: executable)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if stored { self.runRepair() }
+                else { self.globalError = "Could not save the VPN key. Check Keychain access and try again."; self.reconcile() }
+            }
+        }
+        psk.resetBytes(in: 0..<psk.count)
     }
 }

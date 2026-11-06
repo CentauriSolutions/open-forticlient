@@ -10,44 +10,22 @@ enum GatewayTrustPrompt {
     // 11 (decline) or 12 (nothing to show).
     static func runChild() -> Never {
         guard let request = try? JSONDecoder().decode(
-                GatewayTrust.PromptRequest.self, from: FileHandle.standardInput.readDataToEndOfFile()),
-              let certificate = GatewayCertificate(der: request.certificate) else { exit(12) }
-        let reason: GatewayTrust.Review.Reason
-        if let old = request.previous.flatMap({ GatewayCertificate(der: $0) }) {
-            reason = .changed(previous: old)
-        } else {
-            reason = .untrusted
-        }
-        let decision = run(GatewayTrust.Review(
-            profileName: request.profileName, host: request.host, port: request.port, certificate: certificate, reason: reason))
-        exit(decision == .trust ? 10 : 11)
+                GatewayTrust.PromptRequest.self, from: FileHandle.standardInput.readDataToEndOfFile()) else { exit(12) }
+        exit(run(request) == .trust ? 10 : 11)
     }
 
-    // The value of a distinguished-name field, e.g. a FortiGate's serial number
-    // for CN.
-    static func field(_ key: String, in name: String) -> String {
-        let pattern = try? NSRegularExpression(pattern: "\\b\(key) ?= ?([^/,]+)")
-        if let match = pattern?.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
-           let range = Range(match.range(at: 1), in: name) {
-            return String(name[range]).trimmingCharacters(in: .whitespaces)
-        }
-        return name
-    }
-
-    // "Jun  5 07:00:00 2056 GMT" as a plain date; falls back to the raw text.
-    static func expiry(_ validity: String) -> String {
-        guard let range = validity.range(of: " to ") else { return validity }
-        let raw = validity[range.upperBound...].split(separator: " ").joined(separator: " ")
+    // "Jun 5 07:00:00 2056 GMT" as a plain date; falls back to the raw text.
+    static func expiry(_ raw: String) -> String {
         let parser = DateFormatter()
         parser.locale = Locale(identifier: "en_US_POSIX")
         parser.dateFormat = "MMM d HH:mm:ss yyyy 'GMT'"
         parser.timeZone = TimeZone(identifier: "GMT")
-        guard let date = parser.date(from: raw) else { return raw }
+        guard let date = parser.date(from: raw.split(separator: " ").joined(separator: " ")) else { return raw }
         return date.formatted(date: .long, time: .omitted)
     }
 
     // 32 fingerprint bytes as two lines of 16, easy to compare by eye.
-    static func fingerprintLines(_ certificate: GatewayCertificate) -> String {
+    static func fingerprintLines(_ certificate: GatewayTrust.Certificate) -> String {
         let bytes = certificate.sha256.split(separator: ":").map(String.init)
         return [bytes.prefix(16), bytes.dropFirst(16)].map { $0.joined(separator: " ") }.joined(separator: "\n")
     }
@@ -63,7 +41,7 @@ enum GatewayTrustPrompt {
         return field
     }
 
-    private static func fingerprint(_ caption: String, _ certificate: GatewayCertificate,
+    private static func fingerprint(_ caption: String, _ certificate: GatewayTrust.Certificate,
                                     secondary: Bool = false) -> NSStackView {
         let stack = NSStackView(views: [
             text(caption, size: 11, secondary: true),
@@ -99,9 +77,8 @@ enum GatewayTrustPrompt {
     }
 
     // Builds the alert; `retained` must outlive it.
-    static func makeAlert(_ review: GatewayTrust.Review) -> (alert: NSAlert, retained: AnyObject) {
-        let changed: Bool
-        if case .changed = review.reason { changed = true } else { changed = false }
+    static func makeAlert(_ review: GatewayTrust.PromptRequest) -> (alert: NSAlert, retained: AnyObject) {
+        let changed = review.changed
         let certificate = review.certificate
         let vpn = review.profileName.isEmpty ? "this VPN gateway" : "the “\(review.profileName)” VPN gateway"
 
@@ -119,15 +96,15 @@ enum GatewayTrustPrompt {
             .withSymbolConfiguration(configuration)
 
         var views: [NSView] = [fingerprint(changed ? "New SHA-256 fingerprint" : "SHA-256 fingerprint", certificate)]
-        if case .changed(let previous) = review.reason {
+        if let previous = review.previous {
             views.append(fingerprint("Previously trusted", previous, secondary: true))
         }
 
         let grid = NSGridView(views: [
-            [text("Issued to", secondary: true), text(field("CN", in: certificate.subject))],
-            [text("Issued by", secondary: true), text(field("CN", in: certificate.issuer))],
+            [text("Issued to", secondary: true), text(certificate.issuedTo)],
+            [text("Issued by", secondary: true), text(certificate.issuedBy)],
             [text("Serial", secondary: true), text(certificate.serial)],
-            [text("Expires", secondary: true), text(expiry(certificate.validity))],
+            [text("Expires", secondary: true), text(expiry(certificate.expires))],
         ])
         grid.columnSpacing = 14
         grid.rowSpacing = 3
@@ -169,7 +146,7 @@ enum GatewayTrustPrompt {
         return (alert, toggle)
     }
 
-    private static func run(_ review: GatewayTrust.Review) -> GatewayTrust.Decision {
+    private static func run(_ review: GatewayTrust.PromptRequest) -> GatewayTrust.Decision {
         NSApplication.shared.setActivationPolicy(.accessory)
         let (alert, retained) = makeAlert(review)
         NSApp.activate(ignoringOtherApps: true)

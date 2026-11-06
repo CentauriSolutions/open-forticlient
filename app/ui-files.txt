@@ -1,16 +1,14 @@
 # The Swift UI files the ratchet (check-ui-edge.sh) watches, one path per line, relative to app/.
 # Only Host/HostEdge.swift may talk to the host; the others may not reach around it
-# (docs/ui-edge.md, sections 1 and 10). main.swift is exempt: it is the argv trampoline into
-# the Rust host verbs (oftc_host_main), not UI. Every other Host/*.swift (but check-*.swift) must
-# be listed or exempted here, so a new file cannot go unscanned. The exempt ones are the profile
-# and trust code that is not UI (docs/ui-edge.md, section 11); main.swift is the trampoline above.
+# (docs/ui-edge.md, sections 1 and 10). Every Host/*.swift (but check-*.swift) must be listed or
+# exempted here, so a new file cannot go unscanned. The exempt ones are not UI: main.swift is the
+# argv trampoline into the Rust host verbs (oftc_host_main) and LauncherAlias.swift makes the
+# launcher alias bookmark.
 exempt: Host/main.swift
-exempt: Host/GatewayTrust.swift
 exempt: Host/LauncherAlias.swift
-exempt: Host/MigrationBridge.swift
-exempt: Host/OFTCProfile.swift
-exempt: Host/ProfileScope.swift
+Host/ComponentUpdate.swift
 Host/ControlsWindow.swift
+Host/GatewayTrust.swift
 Host/GatewayTrustPrompt.swift
 Host/HostEdge.swift
 Host/LaunchExperience.swift
@@ -20,7 +18,6 @@ Host/MenuModel.swift
 Host/Onboarding.swift
 Host/RateSparklineView.swift
 Host/TrafficHistory.swift
-Host/UpdateCheck.swift
 Host/Welcome.swift
 Host/SetupPlan.swift
 Host/SetupRepair.swift

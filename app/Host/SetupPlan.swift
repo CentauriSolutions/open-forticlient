@@ -6,8 +6,7 @@ import Foundation
 // finishes with `oftc setup`, which is idempotent and asks for nothing.
 enum SetupPlan: Equatable {
     case addForm                 // no profile yet: the Add a VPN form
-    case askPSK([String])        // these profile ids have no saved PSK
-    case repair                  // activate the extension, install the VPN entries
+    case repair                  // the host's component_update: keys, extension, VPN entries
     case waitForDisconnect       // the component must be replaced, but a tunnel is live
     case newerInstalled          // the installed component is newer than this app
     case nothingToDo
@@ -16,12 +15,11 @@ enum SetupPlan: Equatable {
     // While the host is down its document is empty, so "no profiles" would be a guess: an
     // upgrade's first launch has profiles on disk and a host still starting or awaiting approval.
     // Never choose from it; wait for the host (docs/ui-edge.md 7).
-    static func decide(hostReady: Bool = true, profileCount: Int, missingPSK: [String],
+    static func decide(hostReady: Bool = true, profileCount: Int,
                        component: VPNComponentState, entriesMissing: Bool, anyActive: Bool) -> Self {
         if !hostReady { return .waitForHost }
         if component == .newer { return .newerInstalled }
         if profileCount == 0 { return .addForm }
-        if !missingPSK.isEmpty { return .askPSK(missingPSK) }
         if component == .updateRequired && anyActive { return .waitForDisconnect }
         if component == .ready && !entriesMissing { return .nothingToDo }
         return .repair
@@ -30,8 +28,8 @@ enum SetupPlan: Equatable {
     // Repair once on launch so the user's only job is approving in System Settings.
     // Never for a login-item launch (nothing asked for it), and never again once
     // tried in this process, so a failure cannot loop.
-    // The cheap guards come first so the caller can skip computing a plan (which
-    // reads the Keychain) on the many checks that cannot lead to a repair.
+    // The cheap guards come first so the caller can skip computing a plan on the many
+    // checks that cannot lead to a repair.
     static func mayAutoRepair(component: VPNComponentState, automaticLaunch: Bool,
                               alreadyTried: Bool) -> Bool {
         component.needsSetup && !automaticLaunch && !alreadyTried
@@ -47,38 +45,83 @@ enum SetupPlan: Equatable {
 enum SetupOutcome: Equatable {
     case done
     case waitingForApproval
+    /// The host has no saved key for this profile (its id); ask for it, then run the update again.
+    case needsKey(String?)
     case failure(MenuCommandFailure)
 
-    // Approval is a state, not an error: a command that ends while macOS is still
-    // waiting for the user must not become "took too long".
-    // Exit 4 is "needs the user" for approval and for an unavailable PSK alike (the same exit
-    // table as the wire's); it is approval only when the component says so, or approval was seen
-    // while waiting. Otherwise it is the missing key, which waiting would never fix.
-    static func resolve(_ result: MenuCommandResult, sawApproval: Bool,
-                        component: VPNComponentState = .unavailable) -> Self {
+    // Approval is a state, not an error: a request that ends while macOS is still waiting for the
+    // user must not become "took too long". The host's typed code says which: `approval_required`
+    // is approval and `psk_unavailable` is the key, so no exit status is guessed at.
+    static func resolve(_ result: Result<Void, HostError>, sawApproval: Bool) -> Self {
         switch result {
         case .success: return .done
-        case .failure(.approval) where sawApproval || component.needsSetup: return .waitingForApproval
-        case .failure(.approval): return .failure(.credentials)
-        case .failure(.timeout) where sawApproval: return .waitingForApproval
-        case .failure(let failure): return .failure(failure)
+        case .failure(let error) where error.code == .approvalRequired: return .waitingForApproval
+        case .failure(let error) where error.code == .pskUnavailable: return .needsKey(error.profileId)
+        case .failure(let error) where error.code == .timeout && sawApproval: return .waitingForApproval
+        case .failure(let error): return .failure(MenuCommandFailure(error))
         }
     }
 }
 
 enum SetupProgress {
-    // `oftc setup` blocks in activation until the user approves. Properties
-    // report approval directly; if they do not, an extension still missing or
-    // old after a few seconds of waiting means the same thing.
-    static func isWaitingForApproval(component: VPNComponentState, elapsed: TimeInterval) -> Bool {
-        switch component {
-        case .approval: return true
-        case .missing, .updateRequired: return elapsed >= 8
-        default: return false
-        }
-    }
-
+    // Approval is reported by the host's `waiting` progress line (OFTCSetupRepair).
     static let working = "Setting up OFTC…"
     static let waiting = "Waiting for approval in System Settings. Turn on OFTC under Network Extensions (click ⓘ next to OFTC if you only see a list); setup then finishes on its own."
     static let stillWaiting = "Still waiting for approval in System Settings. Once OFTC is on, choose Set up… again."
+}
+
+// What the component-update window shows, from the host's document alone (docs/ui-edge.md 4.5):
+// the system extension and the three login items, and whether approval is what the user must do.
+struct ComponentUpdatePresentation: Equatable {
+    var component: String
+    var builds: String
+    var login: [String]
+    var status: String
+    var button: String
+    var canRun: Bool
+    var showSettings: Bool
+    /// The System Settings pane that holds the pending approval.
+    var pane: HostSettingsPane
+
+    init(status document: HostStatus?, phase: OFTCSetupRepair.Phase, anyActive: Bool) {
+        let state = document.map { VPNComponentState($0.component.state) } ?? .unavailable
+        component = state.detail
+        builds = Self.builds(document?.component)
+        login = Self.loginLines(document?.login)
+        let waiting = phase == .waiting || phase == .stillWaiting
+        let loginPending = document.map { [$0.login.menuItem, $0.login.agent, $0.login.hostAgent].contains(.requiresApproval) } ?? false
+        showSettings = waiting || state == .approval || loginPending
+        pane = loginPending && !(waiting || state == .approval) ? .loginItems : .extensions
+        switch phase {
+        case .working: status = SetupProgress.working
+        case .waiting: status = SetupProgress.waiting
+        case .stillWaiting: status = SetupProgress.stillWaiting
+        case .idle: status = anyActive && state == .updateRequired
+            ? "Disconnect OFTC before updating its VPN component." : ""
+        }
+        button = state == .updateRequired ? "Update VPN component" : "Finish setup"
+        canRun = document != nil && (phase == .idle || phase == .stillWaiting) && !(anyActive && state == .updateRequired)
+            && state != .newer && state != .ready && state != .checking
+    }
+
+    static func builds(_ component: HostComponent?) -> String {
+        let installed = component?.installedBuild.map { "build \($0)" } ?? "not installed"
+        let bundled = component?.expectedBuild.map { "build \($0)" } ?? "unknown"
+        return "Installed: \(installed). This app: \(bundled)."
+    }
+
+    static func loginLines(_ login: HostLogin?) -> [String] {
+        guard let login else { return [] }
+        return [("OFTC at login", login.menuItem), ("Login agent", login.agent), ("VPN service", login.hostAgent)]
+            .map { "\($0.0): \(stateText($0.1))" }
+    }
+
+    static func stateText(_ state: HostLoginState) -> String {
+        switch state {
+        case .enabled: return "on"
+        case .disabled: return "off"
+        case .requiresApproval: return "needs approval in Login Items & Extensions"
+        case .notFound: return "not set up"
+        }
+    }
 }

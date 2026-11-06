@@ -61,7 +61,7 @@ fn secure_psk(cx: &OpCx, args: &AddProfileArgs) -> Result<(), Failure> {
         }
     }
     // The FortiClient profile had no importable key; an item stored earlier still
-    // counts, as it did in the setup window.
+    // counts, as the setup window did.
     keychain.get(&args.gateway).map(|_| ()).map_err(|_| {
         Failure::new(
             ErrorCode::PskUnavailable,
@@ -207,11 +207,18 @@ pub fn list_sources(cx: &OpCx) -> OpResult {
     value(&SourcesResult { sources })
 }
 
-/// Replaces the installed system extension with the bundled one. Refused while any
-/// tunnel is up; touches no profile, PSK or VPN entry.
+/// Finishes setup for the profiles that already exist: every profile's PSK is in the
+/// Keychain, the installed system extension is the bundled one, and every profile has
+/// its VPN entry (what `oftc setup` does, with no form). Refused while any tunnel is up.
+/// A profile with no saved PSK is `psk_unavailable` with that profile's id, before
+/// anything is asked of the system, so the UI can ask for the key and run this again;
+/// nothing else is created, replaced or deleted.
 pub fn component_update(cx: &OpCx) -> OpResult {
-    let _busy = cx.busy.acquire(vec!["component".to_owned()])?;
     let services = cx.services;
+    let entries = registry::entries(services.env.root());
+    let mut keys = vec!["component".to_owned()];
+    keys.extend(entries.iter().map(|entry| format!("profile:{}", entry.id)));
+    let _busy = cx.busy.acquire(keys)?;
     let provider = services.env.provider_id();
     let loaded = services
         .vpn
@@ -230,7 +237,25 @@ pub fn component_update(cx: &OpCx) -> OpResult {
             "Disconnect every VPN before updating the component",
         ));
     }
+    step(cx, Step::Keychain, || {
+        for entry in &entries {
+            if services.ops.keychain.get(&entry.profile.gateway).is_err() {
+                return Err(Failure::new(
+                    ErrorCode::PskUnavailable,
+                    "OFTC PSK unavailable; store it with provision-psk --stdin first",
+                )
+                .for_profile(&entry.id));
+            }
+        }
+        Ok(())
+    })?;
     step(cx, Step::ExtensionApproval, || ensure_extension(cx))?;
+    step(cx, Step::VpnEntry, || {
+        for entry in &entries {
+            vpn::install_profile(&cx.access(), entry)?;
+        }
+        Ok(())
+    })?;
     Ok(json!({}))
 }
 

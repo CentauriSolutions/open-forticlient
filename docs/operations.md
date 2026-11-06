@@ -80,9 +80,9 @@ creates the file with owner-only permissions and will not overwrite one.
   stays a deliberate step.
 - **Feed:** a GitHub "latest release" document (`tag_name`, `html_url`,
   `draft`, `prerelease`), https only; prereleases and drafts are never offered.
-  Set it at build time with `OFTCUpdateFeedURL` in `app/Host/Info.plist`, or per
-  user with `defaults write com.chris.openforticlient.oftc updateFeedURL <url>`.
-  Empty means no checks. For a GitHub repository it is
+  Set it at build time with `OFTCUpdateFeedURL` in `app/Host/Info.plist`. The OFTC
+  service fetches it (`check_update`); the per-user `updateFeedURL` default of earlier
+  builds is no longer read. Empty means no checks. For a GitHub repository it is
   `https://api.github.com/repos/OWNER/REPO/releases/latest`. Check a feed with
   `"/Applications/Open Forticlient.app/Contents/MacOS/OFTCAgent" check-update <url>`.
 

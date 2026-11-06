@@ -150,5 +150,6 @@ if [[ -f "$baseline" ]]; then
         fi
     done < "$baseline"
 fi
-if (( rc == 0 )); then print "UI edge ratchet passed: no new reach around HostEdge.swift ($(grep -cv '^#' "$baseline" 2>/dev/null || print 0) baseline rows left to remove)."; fi
+rows=$(grep -cv '^#' "$baseline" 2>/dev/null || true)
+if (( rc == 0 )); then print "UI edge ratchet passed: no new reach around HostEdge.swift (${rows:-0} baseline rows left to remove)."; fi
 exit $rc
