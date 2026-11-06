@@ -341,6 +341,8 @@ reset_world; run s2-disturb.sh --yes --only sleep
 eq "S2 sleep good" "$RC" 0; has "S2 scheduled wake" "$OUT" "PASS scheduled wake"; has "S2 slept" "$OUT" "PASS Mac slept"; has "S2 sleepnow printed" "$OUT" "RUN  pmset sleepnow"
 has "S2 wake traffic" "$OUT" "PASS after wake: traffic through p1 at 0% loss"
 has "S2 sleep proven by a clock jump" "$OUT" "PASS Mac slept (clock jumped 75s"
+reset_world; rule '^pmset sleepnow' '' 0 'print 20 > "$SHIM_STATE/clock_pending"'; run s2-disturb.sh --yes --only sleep
+eq "S2 sleep bad: too short" "$RC" 1; has "S2 names the short sleep" "$OUT" "FAIL Mac slept only 20s"
 reset_world; rule '^pmset sleepnow' '' 0 ''; run s2-disturb.sh --yes --only sleep
 eq "S2 sleep bad: the Mac never slept" "$RC" 1; has "S2 names it" "$OUT" "FAIL no sleep detected"
 

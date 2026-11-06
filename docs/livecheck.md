@@ -75,7 +75,7 @@ anything outside paths the run created, except `oftc uninstall` and the installe
 stage prints or logs a PSK or a token (the only PSK-related call is `has-psk`, whose
 single line says it is available), and none exports profiles (an export file holds
 PSKs); a future stage that must export would have to write into a mode-0700 directory
-and `rm -P` it afterwards. S4 and S5 verify the package (signature, Gatekeeper,
+and `rm -P` it afterwards. S4's `oftc disconnect` is deliberately global (the preinstall guard refuses while any OFTC VPN is active). S4 and S5 verify the package (signature, Gatekeeper,
 notarization ticket) before any installer or uninstall call and stop if a check failed.
 
 Offline check of the harness itself (stub commands only, nothing real is touched):
@@ -97,7 +97,7 @@ refuses (no `--yes`), 2 on usage errors. Pass `--run-dir` to put several stages 
 run directory. `INFO` lines are observations, not assertions (for example the transport
 in use). `HUMAN >>> ACTION REQUIRED` is a single request; the script then polls for its
 observable result and prints `PASS human act observed` or `FAIL ... not observed`. The
-**run directory is private.** Output of noisy commands (extension list, launchctl,
+**run directory is private.** `activate.out` and `s5-resume.out` hold raw command output and are masked the same way, best effort. Output of noisy commands (extension list, launchctl,
 `scutil`, `netstat`, `sfltool`, `install.log`, `pgrep`, `pmset`) is used but not written
 to the log, and at the end of each stage profile ids become `<profile-N>`, every IPv4
 address becomes `<ip>` and `gateway=` values are masked in the log and `summary.txt`.
@@ -141,7 +141,7 @@ afford to leave failing, and remove the rule afterwards. For a TCP-only profile 
 
 Overall, for a full pass over S0 to S7:
 
-1. **Admin password**, once per stage that uses sudo (S0, S2, S4, S5; each drops the credential when it ends): the script asks at
+1. **Admin password**, once per stage that uses sudo (S0, S2, S4, S5; a stage that had to prompt drops the credential with `sudo -k` when it ends, one that found it already cached leaves it): the script asks at
    its own `sudo -v` prompt.
 2. **Browser SSO** whenever a tunnel is brought up: S1 `--connect`, after each S2
    recovery that needs it, S4 `--reconnect`, S5 after login, S6, S7.

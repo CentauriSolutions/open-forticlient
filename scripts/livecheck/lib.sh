@@ -112,7 +112,7 @@ lc_scrub_files() {
     [[ $id == [a-z0-9-]## ]] && script+="s/[[:<:]]${id}[[:>:]]/<profile-$n>/g;"
   done
   script+='s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<ip>/g;s/gateway=[^ ]+/gateway=<gateway>/g'
-  for f in "$LC_LOG" "$LC_RUN/summary.txt"; do
+  for f in "$LC_LOG" "$LC_RUN/summary.txt" "$LC_RUN/activate.out" "$LC_RUN/s5-resume.out"; do
     [[ -f $f ]] && sed -E -i '' "$script" "$f"
   done
   return 0
@@ -172,12 +172,12 @@ expect_eq() {   # desc actual expected
 
 expect_contains() {   # desc haystack needle
   if (( LC_DRY )); then lc_dry "would assert: $1 contains '$3'"; return 0; fi
-  if [[ $2 == *"$3"* ]]; then lc_pass "$1 (contains '$3')"; else lc_fail "$1: '$3' not found in: ${2:0:300}"; fi
+  if [[ $2 == *"$3"* ]]; then lc_pass "$1 (contains '$3')"; else lc_fail "$1: '$3' not found (${#2} bytes of output, not shown)"; fi
 }
 
 expect_not_contains() {
   if (( LC_DRY )); then lc_dry "would assert: $1 lacks '$3'"; return 0; fi
-  if [[ $2 != *"$3"* ]]; then lc_pass "$1 (no '$3')"; else lc_fail "$1: unexpected '$3' in: ${2:0:300}"; fi
+  if [[ $2 != *"$3"* ]]; then lc_pass "$1 (no '$3')"; else lc_fail "$1: unexpected '$3' found (output not shown)"; fi
 }
 
 expect_rc() {   # desc actual-rc expected-rc
@@ -400,7 +400,7 @@ lc_finish() {
   for f in "${LC_HUMAN_LOG[@]}"; do print -r -- "  human: $f" >> "$LC_RUN/summary.txt"; done
   lc_emit "SUMMARY" "log: $LC_LOG (private: profile ids and addresses are masked in it, but review before sharing)"
   lc_scrub_files
-  sudo -k 2>/dev/null   # drop the cached admin credential this run asked for
+  (( ${LC_SUDO_PRIMED:-0} )) && sudo -k 2>/dev/null   # drop the credential only if this run asked for it
   (( LC_FAIL )) && exit 1
   exit $rc
 }
@@ -420,6 +420,7 @@ lc_sudo_prime() {
     lc_emit "HUMAN" ">>> ACTION REQUIRED (one act): type your admin password at the sudo prompt below"
     lc_emit "RUN " "sudo -v"
     sudo -v
+    LC_SUDO_PRIMED=1
     if sudo -n true 2>/dev/null; then lc_pass "sudo credential cached"; else lc_fail "sudo credential not cached; stage cannot continue"; exit 1; fi
   fi
   if (( LC_SLEEP_SCALE != 0 )); then
@@ -436,6 +437,7 @@ lc_on_exit() { LC_CLEANUP_FNS+=("$1"); }
 lc_run_cleanups() {
   local fn
   [[ -n ${LC_KEEPALIVE:-} ]] && kill "$LC_KEEPALIVE" 2>/dev/null
+  [[ -n ${LC_ACT_PID:-} ]] && kill "$LC_ACT_PID" 2>/dev/null
   (( LC_DRY )) && return 0
   for fn in "${(@Oa)LC_CLEANUP_FNS}"; do "$fn"; done
 }
@@ -523,7 +525,7 @@ lc_now() { date +%s; }
 # is frozen while it does). Succeeds with the length of the jump in LC_SLEPT.
 lc_detect_sleep() {   # max-ticks
   local prev now i
-  prev=$(lc_now); LC_SLEPT=0
+  prev=${LC_T0:-$(lc_now)}; LC_SLEPT=0
   for (( i = 0; i < $1; i++ )); do
     lc_sleep 1
     now=$(lc_now)

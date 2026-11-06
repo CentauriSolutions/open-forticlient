@@ -37,6 +37,13 @@ s2_restore_network() {
   fi
 }
 lc_on_exit s2_restore_network
+wake_pending=''
+s2_cancel_wake() {
+  [[ -n $wake_pending ]] || return 0
+  lc_run sudo -n pmset schedule cancel wake "$wake_pending"
+  (( LC_RC == 0 )) || lc_emit "RESTORE" "MANUALLY: sudo pmset schedule cancel wake \"$wake_pending\""
+}
+lc_on_exit s2_cancel_wake
 
 all_connected() { local i; lc_refresh_status; for i in ${=PROFILES}; do [[ $(lc_pfield "$i" state) == connected ]] || return 1; done; }
 any_not_connected() { ! all_connected; }
@@ -87,9 +94,11 @@ if want drop; then
   mark=$(lc_log_lines "$first")
   rc=1
   if [[ -n $NETWORK_SERVICE ]]; then
-    lc_run sudo -n networksetup -setnetworkserviceenabled "$NETWORK_SERVICE" off; rc=$LC_RC; [[ $rc == 0 ]] && dropped_how=service
+    dropped_how=service   # set first: an interrupt right after the command must still restore
+    lc_run sudo -n networksetup -setnetworkserviceenabled "$NETWORK_SERVICE" off; rc=$LC_RC; [[ $rc == 0 ]] || dropped_how=
   elif [[ -n $WIFI_DEVICE ]]; then
-    lc_run networksetup -setairportpower "$WIFI_DEVICE" off; rc=$LC_RC; [[ $rc == 0 ]] && dropped_how=wifi
+    dropped_how=wifi
+    lc_run networksetup -setairportpower "$WIFI_DEVICE" off; rc=$LC_RC; [[ $rc == 0 ]] || dropped_how=
   fi
   if lc_live && [[ $rc != 0 ]]; then
     lc_info "scripted network drop unavailable (rc=$rc); asking a human"
@@ -119,8 +128,10 @@ fi
 if want sleep; then
   lc_step "sleep and wake"
   wake_at=$(date -v+$(( SLEEP_SECONDS + 15 ))S '+%m/%d/%y %H:%M:%S')
+  wake_pending="$wake_at"
   lc_sudo pmset schedule wake "$wake_at"
   expect_rc "scheduled wake" "$LC_RC" 0
+  LC_T0=$(lc_now)   # before the suspend, so a short sleep cannot hide
   lc_run pmset sleepnow
   # pmset returns before the Mac suspends and the script freezes with it: a jump in the
   # wall clock between one-second ticks is the evidence that it really slept.
@@ -129,7 +140,7 @@ if want sleep; then
       (( LC_SLEPT >= SLEEP_SECONDS - 5 )) && lc_pass "Mac slept (clock jumped ${LC_SLEPT}s, wanted >= $(( SLEEP_SECONDS - 5 ))s)" || lc_fail "Mac slept only ${LC_SLEPT}s, wanted >= $(( SLEEP_SECONDS - 5 ))s"
     else lc_fail "no sleep detected within $(( SLEEP_SECONDS + 180 ))s of pmset sleepnow"; fi
   else lc_dry "would watch for a wall-clock jump of at least $(( SLEEP_SECONDS - 5 ))s"; fi
-  lc_sudo pmset schedule cancel wake "$wake_at"
+  lc_sudo pmset schedule cancel wake "$wake_at"; wake_pending=''
   lc_run -q pmset -g log
   lc_live && lc_info "last wake lines: $(print -r -- "$LC_OUT" | grep -E ' Wake ' | tail -2 | tr '\n' ';' | cut -c1-200)"
   reconnect_with_sso

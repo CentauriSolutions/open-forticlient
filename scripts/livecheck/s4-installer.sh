@@ -64,6 +64,7 @@ else
 fi
 
 lc_step "get out of the way: disconnect, quit the menu app"
+# Global on purpose: the preinstall guard refuses while ANY OFTC VPN is active, not just the configured ones.
 lc_run -q "$cli" disconnect
 wait_for "no OFTC VPN connected" 60 3 lc_none_connected
 lc_run "$agent" quit-menu
