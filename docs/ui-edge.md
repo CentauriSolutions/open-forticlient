@@ -582,6 +582,13 @@ the update view; `missing` and `approval` open the add view; a gateway that
 already exists returns `already_configured` with the profile id and the UI says
 so and offers to select it. Welcome's `.setup` action uses the same routing.
 
+Interim (issue 88, before the edge carries `component_update`): the Swift UI
+already routes by `SetupPlan` (`app/Host/SetupPlan.swift`). A profile that exists
+but is not finished (extension missing, older or awaiting approval, or no VPN
+entry) is finished by running `oftc setup` with no form; the form is only for a
+VPN that does not exist. Waiting for approval is a state with the Settings deep
+link, not an error. PR 7 replaces this with the update view above.
+
 ### 10.2 No menu-bar access to version info or options
 
 Today a click opens the popover and the options sit behind its gear button; the
