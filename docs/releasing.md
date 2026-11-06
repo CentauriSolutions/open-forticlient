@@ -88,6 +88,48 @@ The DMG attached to a release is the generic one. A DMG with a team's default VP
 (`OFTC_VPNS_FILE=vpns.oftc zsh app/make-dmg.sh`) is for first installs and is not
 published.
 
+## How the package upgrades an installed app
+
+`app/package.sh` builds the component package with `app/package-files/component.plist`:
+the app bundle is replaced as a whole (`BundleOverwriteAction` `upgrade`, so files the
+new bundle lacks, such as an old `Frameworks` directory, are deleted rather than merged
+into), is not relocatable (Installer never updates a `/private/tmp` build in its
+place), requires the identifier to match, and is installed even when the disk holds a
+higher build. `postinstall` also removes `Contents/Frameworks` left in the installed
+bundle by older builds, only inside `/Applications/Open Forticlient.app` and only if its
+identifier is ours; `package.sh` refuses a bundle that ships any `Frameworks` directory.
+`zsh app/check-package-scripts.sh` (CI, lint job) tests that cleanup and the installer's
+active-VPN test offline. What offline cannot show is that Installer really replaces an
+old bundle this way: see the checklist.
+
+The distribution file still sets `allow-external-scripts` (its `checkUpdate` runs
+`system.run`); `productbuild` warns that Apple will break this in a future macOS. The
+preinstall script makes the same checks, so removing the distribution script loses only
+the earlier, friendlier message.
+
+## Live checklist before publishing a draft
+
+Run on a Mac, with the signed, notarized pkg from `dist/<version>/`; these are the claims
+CI and the offline checks cannot make.
+
+1. **Clean install** (no OFTC, no `/Applications/Open Forticlient.app`): install; the
+   app opens and the menu bar icon appears; `pkgutil --pkg-info com.chris.openforticlient.oftc.pkg`
+   shows the version; `codesign --verify --deep --strict "/Applications/Open Forticlient.app"` and
+   `spctl --assess --type execute` pass; approve the extension; connect a VPN.
+   `systemextensionsctl list` shows the provider `activated enabled` at build 50 or higher.
+2. **Upgrade over an old build** (a Swift-provider build installed, VPNs saved):
+   disconnect every VPN, install; `ls "/Applications/Open Forticlient.app/Contents"` has
+   no `Frameworks`; the codesign check passes; the saved VPNs are still listed; activate
+   the new provider (Settings, Add VPN...); `systemextensionsctl list` shows the new
+   version `activated enabled` with the old one `terminated`/removed and no error 8.
+   Repeat once with a VPN connected: Installer must refuse and name the VPN.
+3. **Uninstall**: `oftc uninstall`. Expect: VPNs stop; the system extension is
+   deactivated (approve or reboot if macOS asks, then rerun); `/Applications/Open Forticlient.app`,
+   `/usr/local/bin/oftc`, `/usr/local/libexec/oftc` and the receipt are gone;
+   System Settings, General, Login Items & Extensions lists no OFTC item
+   (no `...oftc.host`, no `...oftc.agent`, no OFTC app item); profiles, Keychain PSKs
+   and `~/Library/Logs/OFTC` remain unless `--erase-profile`.
+
 ## Local signing setup
 
 `app/release.sh` reads these from the environment or from `~/.config/oftc/release.env`
