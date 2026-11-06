@@ -179,7 +179,7 @@ release.
 | `import` | `path` (absolute) | `{ "added": [ids] }`; a gateway that already has a profile is skipped, so repeating it adds nothing |
 | `add_profile` | `gateway`, `saml_port`, `transport`, `name`, `psk_source`, `label` | progress then `{ "profile_id" }` (4.6). `psk_source` is `"saved"` (the PSK was stored first by the stdin child, 4.4) or `"forticlient"` plus `label`; the earlier draft's `"stdin_job"` is gone, it duplicated `saved` |
 | `list_sources` | | `{ "sources": [ { label, gateway, saml_port, already_configured } ] }`: importable FortiClient profiles, never a PSK |
-| `component_update` | | progress then `{}`; `tunnels_active` if any profile is up |
+| `component_update` | | progress then `{}`: finishes setup for the profiles that exist (PSKs, system extension, VPN entries); `tunnels_active` if any profile is up, `psk_unavailable` with `profile_id` if one has no saved PSK |
 | `settings_set` | `key`: `menu_login`, `auto_start:<id>`, `auto_update`; `value`: a boolean | `{}` |
 | `check_update` | | `{ "available": { "version", "page" } \| null }`; the host fetches |
 | `open_settings` | `pane`: `extensions` or `login_items` | `{}` |
@@ -452,6 +452,43 @@ PR 6 settled, where this section was silent:
   file into a private scratch directory and gives the host that path (and the host exports
   to a scratch path the menu copies out), so the same process as before touches the user's folders.
 
+PR 7 settled, where the earlier text was silent:
+
+- `component_update` is the one op that finishes every existing profile. After the tunnel check it
+  runs three reported steps: `keychain` (every profile's PSK is saved; the first profile without one
+  fails the op with `psk_unavailable` and its `profile_id`, before the system is asked for anything),
+  `extension_approval`, then `vpn_entry` (a VPN entry for each profile that lacks one, as
+  `add_profile` makes it). The UI asks for the missing PSK, stores it with the host's own
+  `provision-psk --stdin` verb (section 4.4, `HostPSK` in `HostEdge.swift`, the only other `Process`
+  use besides the `host` verbs) and runs the op again. `oftc setup` is no longer run by the UI, and
+  the UI's Keychain presence check is gone.
+- The form-less component view (`ComponentUpdate.swift`) shows `component.state`, the installed and
+  bundled builds and the three `login.*` states from the document, runs `component_update`, and
+  opens the pane that holds a pending approval with `open_settings`. `startSetup` routes by
+  `SetupPlan`: no profile opens the add form (`Onboarding.swift`, which uses `list_sources`,
+  `provision-psk --stdin` and `add_profile`); a profile that needs finishing opens the component view;
+  the silent first-launch repair runs the same op and updates that view when it is open.
+- The options menu (`OFTCMenuBar.populateOptions`) is shown by the gear button, a right or control
+  click on the status item, and the application menu while a window is open. It leads with About OFTC
+  and a disabled Details line, `AboutDetails.line`: app version and build (the UI's own), the host's
+  version, build and provider build, and the installed extension build, all from the document
+  (#89). `VPN Component…` opens the component view at any time, so the extension and login item
+  states are visible without `systemextensionsctl`.
+- The update check is the host's `check_update`; `UpdateCheck.swift` is deleted. The UI keeps its own
+  record (`UpdateStore`: automatic, last checked, skipped version, in `ui/`) and only asks when the
+  bundle's `OFTCUpdateFeedURL` is set, so a build with no feed still says so. `check-update [url]` is
+  now a Rust verb (same texts) for checking a feed by hand.
+- The certificate prompt child reads a request with every field parsed by the host
+  (`trust::CertificateView`: common names, serial, SHA-256, `notAfter`); `GatewayCertificate`
+  (`Security`, `CryptoKit`, openssl) is gone from Swift. This changes only what the prompt shows, not
+  when it is shown: #97 (a prompt for a publicly trusted certificate after an outage) is a verdict
+  problem in the evaluator and stays open until it is reproduced live.
+- Deleted as dead after `Onboarding.swift` stopped reading profiles: `ProfileScope`, `OFTCProfile`,
+  `MigrationBridge` and the Swift checks of them. `oftc_migrate_profile_psk` in `hostlib` has no
+  Swift caller left.
+- The baseline is empty; `ui-files.txt` lists `ComponentUpdate.swift` and `GatewayTrust.swift` (now
+  plain request types) and exempts only `main.swift` and `LauncherAlias.swift`.
+
 ## 8. How it composes with the merged host code
 
 `core/host` already provides what the server serves; the server adds transport,
@@ -515,7 +552,7 @@ SMAppService|OSSystemExtension|URLSession|NWConnection|socket\(|connect\(|profil
 **ratchet**: current violations are recorded in `app/ui-edge-baseline.txt` (file,
 pattern, count), the check fails on any new match or any count above baseline,
 and CI fails if the baseline file grows in a PR. Lines for deleted files are
-ignored. A fixture covers the script. The baseline reaches empty with PR 7.
+ignored. A fixture covers the script. The baseline reached empty with PR 7 and stays empty: any new match in a listed file fails the check.
 
 ## 11. Audit of the current UI files
 
@@ -615,7 +652,7 @@ already routes by `SetupPlan` (`app/Host/SetupPlan.swift`). A profile that exist
 but is not finished (extension missing, older or awaiting approval, or no VPN
 entry) is finished by running `oftc setup` with no form; the form is only for a
 VPN that does not exist. Waiting for approval is a state with the Settings deep
-link, not an error. PR 7 replaces this with the update view above.
+link, not an error. PR 7 replaced this with the update view above (`ComponentUpdate.swift`).
 
 ### 10.2 No menu-bar access to version info or options
 

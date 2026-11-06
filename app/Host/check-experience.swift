@@ -31,9 +31,6 @@ import Foundation
         precondition(mode == 0o600)
 
         typealias Component = VPNComponentState
-        precondition(Component.canReplace(existing: "20", replacement: "23"))
-        precondition(Component.canReplace(existing: "23", replacement: "23"))
-        precondition(!Component.canReplace(existing: "24", replacement: "23"))
 
         for component in [Component.missing, .updateRequired, .approval, .checking, .unavailable, .newer, .ready] {
             let active = WelcomePresentation(upgrade: true, configured: true, active: true, component: component)
@@ -46,6 +43,39 @@ import Foundation
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .checking).action == .wait)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .unavailable).action == .check)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .newer).action == .check)
-        print("Launch, welcome, and component replacement checks passed (offline).")
+        try checkUpdateStore()
+        print("Launch, welcome, update record and component checks passed (offline).")
+    }
+    // The host fetches the feed and decides whether a release is newer (cargo test); the UI keeps
+    // only its own record: on by default, at most a check a day, one skipped version.
+    static func checkUpdateStore() throws {
+        let page = URL(string: "https://example.com/oftc/releases/tag/v1.2.1")!
+        let offer = UpdateOffer(version: "1.2.1", page: page)
+        precondition(UpdateOffer(HostUpdateOffer(version: "1.2.1", page: page.absoluteString)) == offer)
+        for unsafe in ["http://example.com/r", "file:///etc/passwd", "https:///x", "not a url"] {
+            precondition(UpdateOffer(HostUpdateOffer(version: "9", page: unsafe)) == nil, unsafe)
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oftc-update-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = UpdateStore(directory: directory)
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        precondition(store.automatic && store.isDue(now: now))
+        store.markChecked(at: now)
+        precondition(!store.isDue(now: now.addingTimeInterval(3600)))
+        precondition(store.isDue(now: now.addingTimeInterval(UpdateStore.interval + 1)))
+        precondition(store.isDue(now: now.addingTimeInterval(-60))) // clock went backwards
+        store.automatic = false
+        precondition(!store.automatic && !store.isDue(now: now.addingTimeInterval(10 * UpdateStore.interval)))
+        store.automatic = true
+        precondition(store.shouldShow(offer))
+        store.skip("1.2.1")
+        precondition(!store.shouldShow(offer))
+        precondition(store.shouldShow(UpdateOffer(version: "1.2.2", page: page)))
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: directory.appendingPathComponent("update.json").path)[.posixPermissions] as? Int
+        precondition(mode == 0o600)
+        try Data("garbage".utf8).write(to: directory.appendingPathComponent("update.json"))
+        precondition(store.automatic && store.skippedVersion == nil)
     }
 }

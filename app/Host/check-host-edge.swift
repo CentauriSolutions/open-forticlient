@@ -190,7 +190,7 @@ final class HeldConnection: HostConnection {
         for scenario in [handshakeAndRequests, unsupportedSchema, olderHostIsRestarted,
                          reconnectAfterTheHostRestarts, notRunningAndApproval, requestTimeout, inactiveMenuDoesNotRetry,
                          staleHostIsRestartedOnlyOnce, startsAreFloored, anExplicitStartDuringAConnectIsKept, aHostThatDiesAtOnceIsNotStartedInALoop,
-                         approvalPendingIsNotRegisteredAgain] {
+                         approvalPendingIsNotRegisteredAgain, setupRequestsAndTypedPSK] {
             count += 1
             try FileManager.default.createDirectory(atPath: "\(directory)/\(count)", withIntermediateDirectories: true)
             scenario("\(directory)/\(count)")
@@ -341,6 +341,80 @@ final class HeldConnection: HostConnection {
         let ids = host.requests.compactMap { $0["id"] as? Int }
         require(ids == Array(1...ids.count))
         client.stop()
+    }
+
+    /// The setup and update requests carry the arguments the host's ops take and decode their typed
+    /// results; a typed PSK reaches the host's verb on stdin and never in an argument.
+    static func setupRequestsAndTypedPSK(_ directory: String) {
+        let host = FakeHost(directory: directory)
+        host.custom = { message in
+            let id = message["id"] as! Int
+            switch message["op"] as! String {
+            case "add_profile":
+                return [#"{"id":\#(id),"event":"progress","step":"extension_approval","state":"waiting"}"#,
+                        #"{"id":\#(id),"ok":true,"result":{"profile_id":"office-vpn"}}"#]
+            case "component_update":
+                return [#"{"id":\#(id),"ok":false,"error":{"code":"psk_unavailable","detail":"x","exit":4,"profile_id":"lab"}}"#]
+            case "list_sources":
+                return [#"{"id":\#(id),"ok":true,"result":{"sources":[{"label":"Office","gateway":"vpn.example.com","saml_port":9443,"already_configured":false}]}}"#]
+            case "check_update":
+                return [#"{"id":\#(id),"ok":true,"result":{"available":{"version":"1.2.1","page":"https://example.com/r"}}}"#]
+            default: return nil
+            }
+        }
+        host.start(); defer { host.stop() }
+        let client = edge(host, starter: FakeStarter())
+        var ready = false
+        client.onAvailability = { if $0 == .ready { ready = true } }
+        client.start()
+        wait("the host") { ready }
+
+        var steps: [HostProgress] = [], added: String?
+        client.addProfile(gateway: "vpn.example.com", samlPort: 9443, tcp: true, name: "Office", fortiClientLabel: "Office",
+                          progress: { steps.append($0) }) { if case .success(let value) = $0 { added = value.profileId } }
+        wait("add_profile") { added != nil }
+        require(added == "office-vpn" && steps == [HostProgress(step: "extension_approval", state: "waiting")])
+        let add = host.ops("add_profile")[0]
+        require(add["gateway"] as? String == "vpn.example.com" && add["saml_port"] as? Int == 9443
+            && add["transport"] as? String == "tcp" && add["name"] as? String == "Office"
+            && add["psk_source"] as? String == "forticlient" && add["label"] as? String == "Office")
+        var saved: String?
+        client.addProfile(gateway: "vpn.example.com", samlPort: 9443, tcp: false, name: nil, fortiClientLabel: nil,
+                          progress: { _ in }) { if case .success(let value) = $0 { saved = value.profileId } }
+        wait("add_profile with a saved key") { saved != nil }
+        let typed = host.ops("add_profile")[1]
+        require(typed["psk_source"] as? String == "saved" && typed["label"] == nil && typed["name"] == nil
+            && typed["transport"] as? String == "udp")
+
+        var update: HostError?
+        client.componentUpdate(progress: { _ in }) { if case .failure(let error) = $0 { update = error } }
+        wait("component_update") { update != nil }
+        require(update?.code == .pskUnavailable && update?.profileId == "lab")
+        var sources: [HostSource]?, offer: HostUpdateOffer?
+        client.listSources { if case .success(let value) = $0 { sources = value.sources } }
+        client.checkUpdate { if case .success(let value) = $0 { offer = value.available } }
+        wait("sources and update") { sources != nil && offer != nil }
+        require(sources?.first?.samlPort == 9443 && sources?.first?.alreadyConfigured == false)
+        require(offer == HostUpdateOffer(version: "1.2.1", page: "https://example.com/r"))
+        client.openSettings(.loginItems)
+        wait("open_settings") { !host.ops("open_settings").isEmpty }
+        require(host.ops("open_settings")[0]["pane"] as? String == "login_items")
+        client.stop()
+
+        // A typed PSK goes to the verb on stdin: a stand-in executable records what it was given.
+        let marker = "TYPED-PSK-MARKER"
+        let script = URL(fileURLWithPath: directory).appendingPathComponent("provision")
+        let record = "\(directory)/record"
+        try? "#!/bin/sh\nprintf '%s\\n' \"$@\" > '\(record).args'\ncat > '\(record).stdin'\n".write(to: script, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        require(HostPSK.store(Data(marker.utf8), gateway: "vpn.example.com", executable: script))
+        let args = (try? String(contentsOfFile: record + ".args", encoding: .utf8)) ?? ""
+        require(args == "provision-psk\n--stdin\nvpn.example.com\n" && !args.contains(marker), "the key must not be an argument")
+        require((try? String(contentsOfFile: record + ".stdin", encoding: .utf8)) == marker)
+        require(!HostPSK.store(Data(marker.utf8), gateway: "vpn.example.com", executable: nil))
+        require(!HostPSK.store(Data(), gateway: "vpn.example.com", executable: script))
+        require(!HostPSK.store(Data(count: 1025), gateway: "vpn.example.com", executable: script))
+        require(!HostPSK.store(Data("a\0b".utf8), gateway: "vpn.example.com", executable: script))
     }
 
     /// An unsupported protocol is not retried: the UI says "Update OFTC" until a wake or a window.

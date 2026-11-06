@@ -554,17 +554,72 @@ impl Reviewer<'_> {
 
 // ------------------------------------------------------------- the prompt child
 
-/// The JSON `OFTCAgent review-certificate` reads on stdin: Swift `JSONEncoder`
-/// defaults, so `Data` is base64 and an absent `previous` is omitted.
+/// What the prompt shows of one certificate, already parsed: the prompt child reads these
+/// fields and parses nothing (docs/ui-edge.md, section 11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateView {
+    /// The subject's common name (the whole subject when it has none).
+    pub issued_to: String,
+    /// The issuer's common name (the whole issuer when it has none).
+    pub issued_by: String,
+    pub serial: String,
+    /// Upper-case hex pairs separated by colons.
+    pub sha256: String,
+    /// The `notAfter` text as openssl prints it, or `Unknown`.
+    pub expires: String,
+}
+
+/// The value of the `CN` field of a distinguished name in either of openssl's layouts
+/// (`CN = x, O = y` and `/CN=x/O=y`); the whole name when there is none.
+pub fn common_name(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut from = 0;
+    while let Some(found) = name[from..].find("CN") {
+        let at = from + found;
+        from = at + 2;
+        let word_start = at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let rest = name[at + 2..].trim_start_matches(' ');
+        if !word_start || !rest.starts_with('=') {
+            continue;
+        }
+        let value = rest[1..].trim_start_matches(' ');
+        let end = value.find(['/', ',']).unwrap_or(value.len());
+        let value = value[..end].trim();
+        if !value.is_empty() {
+            return value.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+impl CertificateView {
+    pub fn of(certificate: &Certificate) -> CertificateView {
+        let expires = certificate
+            .validity
+            .split_once(" to ")
+            .map_or("Unknown", |(_, to)| to.trim());
+        CertificateView {
+            issued_to: common_name(&certificate.subject),
+            issued_by: common_name(&certificate.issuer),
+            serial: certificate.serial.clone(),
+            sha256: certificate.sha256(),
+            expires: expires.split_whitespace().collect::<Vec<_>>().join(" "),
+        }
+    }
+}
+
+/// The JSON `OFTCAgent review-certificate` reads on stdin (camelCase keys, an absent
+/// `previous` omitted). The Swift `GatewayTrust.PromptRequest` decodes it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptRequest {
     pub profile_name: String,
     pub host: String,
     pub port: u32,
-    pub certificate: String,
+    pub certificate: CertificateView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous: Option<String>,
+    pub previous: Option<CertificateView>,
 }
 
 impl PromptRequest {
@@ -573,10 +628,10 @@ impl PromptRequest {
             profile_name: review.profile_name.clone(),
             host: review.host.clone(),
             port: review.port,
-            certificate: tls::base64_encode(&review.certificate.der),
+            certificate: CertificateView::of(&review.certificate),
             previous: match &review.reason {
                 Reason::Untrusted => None,
-                Reason::Changed { previous } => Some(tls::base64_encode(&previous.der)),
+                Reason::Changed { previous } => Some(CertificateView::of(previous)),
             },
         }
     }

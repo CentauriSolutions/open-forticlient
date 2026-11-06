@@ -224,7 +224,7 @@ supervisor phase and connect-at-login choice as JSON, for the menu to read in pr
 
 ## Still in Swift
 
-`Host/main.swift` keeps only what needs AppKit, bookmarks or `URLSession`: the menu (no
+`Host/main.swift` keeps only what needs AppKit or bookmarks: the menu (no
 arguments, `--after-install`, `preview-menu`, `render-menu-previews`, `quit-menu`),
-`review-certificate` (the certificate prompt the supervisor starts), `launcher-alias`
-and `check-update`. Everything else, including a bad command line, is Rust's.
+`review-certificate` (the certificate prompt the supervisor starts) and `launcher-alias`.
+Everything else, including `check-update [url]` and a bad command line, is Rust's.

@@ -151,6 +151,28 @@ struct HostImportItem: Decodable, Equatable {
 struct HostImportPreview: Decodable, Equatable { var profiles: [HostImportItem] }
 struct HostImportResult: Decodable, Equatable { var added: [String] }
 
+/// An importable FortiClient profile (`list_sources`); never a PSK.
+struct HostSource: Decodable, Equatable {
+    var label: String
+    var gateway: String
+    var samlPort: Int
+    var alreadyConfigured: Bool
+}
+
+struct HostSources: Decodable, Equatable { var sources: [HostSource] }
+struct HostAddResult: Decodable, Equatable { var profileId: String }
+
+struct HostUpdateOffer: Decodable, Equatable {
+    var version: String
+    var page: String
+}
+
+/// The `check_update` result: the host fetched the feed; `available` is nil when up to date or no
+/// feed is configured.
+struct HostUpdateResult: Decodable, Equatable { var available: HostUpdateOffer? }
+
+enum HostSettingsPane: String { case extensions, loginItems = "login_items" }
+
 private struct HostHello: Decodable { var protocolVersion: Int; var host: HostInfo
     enum CodingKeys: String, CodingKey { case protocolVersion = "protocol", host }
 }
@@ -308,55 +330,6 @@ protocol HostStarter {
 
 /// `launchctl kickstart`, then `OFTCAgent host register` (registration and a kickstart, exit 4
 /// when macOS wants the user's approval) and `OFTCAgent host restart`, each with a timeout.
-enum HostCLIEnd: Equatable {
-    case exited(Int32), timedOut, launchFailed
-}
-
-/// Runs the bundled `oftc` for the one flow no host op covers yet (`oftc setup`, in
-/// SetupRepair: finish every existing profile). Only the exit status is reported; no output is
-/// captured or matched. PR 7 replaces this with a host op.
-final class HostCLI {
-    private let process = Process()
-    private let lock = NSLock()
-    private var finished = false
-    private var completion: ((HostCLIEnd) -> Void)?
-
-    func run(executable: URL, arguments: [String], home: URL, timeout: TimeInterval,
-             completion: @escaping (HostCLIEnd) -> Void) {
-        self.completion = completion
-        process.executableURL = executable
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = home.path
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] process in
-            self?.finish(.exited(process.terminationStatus))
-        }
-        do { try process.run() } catch {
-            finish(.launchFailed)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
-            guard let self else { return }
-            if self.process.isRunning { self.process.terminate() }
-            self.finish(.timedOut)
-        }
-    }
-
-    private func finish(_ result: HostCLIEnd) {
-        lock.lock()
-        guard !finished else { lock.unlock(); return }
-        finished = true
-        let handler = completion
-        completion = nil
-        lock.unlock()
-        DispatchQueue.main.async { handler?(result) }
-    }
-}
-
 struct LaunchctlStarter: HostStarter {
     let label: String
     let executable: URL?
@@ -393,6 +366,33 @@ struct LaunchctlStarter: HostStarter {
             return -1
         }
         return process.terminationStatus
+    }
+}
+
+/// Stores a typed PSK: the one secret the UI handles never crosses the socket (docs/ui-edge.md 4.4).
+/// It goes on the stdin pipe of the host's own `provision-psk --stdin <gateway>` verb, run as a
+/// short-lived child of the app's executable, and the caller then sends `add_profile` (or runs
+/// `component_update` again) with the key saved. Blocks: call it off the main thread.
+enum HostPSK {
+    static func store(_ psk: Data, gateway: String, executable: URL?, timeout: TimeInterval = 20) -> Bool {
+        guard let executable, (1...1024).contains(psk.count), !psk.contains(0) else { return false }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["provision-psk", "--stdin", gateway]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        guard (try? process.run()) != nil else { return false }
+        input.fileHandleForWriting.write(psk)
+        try? input.fileHandleForWriting.close()
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            return false
+        }
+        return process.terminationStatus == 0
     }
 }
 
@@ -569,6 +569,49 @@ final class HostEdge {
                 else { completion(.failure(.local(.internalFailure, "unreadable reply"))) }
             }
         }
+    }
+
+    // MARK: Typed requests the windows use
+
+    func listSources(_ completion: @escaping (Result<HostSources, HostError>) -> Void) {
+        request("list_sources", timeout: 10, as: HostSources.self, completion: completion)
+    }
+
+    /// `add_profile`; `progress` carries the setup steps. The PSK is already saved (`HostPSK`) or
+    /// comes from the named FortiClient profile inside the host.
+    func addProfile(gateway: String, samlPort: Int, tcp: Bool, name: String?, fortiClientLabel: String?,
+                    progress: @escaping (HostProgress) -> Void,
+                    completion: @escaping (Result<HostAddResult, HostError>) -> Void) {
+        var args: [String: Any] = ["gateway": gateway, "saml_port": samlPort, "transport": tcp ? "tcp" : "udp",
+                                   "psk_source": fortiClientLabel == nil ? "saved" : "forticlient"]
+        if let name { args["name"] = name }
+        if let fortiClientLabel { args["label"] = fortiClientLabel }
+        // Approval can take as long as the user does; the host's op ends when the request does.
+        request("add_profile", args: args, timeout: 900, progress: progress) { result in
+            switch result {
+            case .failure(let error): completion(.failure(error))
+            case .success(let data):
+                if let value = try? HostWire.decoder.decode(HostAddResult.self, from: data) { completion(.success(value)) }
+                else { completion(.failure(.local(.internalFailure, "unreadable reply"))) }
+            }
+        }
+    }
+
+    /// `component_update`: every profile's PSK, the system extension and each VPN entry, finished
+    /// with no form. `psk_unavailable` carries the profile id that has no key.
+    func componentUpdate(progress: @escaping (HostProgress) -> Void,
+                         completion: @escaping (Result<Void, HostError>) -> Void) {
+        request("component_update", timeout: 900, progress: progress) { result in
+            completion(result.map { _ in () })
+        }
+    }
+
+    func checkUpdate(_ completion: @escaping (Result<HostUpdateResult, HostError>) -> Void) {
+        request("check_update", timeout: 30, as: HostUpdateResult.self, completion: completion)
+    }
+
+    func openSettings(_ pane: HostSettingsPane) {
+        request("open_settings", args: ["pane": pane.rawValue], timeout: 10) { _ in }
     }
 
     // MARK: State machine (on `queue`)

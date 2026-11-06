@@ -214,3 +214,17 @@ struct MenuPresentation {
         return Self(tunnels: [first, second])
     }
 }
+
+// The Details line of About and of the options menu: which build of each piece is running, from the
+// host's document (docs/ui-edge.md 13.2). The app's own version is the UI's; the rest is the host's.
+enum AboutDetails {
+    static func line(appVersion: String, appBuild: String, status: HostStatus?) -> String {
+        let app = "App \(appVersion) (\(appBuild))"
+        guard let status else { return app + " · OFTC’s VPN service is not running" }
+        let host = "Service \(status.host.version) (\(status.host.build))"
+        let provider = status.host.providerBuild.isEmpty ? "provider build unknown"
+            : "provider build \(status.host.providerBuild)"
+        let installed = status.component.installedBuild.map { "extension build \($0)" } ?? "extension not installed"
+        return [app, host, provider, "installed " + installed].joined(separator: " · ")
+    }
+}

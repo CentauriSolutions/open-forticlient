@@ -6,9 +6,6 @@ use super::*;
 
 const SWIFT_PIN: &str =
     include_str!("../../tests/fixtures/swift/trust/gateways/gw.example_9443.pem");
-const SWIFT_REQUEST: &str = include_str!("../../tests/fixtures/swift/trust/review-request.json");
-const SWIFT_REQUEST_CHANGED: &str =
-    include_str!("../../tests/fixtures/swift/trust/review-request-changed.json");
 const RUST_REQUEST: &str = include_str!("../../tests/fixtures/rust/trust/review-request.json");
 const RUST_REQUEST_CHANGED: &str =
     include_str!("../../tests/fixtures/rust/trust/review-request-changed.json");
@@ -553,9 +550,18 @@ fn json(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap()
 }
 
+/// What openssl prints for the fixture, in the layout of the OpenSSL 3 command line.
+const CANNED: Text = Text(Some(
+    "subject=CN = gw.example, O = Example\nissuer=CN = Example CA, O = Example\nserial=01AB\n\
+     notBefore=Jan  1 00:00:00 2026 GMT\nnotAfter=Jun  5 07:00:00 2056 GMT\n",
+));
+
+/// The request carries the fields the prompt shows, already parsed, so the child parses
+/// nothing; the Swift check decodes the committed files and writes them back with its own
+/// encoder (`Host/check-trust-compat.swift`).
 #[test]
-fn prompt_request_matches_the_swift_encoder_and_the_committed_rust_golden() {
-    let certificate = fixture();
+fn prompt_request_carries_parsed_fields_and_matches_the_committed_golden() {
+    let certificate = Certificate::from_der(fixture_der(), &CANNED).unwrap();
     let review = |reason| Review {
         profile_name: "Example Office".into(),
         host: "gw.example".into(),
@@ -564,44 +570,39 @@ fn prompt_request_matches_the_swift_encoder_and_the_committed_rust_golden() {
         reason,
     };
     let plain = PromptRequest::for_review(&review(Reason::Untrusted));
-    let mut previous = certificate.clone();
-    previous.der.push(0);
-    let changed = PromptRequest::for_review(&review(Reason::Changed { previous }));
-    // Swift writes the keys in no fixed order and escapes `/`, so compare parsed
-    // values; a request without a previous certificate has no `previous` key.
-    assert_eq!(
-        json(std::str::from_utf8(&plain.to_json().unwrap()).unwrap()),
-        json(SWIFT_REQUEST)
-    );
-    assert_eq!(
-        json(std::str::from_utf8(&changed.to_json().unwrap()).unwrap()),
-        json(SWIFT_REQUEST_CHANGED)
-    );
-    assert!(json(SWIFT_REQUEST).get("previous").is_none());
-    // The Swift files decode, and the bytes inside are the certificate.
-    let read = PromptRequest::from_json(SWIFT_REQUEST_CHANGED.as_bytes()).unwrap();
-    assert_eq!(
-        tls::base64_decode(&read.certificate),
-        Some(certificate.der.clone())
-    );
-    assert_eq!(read, changed);
-    assert_eq!(
-        PromptRequest::from_json(SWIFT_REQUEST.as_bytes()),
-        Some(plain.clone())
-    );
-    // The files the Swift check decodes are what this writer produces.
-    assert_eq!(
-        RUST_REQUEST,
-        format!("{}\n", String::from_utf8(plain.to_json().unwrap()).unwrap())
-    );
-    assert_eq!(
-        RUST_REQUEST_CHANGED,
-        format!(
-            "{}\n",
-            String::from_utf8(changed.to_json().unwrap()).unwrap()
-        )
-    );
+    let mut old = Certificate::from_der(fixture_der(), &CANNED).unwrap();
+    old.serial = "02".into();
+    let changed = PromptRequest::for_review(&review(Reason::Changed { previous: old }));
+    assert_eq!(plain.certificate.issued_to, "gw.example");
+    assert_eq!(plain.certificate.issued_by, "Example CA");
+    assert_eq!(plain.certificate.sha256, FIXTURE_SHA256);
+    assert_eq!(plain.certificate.expires, "Jun 5 07:00:00 2056 GMT");
+    assert_eq!(changed.previous.as_ref().unwrap().serial, "02");
+    assert!(plain.previous.is_none());
+    for (golden, request) in [(RUST_REQUEST, &plain), (RUST_REQUEST_CHANGED, &changed)] {
+        assert_eq!(
+            golden,
+            format!("{}\n", String::from_utf8(request.to_json().unwrap()).unwrap())
+        );
+        assert_eq!(PromptRequest::from_json(golden.as_bytes()).as_ref(), Some(request));
+    }
+    assert!(json(RUST_REQUEST).get("previous").is_none());
     assert_eq!(PromptRequest::from_json(b"{}"), None);
+}
+
+#[test]
+fn common_name_reads_both_openssl_layouts() {
+    for (name, expected) in [
+        ("CN = gw.example, O = Example", "gw.example"),
+        ("/C=US/O=Example/CN=FGT60F0000000001", "FGT60F0000000001"),
+        ("O = Example, CN=Example CA", "Example CA"),
+        // No common name, or one that only ends a longer key: the whole name is shown.
+        ("O = Example, OU = Lab", "O = Example, OU = Lab"),
+        ("ECN = nope", "ECN = nope"),
+        ("Unknown", "Unknown"),
+    ] {
+        assert_eq!(common_name(name), expected, "{name}");
+    }
 }
 
 struct Child(Option<i32>, RefCell<Vec<Vec<u8>>>);

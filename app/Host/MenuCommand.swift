@@ -53,19 +53,3 @@ enum MenuCommandFailure: Equatable {
         }
     }
 }
-
-enum MenuCommandResult: Equatable {
-    case success
-    case failure(MenuCommandFailure)
-
-    /// The CLI's exit statuses are the wire's (4 is approval, docs/ui-edge.md 4.7).
-    init(_ end: HostCLIEnd) {
-        switch end {
-        case .exited(0): self = .success
-        case .exited(4): self = .failure(.approval)
-        case .exited(let status): self = .failure(.failed(status))
-        case .timedOut: self = .failure(.timeout)
-        case .launchFailed: self = .failure(.failed(127))
-        }
-    }
-}

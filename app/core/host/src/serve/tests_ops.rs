@@ -540,7 +540,8 @@ fn update_settings_and_sources() {
 
 /// `component_update` is refused while any tunnel is up and touches no profile; when
 /// the extension is old it activates it (progress `waiting` then `done`), and when it
-/// is already current it asks the system for nothing.
+/// is already current it asks the system for nothing. A profile with no saved PSK stops
+/// it before the system is asked, naming that profile.
 #[test]
 fn component_update_rules() {
     let rig = Rig::new();
@@ -552,8 +553,12 @@ fn component_update_rules() {
         assert_eq!(
             progress,
             [
+                json!(["keychain", "running"]),
+                json!(["keychain", "done"]),
                 json!(["extension_approval", "running"]),
-                json!(["extension_approval", "done"])
+                json!(["extension_approval", "done"]),
+                json!(["vpn_entry", "running"]),
+                json!(["vpn_entry", "done"]),
             ]
         );
 
@@ -569,8 +574,35 @@ fn component_update_rules() {
             .script_activate(vec![ExtensionEvent::NeedsApproval], Ok(Finish::Completed));
         let (progress, reply) = op(&mut client, r#"{"id":4,"op":"component_update"}"#);
         assert_eq!(reply["ok"], true);
-        assert_eq!(progress[1], json!(["extension_approval", "waiting"]));
+        assert_eq!(progress[3], json!(["extension_approval", "waiting"]));
         assert_eq!(registry::entries(rig.env.root()).len(), 1);
+
+        rig.keychain.delete("lab.example.com").unwrap();
+        let (progress, reply) = op(&mut client, r#"{"id":5,"op":"component_update"}"#);
+        assert_eq!(error(&reply), ("psk_unavailable", 4));
+        assert_eq!(reply["error"]["profile_id"], "lab");
+        assert_eq!(progress, [json!(["keychain", "running"])]);
+    });
+}
+
+/// Setup that stopped at the system extension leaves a profile with no VPN entry;
+/// `component_update` finishes it with no form, so the UI needs no `add_profile` for a
+/// VPN that already exists.
+#[test]
+fn component_update_installs_missing_vpn_entries() {
+    let rig = Rig::new();
+    old_extension(&rig);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        assert_eq!(error(&op(&mut client, ADD).1), ("internal", 1));
+        rig.extensions
+            .mock
+            .script_activate(vec![], Ok(Finish::Completed));
+        let (_, reply) = op(&mut client, r#"{"id":3,"op":"component_update"}"#);
+        assert_eq!(reply["ok"], true);
+        let (_, again) = op(&mut client, ADD);
+        assert_eq!(error(&again), ("already_configured", 3));
     });
 }
 

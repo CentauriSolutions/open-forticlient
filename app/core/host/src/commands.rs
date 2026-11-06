@@ -84,7 +84,7 @@ pub const VERBS: &[Verb] = &[
     rust("unregister-agent"),
     rust("install-config"),
     rust("list-profiles"),
-    swift("check-update [url]"),
+    rust("check-update [url]"),
     swift("launcher-alias ensure|remove"),
     rust("export-profiles [id...]"),
     rust("import-profiles"),
@@ -152,6 +152,10 @@ pub enum Command {
     ListProfiles,
     ShowProfile,
     HasPsk,
+    /// `check-update [url]`: what the update feed (the bundle's, or `url`) would offer.
+    CheckUpdate {
+        url: Option<String>,
+    },
     ProvisionPsk {
         gateway: Option<String>,
         stdin: bool,
@@ -253,6 +257,10 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("list-profiles", []) => Command::ListProfiles,
         ("show-profile", []) => Command::ShowProfile,
         ("has-psk", []) => Command::HasPsk,
+        ("check-update", []) => Command::CheckUpdate { url: None },
+        ("check-update", [url]) => Command::CheckUpdate {
+            url: Some(url.clone()),
+        },
         ("provision-psk", rest) => {
             let (stdin, rest) = match rest.first().map(String::as_str) {
                 Some("--stdin") => (true, &rest[1..]),
@@ -563,6 +571,37 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 code
             } else {
                 finish(io, &text, code)
+            }
+        }
+        Command::CheckUpdate { url } => {
+            // Nothing is downloaded or installed; the feed is read as `check_update` reads it.
+            let exe = std::env::current_exe().ok();
+            let current = crate::serve::info::bundle_string(exe.as_deref(), "CFBundleShortVersionString")
+                .unwrap_or_else(|| "0".to_owned());
+            let source = match url {
+                Some(url) => crate::serve::ops_update::CurlUpdates {
+                    feed: url.starts_with("https://").then_some(url),
+                },
+                None => crate::serve::ops_update::CurlUpdates::from_bundle(exe.as_deref()),
+            };
+            if source.feed.is_none() {
+                return finish(io, "No update feed is configured", 1);
+            }
+            match crate::serve::ops_update::UpdateSource::latest(&source, &current) {
+                Ok(Some(offer)) => finish(
+                    io,
+                    &format!(
+                        "Update available: {} ({}); installed {current}",
+                        offer.version, offer.page
+                    ),
+                    0,
+                ),
+                Ok(None) => finish(
+                    io,
+                    &format!("Up to date: installed {current} is the latest"),
+                    0,
+                ),
+                Err(_) => finish(io, "Could not check for updates", 1),
             }
         }
         Command::HostRestart => {
@@ -1162,6 +1201,16 @@ mod tests {
                 invocation(Some("lab"), Command::ShowProfile),
             ),
             (vec!["has-psk"], invocation(None, Command::HasPsk)),
+            (
+                vec!["check-update", "https://updates.example/latest"],
+                invocation(
+                    None,
+                    Command::CheckUpdate {
+                        url: Some("https://updates.example/latest".into()),
+                    },
+                ),
+            ),
+            (vec!["check-update", "a", "b"], Err(ParseError::Usage)),
             // Arity: Swift's `case ... where args.count == n` guards.
             (vec!["list-profiles", "x"], Err(ParseError::Usage)),
             (vec!["has-psk", "x"], Err(ParseError::Usage)),
@@ -1375,7 +1424,7 @@ mod tests {
         }
     }
 
-    /// `Host/main.swift` keeps only the verbs that need AppKit, bookmarks or URLSession;
+    /// `Host/main.swift` keeps only the verbs that need AppKit or bookmarks;
     /// everything else must reach this crate. The two lists may not drift, or a verb
     /// would fall through to Rust's usage text (or never reach it).
     #[test]

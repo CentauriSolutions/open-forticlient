@@ -1,24 +1,23 @@
 import AppKit
 import Foundation
-import NetworkExtension
-import Security
-import ServiceManagement
-import SystemExtensions
 
-// The installer can open this app, but setup always runs in the console user's
-// session. In particular, neither the profile nor its PSK belongs to root.
-final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindowDelegate {
+// The add-a-VPN form. It collects a gateway, a name and a PSK and hands them to the host: the
+// host's `list_sources` names the FortiClient profiles that can be imported, a typed PSK is saved by
+// the host's own verb (HostPSK), and `add_profile` does the rest and reports its steps. This window
+// reads no profile, Keychain item, system extension or VPN preference itself (docs/ui-edge.md).
+// The installer can open this app, but setup always runs in the console user's session.
+final class OFTCOnboarding: NSObject, NSWindowDelegate {
     private enum Source {
-        case fortiClient(String, String, UInt32)
+        case fortiClient(String, String, Int)
         case manual
     }
 
-    private let appID: String
+    private let edge: HostEdge
+    private let executable: URL?
     private let onClose: (() -> Void)?
-    private let providerID: String
-    private let updating: Bool
-    private var sources = [Source]()
-    private var request: OSSystemExtensionRequest?
+    private var sources = [Source.manual]
+    private var adding = false
+    private var waitingSince: Date?
     private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 427),
                                   styleMask: [.titled, .closable, .miniaturizable],
                                   backing: .buffered, defer: false)
@@ -30,19 +29,17 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
     private let pskField = NSSecureTextField()
     private let statusLabel = NSTextField(labelWithString: "")
     private let setupButton = NSButton(title: "Add VPN", target: nil, action: nil)
-    private var createdEntry: OFTCProfileEntry?
     private let settingsButton = NSButton(title: "Open System Settings", target: nil, action: nil)
 
-    init?(appID: String, updating: Bool = false, onClose: (() -> Void)? = nil) {
-        guard !appID.isEmpty else { return nil }
-        self.appID = appID
+    init(edge: HostEdge, executable: URL? = Bundle.main.executableURL, onClose: (() -> Void)? = nil) {
+        self.edge = edge
+        self.executable = executable
         self.onClose = onClose
-        self.updating = updating
-        providerID = appID + ".provider"
         super.init()
-        buildSources()
+        sourceMenu.addItem(withTitle: "Enter settings manually")
         buildWindow()
         selectSource()
+        loadSources()
     }
 
     func show() {
@@ -52,29 +49,21 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func buildSources() {
-        let configured = Set(OFTCProfileScope.entries(root: OFTCProfileScope.defaultRoot(bundleID: appID))
-            .map { $0.profile.gateway })
-        let plist = URL(fileURLWithPath: "/Library/Application Support/Fortinet/FortiClient/conf/vpn.plist")
-        if let values = try? plist.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
-           values.isRegularFile == true, values.isSymbolicLink != true,
-           let data = try? Data(contentsOf: plist), data.count <= 4_000_000,
-           let root = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-           let profiles = root["Profiles"] as? [String: Any] {
-            for name in profiles.keys.sorted() where !name.isEmpty && name.utf8.count <= 64 &&
-                !name.contains(".") && !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
-                guard let entry = profiles[name] as? [String: Any],
-                      let gateway = entry["Server"] as? String,
-                      let rawPort = entry["IKESamlPort"] as? NSNumber ?? NSNumber(value: 9443) as NSNumber?,
-                      let profile = try? OFTCProfile(gateway: gateway,
-                                  samlPort: UInt32(truncating: rawPort)),
-                      !configured.contains(profile.gateway) else { continue }
-                sources.append(.fortiClient(name, profile.gateway, profile.samlPort))
-                sourceMenu.addItem(withTitle: "FortiClient: \(name)")
-            }
+    // FortiClient profiles the host can import, minus the ones OFTC already has.
+    private func loadSources() {
+        edge.listSources { [weak self] result in
+            guard let self, case .success(let found) = result else { return }
+            let fresh = found.sources.filter { !$0.alreadyConfigured }
+            guard !fresh.isEmpty else { return }
+            let selected = self.sourceMenu.indexOfSelectedItem
+            self.sources = fresh.map { .fortiClient($0.label, $0.gateway, $0.samlPort) } + [.manual]
+            self.sourceMenu.removeAllItems()
+            self.sourceMenu.addItems(withTitles: fresh.map { "FortiClient: \($0.label)" } + ["Enter settings manually"])
+            // The user may already be typing: only an untouched manual form moves to the first profile.
+            if selected == 0, self.gatewayField.stringValue.isEmpty { self.sourceMenu.selectItem(at: 0) }
+            else { self.sourceMenu.selectItem(at: self.sources.count - 1) }
+            self.selectSource()
         }
-        sources.append(.manual)
-        sourceMenu.addItem(withTitle: "Enter settings manually")
     }
 
     private func buildWindow() {
@@ -83,13 +72,12 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         window.delegate = self
         let content = NSView(frame: window.contentView!.bounds)
         window.contentView = content
-        let title = NSTextField(labelWithString: updating ? "Update your OFTC VPN" : "Add a VPN")
+        let title = NSTextField(labelWithString: "Add a VPN")
         title.font = .boldSystemFont(ofSize: 22)
         title.frame = NSRect(x: 28, y: 371, width: 520, height: 32)
         content.addSubview(title)
-        let explanation = NSTextField(wrappingLabelWithString: updating
-            ? "Your saved VPN settings and PSK are kept. Update the VPN component below and approve OFTC if macOS asks. You'll choose when to connect."
-            : "Choose a FortiClient profile or enter a gateway. Each VPN you add can be connected at the same time as the others. macOS may ask you to enable the OFTC Network Extension. Setup will not connect the VPN.")
+        let explanation = NSTextField(wrappingLabelWithString:
+            "Choose a FortiClient profile or enter a gateway. Each VPN you add can be connected at the same time as the others. macOS may ask you to enable the OFTC Network Extension. Setup will not connect the VPN.")
         explanation.frame = NSRect(x: 28, y: 323, width: 524, height: 42)
         content.addSubview(explanation)
 
@@ -123,7 +111,6 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
         content.addSubview(settingsButton)
         setupButton.target = self
         setupButton.action = #selector(setUp)
-        if updating { setupButton.title = "Update VPN" }
         setupButton.frame = NSRect(x: 444, y: 12, width: 112, height: 28)
         content.addSubview(setupButton)
     }
@@ -132,200 +119,122 @@ final class OFTCOnboarding: NSObject, OSSystemExtensionRequestDelegate, NSWindow
 
     private func selectSource() {
         guard sources.indices.contains(sourceMenu.indexOfSelectedItem) else { return }
-        var profile: OFTCProfile?
         var name = ""
-        switch sources[sourceMenu.indexOfSelectedItem] {
-        case .fortiClient(let label, let gateway, let port):
-            profile = try? OFTCProfile(gateway: gateway, samlPort: port)
+        var gateway = ""
+        var port = 9443
+        if case .fortiClient(let label, let host, let samlPort) = sources[sourceMenu.indexOfSelectedItem] {
             name = label
-        case .manual: break
+            gateway = host
+            port = samlPort
         }
         nameField.stringValue = name
-        gatewayField.stringValue = profile?.gateway ?? ""
-        portField.stringValue = profile.map { String($0.samlPort) } ?? "9443"
-        transportMenu.selectItem(at: profile?.transport == .tcp ? 1 : 0)
+        gatewayField.stringValue = gateway
+        portField.stringValue = String(port)
+        transportMenu.selectItem(at: 0)
         pskField.stringValue = ""
         statusLabel.stringValue = "Enter a PSK only if one is not already saved or importable."
     }
 
     private func message(_ text: String, waiting: Bool = false) {
         statusLabel.stringValue = text
-        setupButton.isEnabled = !waiting
+        setupButton.isEnabled = !waiting && !adding
         settingsButton.isHidden = !waiting
     }
 
     @objc private func setUp() {
-        // Recheck at the point of mutation: another UI or CLI may have
-        // connected since this window opened. Adding a VPN is safe beside live
-        // tunnels, but replacing the provider under them is not.
-        setupButton.isEnabled = false
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard error == nil else {
-                    self.message("Could not confirm your VPN state. Check VPN settings, then try again.")
-                    return
-                }
-                let ours = (managers ?? []).filter {
-                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == self.providerID
-                }
-                let live = ours.contains { $0.connection.status != .disconnected && $0.connection.status != .invalid }
-                if self.updating && live {
-                    self.message("Disconnect OFTC before updating its VPN component.")
-                    return
-                }
-                self.performSetup()
-            }
-        }
-    }
-
-    private func performSetup() {
-        let root = OFTCProfileScope.defaultRoot(bundleID: appID)
+        guard !adding else { return }
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard sources.indices.contains(sourceMenu.indexOfSelectedItem),
-              let port = UInt32(portField.stringValue),
-              let profile = try? OFTCProfile(gateway: gatewayField.stringValue,
-                  samlPort: port, transport: transportMenu.indexOfSelectedItem == 1 ? .tcp : .udp,
-                  name: name.isEmpty ? nil : name) else {
+        let gateway = gatewayField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard sources.indices.contains(sourceMenu.indexOfSelectedItem), !gateway.isEmpty,
+              !gateway.contains(" "), let port = Int(portField.stringValue), (1...65535).contains(port) else {
             message("Enter a valid name, gateway and SAML port (1–65535).")
             return
         }
-        let source = sources[sourceMenu.indexOfSelectedItem]
-        if createdEntry == nil,
-           OFTCProfileScope.entries(root: root).contains(where: { $0.profile.gateway == profile.gateway }) {
-            message("That gateway is already set up in OFTC.")
+        var psk = Data(pskField.stringValue.utf8)
+        if !psk.isEmpty, !(1...1024).contains(psk.count) || psk.contains(0) {
+            psk.resetBytes(in: 0..<psk.count)
+            message("Enter a valid PSK of at most 1024 bytes.")
             return
         }
-        do {
-            var psk = Data(pskField.stringValue.utf8)
-            if psk.isEmpty, case .fortiClient(let label, let gateway, _) = source,
-               gateway == profile.gateway {
-                psk = (try? MigrationBridge.psk(profileName: label,
-                                                 expectedGateway: gateway)) ?? Data()
-            }
-            defer { psk.resetBytes(in: 0..<psk.count) }
-            if !psk.isEmpty {
-                guard (1...1024).contains(psk.count), !psk.contains(0) else {
-                    message("Enter a valid PSK of at most 1024 bytes.")
-                    return
-                }
-                try savePSK(psk, gateway: profile.gateway)
-                pskField.stringValue = ""
-            } else if !hasPSK(gateway: profile.gateway) {
-                message("Enter the VPN PSK. The saved profile did not contain an importable key.")
-                return
-            }
-            if createdEntry == nil { createdEntry = try OFTCProfileScope.add(profile, root: root) }
-        } catch {
-            message("Could not save the profile or PSK. Check Keychain access and try again.")
-            return
+        var label: String?
+        if case .fortiClient(let source, let host, _) = sources[sourceMenu.indexOfSelectedItem], host == gateway, psk.isEmpty {
+            label = source
         }
-        message("Requesting macOS Network Extension approval…", waiting: true)
-        let request = OSSystemExtensionRequest.activationRequest(
-            forExtensionWithIdentifier: providerID, queue: .main)
-        request.delegate = self
-        self.request = request
-        OSSystemExtensionManager.shared.submitRequest(request)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self, weak request] in
-            guard let self, let request, self.request === request else { return }
-            self.message("Still waiting for macOS approval. Click Open System Settings and check that the switch next to OFTC is on. If it is already on, quit and reopen OFTC to retry.", waiting: true)
-        }
-    }
-
-    private func hasPSK(gateway: String) -> Bool { OFTCPSKStore.has(appID: appID, gateway: gateway) }
-
-    private func savePSK(_ psk: Data, gateway: String) throws {
-        try OFTCPSKStore.save(psk, appID: appID, gateway: gateway)
-    }
-
-    @objc private func openSettings() { OFTCSettingsLink.open() }
-
-    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        // OFTC is listed under Extensions before it is enabled; if the sheet
-        // does not open, the switch is behind the row's ⓘ button.
-        message("Click Open System Settings and turn on the switch next to OFTC in Network Extensions. If you only see a list, click ⓘ next to OFTC first. Setup continues once it is on.", waiting: true)
-    }
-
-    func request(_ request: OSSystemExtensionRequest,
-                 actionForReplacingExtension existing: OSSystemExtensionProperties,
-                 withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
-        VPNComponentState.canReplace(existing: existing.bundleVersion, replacement: replacement.bundleVersion)
-            ? .replace : .cancel
-    }
-
-    func request(_ request: OSSystemExtensionRequest,
-                 didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        self.request = nil
-        if result == .willCompleteAfterReboot {
-            message("macOS accepted OFTC, but a reboot is required. Reopen OFTC afterward to finish setup.")
-            return
-        }
-        installVPNEntry()
-    }
-
-    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        self.request = nil
-        let code = (error as NSError).code
-        message("Network Extension approval failed (code \(code)). Check OFTC in System Settings, then try again.")
-    }
-
-    private func installVPNEntry() {
-        guard let entry = createdEntry else {
-            message("Could not find the new profile. Try setup again.")
-            return
-        }
-        message("Saving the VPN in System Settings…", waiting: true)
-        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in
-            guard let self else { return }
+        adding = true
+        message("Saving the VPN…", waiting: true)
+        settingsButton.isHidden = true
+        let tcp = transportMenu.indexOfSelectedItem == 1
+        pskField.stringValue = ""
+        let typed = psk
+        let executable = self.executable
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // A typed PSK is stored by the host's verb before the host is asked to add the VPN.
+            let stored = typed.isEmpty || HostPSK.store(typed, gateway: gateway, executable: executable)
             DispatchQueue.main.async {
-                guard error == nil else {
-                    self.message("Could not read VPN settings. Try setup again.")
+                guard let self else { return }
+                guard stored else {
+                    self.adding = false
+                    self.message("Could not save the PSK. Check Keychain access and try again.")
                     return
                 }
-                let matching = OFTCProfileScope.manager(for: entry, in: managers ?? [], providerID: self.providerID)
-                guard matching.count <= 1 else {
-                    self.message("Multiple OFTC VPN entries exist for this profile. Remove the duplicate before retrying.")
-                    return
-                }
-                if let existing = matching.first {
-                    if existing.isEnabled {
-                        self.complete()
-                    } else {
-                        existing.isEnabled = true
-                        existing.saveToPreferences { error in
-                            DispatchQueue.main.async {
-                                if error == nil { self.complete() }
-                                else { self.message("Could not enable OFTC VPN. Check Network Extensions approval and retry.") }
-                            }
-                        }
-                    }
-                    return
-                }
-                let manager = NETunnelProviderManager()
-                let configuration = NETunnelProviderProtocol()
-                configuration.providerBundleIdentifier = self.providerID
-                configuration.serverAddress = "OFTC"
-                configuration.providerConfiguration = [OFTCProfileScope.configurationKey: entry.id]
-                manager.protocolConfiguration = configuration
-                manager.localizedDescription = "OFTC VPN (\(entry.name))"
-                manager.isEnabled = true
-                manager.saveToPreferences { error in
-                    DispatchQueue.main.async {
-                        if error == nil { self.complete() }
-                        else { self.message("Could not save OFTC VPN. Check Network Extensions approval and retry.") }
-                    }
-                }
+                self.addProfile(gateway: gateway, port: port, tcp: tcp, name: name.isEmpty ? nil : name, label: label)
+            }
+        }
+        psk.resetBytes(in: 0..<psk.count)
+    }
+
+    private func addProfile(gateway: String, port: Int, tcp: Bool, name: String?, label: String?) {
+        edge.addProfile(gateway: gateway, samlPort: port, tcp: tcp, name: name, fortiClientLabel: label,
+                        progress: { [weak self] in self?.progressed($0) }) { [weak self] result in
+            guard let self else { return }
+            self.adding = false
+            self.waitingSince = nil
+            switch result {
+            case .success: self.complete(name: name ?? gateway)
+            case .failure(let error): self.failed(error)
             }
         }
     }
 
-    private func complete() {
-        let extensionPlist = Bundle.main.bundleURL.appendingPathComponent(
-            "Contents/Library/SystemExtensions/\(providerID).systemextension/Contents/Info.plist")
-        let metadata = NSDictionary(contentsOf: extensionPlist) as? [String: Any]
-        let version = metadata?["CFBundleShortVersionString"] as? String ?? "installed"
-        message("\(createdEntry?.name ?? "VPN") added. OFTC \(version) is ready; use Connect in the OFTC menu bar.")
+    private func progressed(_ progress: HostProgress) {
+        switch (progress.step, progress.state) {
+        case ("extension_approval", "waiting"):
+            // OFTC is listed under Extensions before it is enabled; if the sheet does not open, the
+            // switch is behind the row's ⓘ button.
+            waitingSince = waitingSince ?? Date()
+            message("Click Open System Settings and turn on the switch next to OFTC in Network Extensions. If you only see a list, click ⓘ next to OFTC first. Setup continues once it is on.", waiting: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
+                guard let self, let since = self.waitingSince, Date().timeIntervalSince(since) >= 89 else { return }
+                self.message("Still waiting for macOS approval. Click Open System Settings and check that the switch next to OFTC is on. If it is already on, quit and reopen OFTC to retry.", waiting: true)
+            }
+        case ("extension_approval", "running"):
+            message("Requesting macOS Network Extension approval…", waiting: true)
+        case ("vpn_entry", _):
+            waitingSince = nil
+            message("Saving the VPN in System Settings…", waiting: true)
+        default: break
+        }
+    }
+
+    private func failed(_ error: HostError) {
+        switch error.code {
+        case .alreadyConfigured: message("That gateway is already set up in OFTC.")
+        case .pskUnavailable: message("Enter the VPN PSK. The saved profile did not contain an importable key.")
+        case .badRequest: message("Enter a valid name, gateway and SAML port (1–65535).")
+        case .approvalRequired:
+            message("Network Extension approval is still needed. Click Open System Settings, turn on OFTC, then choose Add VPN again.", waiting: true)
+            setupButton.isEnabled = true
+        default: message(MenuCommandFailure(error).message(action: "add the VPN"))
+        }
+    }
+
+    @objc private func openSettings() { edge.openSettings(.extensions) }
+
+    private func complete(name: String) {
+        let version = edge.lastStatus?.host.version ?? "installed"
+        message("\(name) added. OFTC \(version) is ready; use Connect in the OFTC menu bar.")
         setupButton.title = "Done"
+        setupButton.isEnabled = true
         setupButton.action = #selector(done)
     }
 
