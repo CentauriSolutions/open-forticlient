@@ -781,3 +781,39 @@ fn flights_are_capped_and_stop_with_the_connection() {
         }
     });
 }
+
+/// `menu_login_default`: the setup window's completion offers the item once; a repair
+/// (`first_setup` false) and a choice made through `settings_set` never get it.
+#[test]
+fn the_menu_login_default_is_offered_once_and_a_choice_wins() {
+    use oftc_apple::login::{LoginItem, LoginItems, LoginStatus};
+    let state = |client: &mut Client, id: u32, first: bool| {
+        op(
+            client,
+            &format!(r#"{{"id":{id},"op":"menu_login_default","first_setup":{first}}}"#),
+        )
+        .1["result"]["state"]
+            .clone()
+    };
+    let rig = Rig::new();
+    rig.login.set_status(&LoginItem::MainApp, LoginStatus::NotRegistered);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        assert_eq!(state(&mut client, 2, false), "skipped");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
+        assert_eq!(state(&mut client, 3, true), "registered");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::Enabled);
+        assert_eq!(state(&mut client, 4, true), "skipped");
+    });
+    let rig = Rig::new();
+    rig.login.set_status(&LoginItem::MainApp, LoginStatus::NotRegistered);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        let off = r#"{"id":2,"op":"settings_set","key":"menu_login","value":false}"#;
+        assert_eq!(op(&mut client, off).1["ok"], true);
+        assert_eq!(state(&mut client, 3, true), "skipped");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
+    });
+}

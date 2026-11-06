@@ -85,23 +85,6 @@ enum AppLaunchReason {
 
 // This record contains UI acknowledgement only. It grants no connection,
 // service-registration, or extension-activation permission.
-// Whether the first-run choice for "Launch OFTC at login" has been made. A fresh
-// install turns it on so the tray icon is there after every login; an upgrade
-// leaves whatever the user had. Either way it is decided once, and never again,
-// so turning it off in Settings stays off.
-struct MenuLoginDefaultStore {
-    let directory: URL
-    private var url: URL { directory.appendingPathComponent("menu-login-default.json") }
-    var decided: Bool { FileManager.default.fileExists(atPath: url.path) }
-
-    func markDecided() throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        try Data("{}".utf8).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
-}
-
 struct LaunchExperienceStore {
     private struct Record: Codable { let acknowledgedBuild: String }
     let directory: URL

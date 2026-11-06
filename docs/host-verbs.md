@@ -31,6 +31,7 @@ FortiClient profile for the same gateway, or the gateway itself.
 | `unregister-agent` | `OFTC login agent unregistered` (also when nothing is registered); exit 0 | `Could not unregister OFTC login agent: <reason>`, exit 1 |
 | `unregister-host` | `OFTC host service unregistered` (also when nothing is registered); exit 0. Hidden; `oftc uninstall` calls it so no Login Items entry for the resident host service is left. Nothing registers it yet | `Could not unregister OFTC host service: <reason>`, exit 1 |
 | `unregister-menu-login` | `OFTC menu login item unregistered`; exit 0 | `Could not unregister the OFTC menu login item`; exit 1 |
+| `menu-login-default` | `OFTC menu login item enabled`, `... waits for approval in System Settings → Login Items` or `... left as it is`; exit 0. Hidden; `oftc setup` runs it after it made the first profile. Offers the menu login item once (marker `menu-login-default.json`), never after a user choice, and starts no sign-in or connection | `Could not enable the OFTC menu login item`, exit 1 (setup does not fail on it) |
 | `login-settings` | `Menu launch at login: enabled\|disabled`, then `VPN connect at login (<id>): enabled\|disabled` per profile; exit 0 | |
 | `list-profiles` | one line per profile, `id`, name, gateway, port, transport separated by tabs, ordered by name; an empty line when there are none; exit 0 | |
 | `show-profile` | `OFTC profile <id> (<name>): gateway=<g> saml-port=<p> transport=<udp\|tcp>`; exit 0 | `OFTC profile unavailable; run oftc setup` (none), `OFTC profile unavailable: no profile named <id>; run oftc setup` (unknown `--profile`), `Several OFTC profiles are configured; choose one with --profile <id> (<ids>)`; exit 1 |
@@ -149,7 +150,7 @@ user's approval prints `Could not register OFTC host service: ...` and exits 4; 
 failure exits 1. The UI runs it, directly, when starting the service by `launchctl kickstart`
 finds nothing registered (`docs/ui-edge.md` section 7).
 
-`login-settings`, `unregister-menu-login`, `unregister-host`, `host serve`, `host restart` and
+`login-settings`, `unregister-menu-login`, `unregister-host`, `menu-login-default`, `host serve`, `host restart` and
 `host register` are not in the usage text (the first two never were); the verb table marks them
 hidden so the
 text stays byte-for-byte, and a test pins it.

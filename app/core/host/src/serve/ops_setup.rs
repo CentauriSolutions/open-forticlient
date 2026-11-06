@@ -175,12 +175,16 @@ pub fn add_profile(cx: &OpCx, args: AddProfileArgs) -> OpResult {
     )
     .map_err(|_| Failure::new(ErrorCode::BadRequest, "invalid name, gateway or SAML port"))?;
     let _busy = cx.busy.acquire(vec![format!("gateway:{}", args.gateway)])?;
+    let first_setup = registry::entries(cx.services.env.root()).is_empty();
     step(cx, Step::Keychain, || secure_psk(cx, &args))?;
     let entry = step(cx, Step::Profile, || ensure_profile(cx, &args, &profile))?;
     step(cx, Step::ExtensionApproval, || ensure_extension(cx))?;
     step(cx, Step::VpnEntry, || {
         vpn::install_profile(&cx.access(), &entry).map(|_: Installed| ())
     })?;
+    // The first profile turns the menu login item on, once. Whatever comes of it (approval
+    // pending, a refusal) is the item's own state, not a setup failure.
+    let _ = crate::menu_login::offer(cx.services.env.root(), cx.services.login, first_setup);
     value(&AddProfileResult {
         profile_id: entry.id,
     })

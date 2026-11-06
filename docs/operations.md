@@ -213,6 +213,10 @@ their tunnels up (not yet verified live); the Network Extension owns packet flow
   `agent-status` and `register-agent` cover the login agent only. The menu app
   registers the host service itself, by the hidden verb `OFTCAgent host register`, the first
   time it finds nothing to start (macOS may ask the user to allow it in Login Items; exit 4).
+  The menu login item ("OFTC at login") is also a Login Items entry: it is turned on once, by the
+  first successful setup, so the menu-bar icon returns after a reboot (tunnels set to connect at
+  login do so without it). Turn it off in the menu's Settings; that choice, once made, is
+  never overridden, and a pending approval shows in Login Items & Extensions.
   The hidden `unregister-host` verb removes its registration, and `oftc uninstall` calls it so
   no Login Items entry is left behind.
 - The package's postinstall runs

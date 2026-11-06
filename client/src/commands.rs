@@ -669,6 +669,15 @@ fn run_setup(app: &Path, source: SetupSource) -> Result<(), Box<dyn Error>> {
     for id in &ids {
         run_host_for(&host, id, &["install-config"])?;
     }
+    if existing.is_empty() {
+        // The first profile turns the menu login item on, once (the host keeps the marker and
+        // never repeats it). Best effort: approval or a refusal is the item's own state, and
+        // it starts no sign-in or connection.
+        match host_output(&host, "menu-login-default") {
+            Ok(output) => out!("{}", String::from_utf8_lossy(&output.stdout)),
+            Err(_) => outln!("Could not enable the OFTC menu login item; turn it on in OFTC's settings."),
+        }
+    }
     outln!("OFTC setup complete. Run `oftc connect` when ready.");
     Ok(())
 }

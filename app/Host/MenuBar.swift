@@ -461,7 +461,6 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     private let afterInstall: Bool
     private var automaticLaunch = false
     private var launchExperiencePending = true
-    private var loginDefaultPending = true
     private var welcome: OFTCWelcome?
     private var controls: OFTCControlsWindow?
     private var welcomeIsUpgrade = false
@@ -600,7 +599,6 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         let ids = status.profiles.map(\.id)
         for id in runtimes.keys where !ids.contains(id) { runtimes[id] = nil }
         order = ids
-        applyMenuLoginDefault()
         reconcile()
         finishInitialExperience()
         autoRepairIfNeeded()
@@ -994,11 +992,17 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         controls?.window?.orderOut(nil)
         welcome?.window?.orderOut(nil)
         if onboarding == nil {
+            // The first profile turns "OFTC at login" on, once (the host decides; it only
+            // does so when this setup left a profile behind, and never again after a choice).
+            let firstSetup = runtimes.isEmpty
             onboarding = OFTCOnboarding(edge: edge) { [weak self] in
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.onboarding = nil
                     self.globalError = nil
+                    if firstSetup {
+                        self.send("menu_login_default", ["first_setup": true]) { [weak self] _ in self?.refresh() }
+                    }
                     self.edge?.retryNow()
                     self.refresh()
                     self.showWelcome()
@@ -1106,22 +1110,6 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         }
     }
     @objc private func openSetup() { showSetup() }
-
-    // MARK: First-run login item
-
-    // A fresh install turns "Launch OFTC at login" on so the tray icon is there
-    // after every login; an upgrade keeps whatever the user had. Decided once, with the
-    // first document that says what the login item is.
-    private func applyMenuLoginDefault() {
-        guard loginDefaultPending, installedCopy else { return }
-        loginDefaultPending = false
-        let store = MenuLoginDefaultStore(directory: experienceStore.directory)
-        guard !store.decided else { return }
-        if experienceStore.acknowledgedBuild == nil, loginMenuItem == .disabled {
-            send("settings_set", ["key": "menu_login", "value": true]) { [weak self] _ in self?.refresh() }
-        }
-        try? store.markDecided()
-    }
 
     // MARK: Updates
 
