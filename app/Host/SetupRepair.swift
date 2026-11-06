@@ -42,11 +42,11 @@ enum OFTCPSKStore {
     }
 
     // Only for a profile that has no saved PSK; returns false if the user cancels.
-    static func prompt(appID: String, entry: OFTCProfileEntry) -> Bool {
+    static func prompt(appID: String, name: String, gateway: String) -> Bool {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Enter the PSK for “\(entry.name)”"
-        alert.informativeText = "OFTC has no saved key for \(entry.profile.gateway). It is stored in your Keychain."
+        alert.messageText = "Enter the PSK for “\(name)”"
+        alert.informativeText = "OFTC has no saved key for \(gateway). It is stored in your Keychain."
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         alert.accessoryView = field
         alert.addButton(withTitle: "Continue")
@@ -55,7 +55,7 @@ enum OFTCPSKStore {
         var psk = Data(field.stringValue.utf8)
         defer { psk.resetBytes(in: 0..<psk.count) }
         guard (1...1024).contains(psk.count), !psk.contains(0),
-              (try? save(psk, appID: appID, gateway: entry.profile.gateway)) != nil else { return false }
+              (try? save(psk, appID: appID, gateway: gateway)) != nil else { return false }
         return true
     }
 }
@@ -69,10 +69,7 @@ final class OFTCSetupRepair {
     enum Phase: Equatable { case idle, working, waiting, stillWaiting }
 
     private static let timeout: TimeInterval = 900
-    private let providerID: String
-    private let expectedBuild: String
-    private let probe = ProviderReadiness()
-    private var runner: MenuCommand?
+    private var runner: HostCLI?
     private var poll: Timer?
     private var started = Date()
     private var sawApproval = false
@@ -80,13 +77,11 @@ final class OFTCSetupRepair {
     private(set) var phase = Phase.idle
 
     var onChange: (() -> Void)?
-    var onComponent: ((VPNComponentState) -> Void)?
     var onFinish: ((SetupOutcome) -> Void)?
-
-    init(appID: String, expectedBuild: String) {
-        providerID = appID + ".provider"
-        self.expectedBuild = expectedBuild
-    }
+    /// The component state from the host's last document, and a request for a fresh one: the
+    /// poll no longer asks the system itself.
+    var component: () -> VPNComponentState = { .unavailable }
+    var refresh: () -> Void = {}
 
     var isRunning: Bool { phase == .working || phase == .waiting }
     var isWorking: Bool { phase == .working }
@@ -106,17 +101,18 @@ final class OFTCSetupRepair {
         started = Date()
         sawApproval = false
         openedSettings = false
-        let runner = MenuCommand()
+        let runner = HostCLI()
         self.runner = runner
-        runner.start(executable: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/oftc"),
-                     arguments: ["--app", Bundle.main.bundlePath] + arguments,
-                     home: FileManager.default.homeDirectoryForCurrentUser,
-                     timeout: Self.timeout) { [weak self, weak runner] result in
+        runner.run(executable: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/oftc"),
+                   arguments: ["--app", Bundle.main.bundlePath] + arguments,
+                   home: FileManager.default.homeDirectoryForCurrentUser,
+                   timeout: Self.timeout) { [weak self, weak runner] end in
             guard let self, let runner, self.runner === runner else { return }
             self.runner = nil
             self.poll?.invalidate()
             self.poll = nil
-            let outcome = SetupOutcome.resolve(result, sawApproval: self.sawApproval)
+            let outcome = SetupOutcome.resolve(MenuCommandResult(end), sawApproval: self.sawApproval,
+                                                component: self.component())
             self.phase = outcome == .waitingForApproval ? .stillWaiting : .idle
             self.onChange?()
             self.onFinish?(outcome)
@@ -130,20 +126,18 @@ final class OFTCSetupRepair {
     func reopenSettings() { OFTCSettingsLink.open() }
 
     private func tick() {
-        probe.check(identifier: providerID, expected: expectedBuild) { [weak self] state in
-            guard let self, self.isRunning else { return }
-            self.onComponent?(state)
-            if SetupProgress.isWaitingForApproval(component: state, elapsed: Date().timeIntervalSince(self.started)) {
-                self.sawApproval = true
-                self.phase = .waiting
-                if !self.openedSettings {
-                    self.openedSettings = true
-                    OFTCSettingsLink.open()
-                }
-            } else if self.phase == .waiting {
-                self.phase = .working   // approved; installing the VPN entries
+        guard isRunning else { return }
+        refresh()
+        if SetupProgress.isWaitingForApproval(component: component(), elapsed: Date().timeIntervalSince(started)) {
+            sawApproval = true
+            phase = .waiting
+            if !openedSettings {
+                openedSettings = true
+                OFTCSettingsLink.open()
             }
-            self.onChange?()
+        } else if phase == .waiting {
+            phase = .working   // approved; installing the VPN entries
         }
+        onChange?()
     }
 }

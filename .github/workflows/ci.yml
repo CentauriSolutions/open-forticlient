@@ -34,6 +34,16 @@ jobs:
       - name: Shell syntax
         run: for f in app/*.sh scripts/*.sh app/package-scripts/*; do zsh -n "$f" 2>/dev/null || bash -n "$f"; done
 
+      - name: UI edge baseline does not grow
+        # The ratchet itself runs in the macOS build; this keeps the list of what is
+        # left to remove from being raised to make a check pass.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          zsh app/check-ui-edge.sh --grew-since "origin/$BASE_REF"
+
       - name: Provider version above the activated floor
         run: zsh app/check-versions.sh
 

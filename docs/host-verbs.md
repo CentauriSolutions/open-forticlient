@@ -142,8 +142,16 @@ No verb text, exit code or usage line changed. `connect`, `add_profile`'s steps 
 order, `list_sources` and `check_update` have no verb: the CLI's `connect` starts
 `supervise-profile` itself, and the host does the same through `ProcessSpawner`.
 
-`login-settings`, `unregister-menu-login`, `unregister-host`, `host serve` and `host restart` are not in
-the usage text (the first two never were); the verb table marks them hidden so the
+`host register` registers the host service with `SMAppService` and clears a launchd
+disabled override (`agent::register_host`, the policy of `register-agent`), then kickstarts
+it, and prints `OFTC host service registered` (exit 0). A registration macOS holds for the
+user's approval prints `Could not register OFTC host service: ...` and exits 4; any other
+failure exits 1. The UI runs it, directly, when starting the service by `launchctl kickstart`
+finds nothing registered (`docs/ui-edge.md` section 7).
+
+`login-settings`, `unregister-menu-login`, `unregister-host`, `host serve`, `host restart` and
+`host register` are not in the usage text (the first two never were); the verb table marks them
+hidden so the
 text stays byte-for-byte, and a test pins it.
 `set-autostart on` with the agent not yet enabled leaves a one-use
 `agent-request.json` (`connect: false`, valid for 60 s) so that registering the agent

@@ -1,7 +1,8 @@
 //! The two state rules the UI used to compute, now in the host: which row state a
 //! profile shows (`MenuConnectionState.resolve`) and whether the VPN component is
 //! ready (`VPNComponentState.resolve`, `canReplace`). The Swift check cases moved
-//! here one for one; the Swift ones stay until the UI migrates (PR 6).
+//! here one for one; the Swift resolvers are gone (`canReplace` stays in the setup window
+//! until it moves onto `add_profile`).
 
 use std::cmp::Ordering;
 

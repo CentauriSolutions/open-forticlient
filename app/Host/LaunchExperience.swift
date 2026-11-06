@@ -3,31 +3,6 @@ import Foundation
 enum VPNComponentState: Equatable {
     case checking, ready, missing, updateRequired, approval, newer, unavailable
 
-    struct Record {
-        var build: String
-        var enabled: Bool
-        var awaitingApproval: Bool = false
-        var uninstalling: Bool = false
-    }
-
-    static func resolve(expected: String, records: [Record]) -> Self {
-        guard !expected.isEmpty else { return .unavailable }
-        let current = records.filter { !$0.uninstalling }
-        let enabled = current.filter(\.enabled)
-        guard enabled.count <= 1 else { return .unavailable }
-        if let active = enabled.first {
-            if active.build == expected { return .ready }
-            if active.build.compare(expected, options: .numeric) == .orderedDescending { return .newer }
-            return current.contains(where: { $0.build == expected && $0.awaitingApproval })
-                ? .approval : .updateRequired
-        }
-        if current.contains(where: { $0.build.compare(expected, options: .numeric) == .orderedDescending }) {
-            return .newer
-        }
-        if current.contains(where: { $0.build == expected && $0.awaitingApproval }) { return .approval }
-        return current.isEmpty ? .missing : .updateRequired
-    }
-
     var needsSetup: Bool { [.missing, .updateRequired, .approval].contains(self) }
 
     static func canReplace(existing: String, replacement: String) -> Bool {

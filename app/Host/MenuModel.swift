@@ -1,5 +1,4 @@
 import Foundation
-import NetworkExtension
 
 enum MenuConnectionState: String, CaseIterable {
     case connected, disconnected, connecting, disconnecting
@@ -36,25 +35,35 @@ enum MenuConnectionState: String, CaseIterable {
         }
     }
 
-    static func resolve(status: NEVPNStatus?, configured: Bool,
-                        phase: SupervisorPhase?, stopping: Bool = false) -> Self {
-        if stopping { return .disconnecting }
-        switch status {
-        case .connected: return .connected
-        case .connecting: return .connecting
-        case .reasserting: return .reconnecting
-        case .disconnecting: return .disconnecting
-        default: break
+    /// The host computes the row state (core/host/src/serve/state.rs); this only maps it to the
+    /// UI's text-bearing enum.
+    init(_ state: HostConnectionState) {
+        switch state {
+        case .connected: self = .connected
+        case .disconnected: self = .disconnected
+        case .connecting: self = .connecting
+        case .disconnecting: self = .disconnecting
+        case .signIn: self = .signingIn
+        case .reconnecting: self = .reconnecting
+        case .attention: self = .attention
+        case .setup: self = .setup
         }
-        switch phase {
-        case .acquiring: return .signingIn
-        case .connecting: return .connecting
-        case .recovering: return .reconnecting
-        case .failed: return .attention
-        default: break
+    }
+}
+
+extension VPNComponentState {
+    /// The host resolves the extension's state (core/host/src/serve/state.rs); the welcome and
+    /// setup flows still speak this enum.
+    init(_ state: HostComponentState) {
+        switch state {
+        case .checking: self = .checking
+        case .ready: self = .ready
+        case .missing: self = .missing
+        case .updateRequired: self = .updateRequired
+        case .approval: self = .approval
+        case .newer: self = .newer
+        case .unavailable: self = .unavailable
         }
-        guard configured, status != .invalid else { return .setup }
-        return .disconnected
     }
 }
 
@@ -108,7 +117,44 @@ struct TunnelPresentation {
     }
 }
 
+// Whether the menu can reach the host, and the one row it shows when it cannot.
+enum ServiceState: Equatable {
+    case starting, ready, notRunning, needsApproval, updating, unsupported
+
+    init(_ availability: HostAvailability) {
+        switch availability {
+        case .connecting: self = .starting
+        case .ready: self = .ready
+        case .unavailable(.notRunning): self = .notRunning
+        case .unavailable(.needsApproval): self = .needsApproval
+        case .unavailable(.updating): self = .updating
+        case .unavailable(.unsupported): self = .unsupported
+        }
+    }
+
+    var message: String? {
+        switch self {
+        case .ready: return nil
+        case .starting: return "Connecting to OFTC's VPN service…"
+        case .notRunning: return "OFTC's VPN service is not running"
+        case .needsApproval:
+            return "Allow OFTC in System Settings → General → Login Items & Extensions to start its VPN service."
+        case .updating: return "OFTC is finishing an update…"
+        case .unsupported: return "This version of OFTC cannot talk to its VPN service. Update OFTC."
+        }
+    }
+
+    var button: String? {
+        switch self {
+        case .notRunning: return "Start service"
+        case .needsApproval: return "Open Login Items…"
+        default: return nil
+        }
+    }
+}
+
 struct MenuPresentation {
+    var service = ServiceState.ready
     var tunnels: [TunnelPresentation] = []
     var busy = false
     var notice: String?

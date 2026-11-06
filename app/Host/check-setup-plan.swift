@@ -24,6 +24,11 @@ import Foundation
             ("newer component: use the newer installer, even with no profile", plan(0, .newer), .newerInstalled),
             ("component state unknown still repairs (activation reports the truth)", plan(1, .unavailable), .repair),
         ]
+        // Host down: its document is empty, which is not "no profiles" (profiles on disk, host
+        // not yet started or awaiting approval at an upgrade's first launch).
+        precondition(SetupPlan.decide(hostReady: false, profileCount: 0, missingPSK: [], component: .checking,
+                                      entriesMissing: false, anyActive: false) == .waitForHost,
+                     "host down must not show the add form")
         for (name, got, want) in rows { precondition(got == want, "\(name): \(got)") }
 
         // Auto repair at launch: only a plain repair, a component that needs it, a
@@ -47,7 +52,10 @@ import Foundation
         typealias O = SetupOutcome
         precondition(O.resolve(.success, sawApproval: false) == .done)
         precondition(O.resolve(.failure(.timeout), sawApproval: true) == .waitingForApproval)
-        precondition(O.resolve(.failure(.approval), sawApproval: false) == .waitingForApproval)
+        precondition(O.resolve(.failure(.approval), sawApproval: false, component: .approval) == .waitingForApproval)
+        precondition(O.resolve(.failure(.approval), sawApproval: true) == .waitingForApproval)
+        precondition(O.resolve(.failure(.approval), sawApproval: false, component: .ready) == .failure(.credentials),
+                     "exit 4 with an approved component is the missing key, not approval")
         precondition(O.resolve(.failure(.timeout), sawApproval: false) == .failure(.timeout), "a real hang is still a failure")
         precondition(O.resolve(.failure(.failed(3)), sawApproval: true) == .failure(.failed(3)))
 

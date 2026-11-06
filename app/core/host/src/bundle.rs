@@ -1,8 +1,7 @@
 //! The `.oftc` profile bundle: one or more profiles and their PSKs in a file a
 //! colleague can import.
 //!
-//! The bytes are the format the Swift host wrote (`ProfileBundle.swift`, which the
-//! menu still reads for its import preview): pretty-printed, keys sorted, `" : "`
+//! The bytes are the format the Swift host wrote: pretty-printed, keys sorted, `" : "`
 //! between a key and its value, `/` unescaped, one trailing newline. The PSK is not
 //! the authentication secret (SAML is), but the file is configuration for a private
 //! gateway, so it is shared with the people who need it.
@@ -204,7 +203,7 @@ mod tests {
         }
     }
 
-    /// The same two profiles `ProfileBundle.swift` encoded to
+    /// The same two profiles the Swift `ProfileBundle` encoded to
     /// `fixtures/swift/bundle.oftc`. The second one's PSK holds every character
     /// the writer might escape differently: `/`, quotes, backslash, a tab, two
     /// other control characters, DEL, U+2028, a private-use and an astral character.

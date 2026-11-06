@@ -11,9 +11,14 @@ enum SetupPlan: Equatable {
     case waitForDisconnect       // the component must be replaced, but a tunnel is live
     case newerInstalled          // the installed component is newer than this app
     case nothingToDo
+    case waitForHost             // the host is not answering: its document says nothing yet
 
-    static func decide(profileCount: Int, missingPSK: [String], component: VPNComponentState,
-                       entriesMissing: Bool, anyActive: Bool) -> Self {
+    // While the host is down its document is empty, so "no profiles" would be a guess: an
+    // upgrade's first launch has profiles on disk and a host still starting or awaiting approval.
+    // Never choose from it; wait for the host (docs/ui-edge.md 7).
+    static func decide(hostReady: Bool = true, profileCount: Int, missingPSK: [String],
+                       component: VPNComponentState, entriesMissing: Bool, anyActive: Bool) -> Self {
+        if !hostReady { return .waitForHost }
         if component == .newer { return .newerInstalled }
         if profileCount == 0 { return .addForm }
         if !missingPSK.isEmpty { return .askPSK(missingPSK) }
@@ -46,10 +51,15 @@ enum SetupOutcome: Equatable {
 
     // Approval is a state, not an error: a command that ends while macOS is still
     // waiting for the user must not become "took too long".
-    static func resolve(_ result: MenuCommandResult, sawApproval: Bool) -> Self {
+    // Exit 4 is "needs the user" for approval and for an unavailable PSK alike (the same exit
+    // table as the wire's); it is approval only when the component says so, or approval was seen
+    // while waiting. Otherwise it is the missing key, which waiting would never fix.
+    static func resolve(_ result: MenuCommandResult, sawApproval: Bool,
+                        component: VPNComponentState = .unavailable) -> Self {
         switch result {
         case .success: return .done
-        case .failure(.approval): return .waitingForApproval
+        case .failure(.approval) where sawApproval || component.needsSetup: return .waitingForApproval
+        case .failure(.approval): return .failure(.credentials)
         case .failure(.timeout) where sawApproval: return .waitingForApproval
         case .failure(let failure): return .failure(failure)
         }

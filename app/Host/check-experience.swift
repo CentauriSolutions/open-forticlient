@@ -31,21 +31,6 @@ import Foundation
         precondition(mode == 0o600)
 
         typealias Component = VPNComponentState
-        precondition(Component.resolve(expected: "23", records: []) == .missing)
-        precondition(Component.resolve(expected: "23", records: [.init(build: "20", enabled: true)]) == .updateRequired)
-        precondition(Component.resolve(expected: "23", records: [
-            .init(build: "23", enabled: true), .init(build: "20", enabled: true, uninstalling: true)
-        ]) == .ready)
-        precondition(Component.resolve(expected: "23", records: [
-            .init(build: "20", enabled: true), .init(build: "23", enabled: false, awaitingApproval: true)
-        ]) == .approval)
-        precondition(Component.resolve(expected: "23", records: [.init(build: "23", enabled: false)]) != .ready)
-        precondition(Component.resolve(expected: "23", records: [.init(build: "24", enabled: true)]) == .newer)
-        precondition(Component.resolve(expected: "23", records: [
-            .init(build: "23", enabled: true), .init(build: "20", enabled: true)
-        ]) == .unavailable)
-        precondition(Component.resolve(expected: "", records: [.init(build: "23", enabled: true)]) == .unavailable)
-        precondition(Component.resolve(expected: "9", records: [.init(build: "10", enabled: true)]) == .newer)
         precondition(Component.canReplace(existing: "20", replacement: "23"))
         precondition(Component.canReplace(existing: "23", replacement: "23"))
         precondition(!Component.canReplace(existing: "24", replacement: "23"))
@@ -61,6 +46,6 @@ import Foundation
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .checking).action == .wait)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .unavailable).action == .check)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .newer).action == .check)
-        print("Launch, welcome, and provider-readiness checks passed (offline).")
+        print("Launch, welcome, and component replacement checks passed (offline).")
     }
 }

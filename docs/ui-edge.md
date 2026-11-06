@@ -430,6 +430,28 @@ finished `HostStatus` values. No view waits on the socket.
 5. `Quit` still disconnects tunnels first: with the host down it cannot, and
    says so instead of hanging (the existing `quitAfterStop` timeout applies).
 
+PR 6 settled, where this section was silent:
+
+- Nothing registered the host service (PR 5 only bundled it), so a hidden verb
+  `host register` (`agent::register_host`, then a kickstart; exit 4 when macOS holds it for
+  approval) is what `HostEdge` runs, directly, when `launchctl kickstart` finds no service.
+  Approval shows as `unavailable(approval)` with a row linking to Login Items; it is not retried
+  into a loop. `oftc setup` does not register the service yet.
+- #105's first-run repair (`SetupPlan`, `SetupRepair`) stays, reading the host's document (profile
+  count, per-profile `setup` state, component state) instead of the system. Two things it still
+  does itself, both in `app/ui-edge-baseline.txt`: the Keychain presence check and prompt for a
+  PSK (no op reports it), and `oftc setup`, run by `HostCLI` in `HostEdge.swift` with only its exit
+  status read (4 is approval). No op finishes every existing profile (`add_profile` needs one,
+  `component_update` skips the VPN entries); PR 7 adds it and removes both. The `.oftc` import
+  uses the `import` op, not the CLI.
+- The UI starts the host once per outage (kickstart, then register), not on every retry; a
+  window opening or a wake starts the count again. An unsupported protocol is not retried.
+- `HostEdge` ignores a `status` whose `seq` is not above the last one of that connection and
+  accepts the first after a reconnect, since a restarted host counts from 1.
+- The `.oftc` import and export keep the old file hand-offs: the menu app copies the user's
+  file into a private scratch directory and gives the host that path (and the host exports
+  to a scratch path the menu copies out), so the same process as before touches the user's folders.
+
 ## 8. How it composes with the merged host code
 
 `core/host` already provides what the server serves; the server adds transport,

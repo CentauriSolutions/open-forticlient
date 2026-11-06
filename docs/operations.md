@@ -210,10 +210,11 @@ their tunnels up (not yet verified live); the Network Extension owns packet flow
 
 - It is a separate Login Items entry from the login agent
   (`com.chris.openforticlient.oftc.agent`): macOS may list two items for OFTC.
-  `agent-status` and `register-agent` cover the login agent only. The host crate has
-  registration functions for the host service; no verb registers it yet. The hidden
-  `unregister-host` verb removes its registration, and `oftc uninstall` calls it so no
-  Login Items entry is left behind.
+  `agent-status` and `register-agent` cover the login agent only. The menu app
+  registers the host service itself, by the hidden verb `OFTCAgent host register`, the first
+  time it finds nothing to start (macOS may ask the user to allow it in Login Items; exit 4).
+  The hidden `unregister-host` verb removes its registration, and `oftc uninstall` calls it so
+  no Login Items entry is left behind.
 - The package's postinstall runs
   `launchctl kickstart -k gui/<uid>/com.chris.openforticlient.oftc.host` for the
   logged-in user, so an upgrade replaces the running host with the new bundle's
