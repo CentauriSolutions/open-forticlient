@@ -20,6 +20,12 @@ fn read_key(plist: &Path, key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A string key of the app's own Info.plist, for the bundle that holds `exe`.
+pub fn bundle_string(exe: Option<&Path>, key: &str) -> Option<String> {
+    let contents = exe?.parent()?.parent()?;
+    Some(read_key(&contents.join("Info.plist"), key)).filter(|value| !value.is_empty())
+}
+
 /// The marketing version and build of the app, and the build of the system extension it
 /// ships, read from the bundle that holds `exe` (`<app>/Contents/MacOS/<exe>`). A bundle
 /// that cannot be read gives empty strings, which the component check treats as

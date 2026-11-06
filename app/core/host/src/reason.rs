@@ -46,7 +46,7 @@ mod tests {
     fn codes_map_to_reasons() {
         let table = [
             (200, Some(ErrorCode::GatewayNotFound)),
-            (201, Some(ErrorCode::NetworkBlocked)),
+            (201, Some(ErrorCode::NetworkBlocked)), // UDP unanswered, TCP 4443 fallback refused or dropped
             (202, Some(ErrorCode::GatewayNoAnswer)),
             (203, Some(ErrorCode::GatewayRefused)),
             (204, Some(ErrorCode::GatewayRefused)),

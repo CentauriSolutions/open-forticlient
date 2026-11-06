@@ -167,6 +167,77 @@ pub fn forticlient_name_for_gateway(plist: &Path, gateway: &str) -> Option<Strin
     name_in_profiles_json(&output.stdout, gateway)
 }
 
+/// One FortiClient profile a user could import: its name, gateway and SAML port.
+/// The PSK is not part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FortiClientSource {
+    pub label: String,
+    pub gateway: String,
+    pub saml_port: u32,
+}
+
+/// The importable profiles of the FortiClient `plist`, read through `plutil`.
+pub fn forticlient_sources(plist: &Path) -> Vec<FortiClientSource> {
+    let Ok(output) = Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(plist)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() || output.stdout.len() > 4_000_000 {
+        return Vec::new();
+    }
+    sources_in_profiles_json(&output.stdout)
+}
+
+/// The profiles of a FortiClient `vpn.plist` converted to JSON that this app could
+/// import, by name. A name or gateway the profile rules refuse is left out, so what
+/// is listed can be added; a missing or unreadable port is FortiClient's default
+/// 9443.
+pub fn sources_in_profiles_json(json: &[u8]) -> Vec<FortiClientSource> {
+    let Some(root) = serde_json::from_slice::<serde_json::Value>(json).ok() else {
+        return Vec::new();
+    };
+    let Some(profiles) = root.get("Profiles").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<FortiClientSource> = profiles
+        .iter()
+        .filter_map(|(name, value)| {
+            let gateway = value.get("Server")?.as_str()?;
+            let port = match value.get("IKESamlPort") {
+                Some(serde_json::Value::Number(n)) => n.as_u64(),
+                Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+                _ => None,
+            }
+            .and_then(|p| u32::try_from(p).ok())
+            .filter(|p| *p != 0)
+            .unwrap_or(9443);
+            // The profile rules decide what is importable: the name and gateway
+            // checks are theirs.
+            let usable = !name.is_empty()
+                && name.len() <= 128
+                && !name.contains('.')
+                && crate::profile::Profile::new(
+                    gateway,
+                    port,
+                    crate::profile::Transport::Udp,
+                    Some(name),
+                    None,
+                )
+                .is_ok();
+            usable.then(|| FortiClientSource {
+                label: name.clone(),
+                gateway: gateway.to_owned(),
+                saml_port: port,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.label.cmp(&b.label));
+    found
+}
+
 fn name_in_profiles_json(json: &[u8], gateway: &str) -> Option<String> {
     let root: serde_json::Value = serde_json::from_slice(json).ok()?;
     let profiles = root.get("Profiles")?.as_object()?;
@@ -380,5 +451,31 @@ mod tests {
             forticlient_name_for_gateway(Path::new("/nonexistent/vpn.plist"), "vpn.example.com"),
             None
         );
+    }
+
+    /// What FortiClient's converted `vpn.plist` offers for import: by name, port from a
+    /// number or a string, 9443 when absent, and nothing the profile rules refuse.
+    #[test]
+    fn forticlient_sources_table() {
+        let json = br#"{"Profiles":{
+            "Zed":{"Server":"vpn.example.com","IKESamlPort":"4443"},
+            "Alpha":{"Server":"gw.example.com","IKESamlPort":8443},
+            "NoPort":{"Server":"203.0.113.7"},
+            "Dotted.Name":{"Server":"vpn.example.com"},
+            "BadHost":{"Server":"bad host"},
+            "NoServer":{"Other":1}}}"#;
+        let found: Vec<(String, String, u32)> = sources_in_profiles_json(json)
+            .into_iter()
+            .map(|s| (s.label, s.gateway, s.saml_port))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("Alpha".to_owned(), "gw.example.com".to_owned(), 8443),
+                ("NoPort".to_owned(), "203.0.113.7".to_owned(), 9443),
+                ("Zed".to_owned(), "vpn.example.com".to_owned(), 4443),
+            ]
+        );
+        assert!(sources_in_profiles_json(b"[]").is_empty());
     }
 }

@@ -13,11 +13,14 @@ use oftc_provider::envelope::ConnectMode;
 
 use crate::commands::{require_entry, Backends};
 use crate::env::HostEnv;
+use crate::keychain::Keychain;
 use crate::lease::SupervisorLease;
 use crate::profile::Transport;
 use crate::registry::{self, ProfileEntry};
 use crate::start::{live_options, parse_start_flags, preflight_options};
 use crate::supervisor::{Deps, Job, Supervisor};
+use crate::typed::Failure;
+use oftc_ui_edge::ErrorCode;
 
 /// What a verb prints and returns.
 pub(crate) type Outcome = (String, i32);
@@ -45,6 +48,144 @@ pub(crate) fn owns(provider_id: &str, entry: &ProfileEntry, vpn: &VpnEntry) -> b
 pub(crate) fn owns_key(provider_id: &str, id: &str, adopted: bool, vpn: &VpnEntry) -> bool {
     vpn.provider_id == provider_id
         && (vpn.profile_key.as_deref() == Some(id) || (vpn.profile_key.is_none() && adopted))
+}
+
+/// What the typed internals below need. The verbs reach it through [`Ctx`], the
+/// socket ops build it directly, so both run the same code.
+pub(crate) struct Access<'a> {
+    pub env: &'a HostEnv,
+    pub vpn: &'a dyn VpnControl,
+    pub keychain: &'a dyn Keychain,
+}
+
+impl Access<'_> {
+    fn belongs(&self, entry: &ProfileEntry, vpn: &VpnEntry) -> bool {
+        owns(&self.env.provider_id(), entry, vpn)
+    }
+
+    /// The profile's one VPN entry, if any.
+    pub(crate) fn load_manager(&self, entry: &ProfileEntry) -> Result<Option<VpnEntry>, Failure> {
+        let all = self
+            .vpn
+            .load_all()
+            .map_err(|_| Failure::internal("Could not load VPN configuration"))?;
+        let mut ours = all.into_iter().filter(|vpn| self.belongs(entry, vpn));
+        let first = ours.next();
+        match ours.next() {
+            Some(_) => Err(Failure::internal(
+                "Multiple OFTC configurations; refusing to guess",
+            )),
+            None => Ok(first),
+        }
+    }
+}
+
+/// How `install-config` ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Installed {
+    Saved,
+    AlreadyThere,
+}
+
+/// Creates the profile's VPN entry unless it has one. Idempotent.
+pub(crate) fn install_profile(a: &Access, entry: &ProfileEntry) -> Result<Installed, Failure> {
+    match a.load_manager(entry)? {
+        Some(_) => Ok(Installed::AlreadyThere),
+        None => a
+            .vpn
+            .create(&a.env.provider_id(), &entry.id, entry.name())
+            .map(|()| Installed::Saved)
+            .map_err(|_| Failure::internal("Could not save OFTC configuration")),
+    }
+}
+
+/// How `stop` ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Stopped {
+    Requested,
+    NoConfiguration,
+}
+
+/// Asks the supervisor to stand down, then stops the tunnel. The supervisor is told
+/// first so an intentional disconnect cannot start another sign-in; if it cannot be
+/// told, the VPN is left running.
+pub(crate) fn stop_profile(a: &Access, entry: &ProfileEntry) -> Result<Stopped, Failure> {
+    if !crate::lease::request_stop(&registry::entry_directory(a.env.root(), &entry.id)) {
+        return Err(Failure::internal(
+            "Could not signal OFTC supervisor; VPN left running",
+        ));
+    }
+    match a.load_manager(entry)? {
+        None => Ok(Stopped::NoConfiguration),
+        Some(vpn) => {
+            a.vpn.stop(&vpn);
+            Ok(Stopped::Requested)
+        }
+    }
+}
+
+/// How `erase-profile` ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Erased {
+    Done,
+    NothingToErase,
+}
+
+/// Erases `targets` (every profile when the verb has no `--profile`): each one's VPN
+/// entry, PSK, trusted gateway certificate and files. Nothing is erased while any of
+/// them is up.
+pub(crate) fn erase_profiles(a: &Access, targets: &[ProfileEntry]) -> Result<Erased, Failure> {
+    if targets.is_empty() {
+        return Ok(Erased::NothingToErase);
+    }
+    let all = a
+        .vpn
+        .load_all()
+        .map_err(|_| Failure::internal("Could not load VPN configuration"))?;
+    let mut doomed: Vec<&VpnEntry> = Vec::new();
+    for entry in targets {
+        for vpn in all.iter().filter(|vpn| a.belongs(entry, vpn)) {
+            if !matches!(
+                a.vpn.status(vpn),
+                VpnStatus::Disconnected | VpnStatus::Invalid
+            ) {
+                return Err(Failure::new(
+                    ErrorCode::TunnelsActive,
+                    &format!("Disconnect {} before erasing its profile", entry.name()),
+                ));
+            }
+            doomed.push(vpn);
+        }
+    }
+    // Each profile's VPN entry goes with it, so none is left orphaned.
+    for vpn in doomed {
+        if a.vpn.remove(vpn).is_err() {
+            return Err(Failure::internal(
+                "Could not remove an OFTC VPN entry; profile left in place",
+            ));
+        }
+    }
+    for entry in targets {
+        if a.keychain.delete(&entry.profile.gateway).is_err() {
+            return Err(Failure::internal(&format!(
+                "Could not erase OFTC Keychain PSK for {}; profile left in place",
+                entry.name()
+            )));
+        }
+        // Its trusted gateway certificate goes too; a re-added VPN asks again.
+        let pin = a.env.pin_dir().join(format!(
+            "{}_{}.pem",
+            entry.profile.gateway, entry.profile.saml_port
+        ));
+        let _ = std::fs::remove_file(pin);
+        if std::fs::remove_dir_all(registry::entry_directory(a.env.root(), &entry.id)).is_err() {
+            return Err(Failure::internal(&format!(
+                "Keychain PSK erased, but profile {} could not be removed",
+                entry.name()
+            )));
+        }
+    }
+    Ok(Erased::Done)
 }
 
 pub(crate) struct Ctx<'a> {
@@ -77,18 +218,17 @@ impl Ctx<'_> {
         owns(&self.env.provider_id(), entry, vpn)
     }
 
+    pub(crate) fn access(&self) -> Access<'_> {
+        Access {
+            env: self.env,
+            vpn: self.backends.vpn,
+            keychain: self.backends.keychain,
+        }
+    }
+
     /// The profile's one VPN entry, if any.
     pub(crate) fn load_manager(&self, entry: &ProfileEntry) -> Result<Option<VpnEntry>, Outcome> {
-        let all = self
-            .vpn()
-            .load_all()
-            .map_err(|_| fail("Could not load VPN configuration"))?;
-        let mut ours = all.into_iter().filter(|vpn| self.belongs(entry, vpn));
-        let first = ours.next();
-        match ours.next() {
-            Some(_) => Err(fail("Multiple OFTC configurations; refusing to guess")),
-            None => Ok(first),
-        }
+        self.access().load_manager(entry).map_err(Failure::outcome)
     }
 
     /// Rechecks the entry just before acting: another process may have changed
@@ -111,16 +251,10 @@ pub(crate) fn install_config(ctx: &Ctx) -> Outcome {
         Ok(entry) => entry,
         Err(outcome) => return outcome,
     };
-    match ctx.load_manager(&entry) {
-        Err(outcome) => outcome,
-        Ok(Some(_)) => ok("OFTC configuration already exists"),
-        Ok(None) => match ctx
-            .vpn()
-            .create(&ctx.env.provider_id(), &entry.id, entry.name())
-        {
-            Ok(()) => ok("OFTC configuration saved"),
-            Err(_) => fail("Could not save OFTC configuration"),
-        },
+    match install_profile(&ctx.access(), &entry) {
+        Ok(Installed::Saved) => ok("OFTC configuration saved"),
+        Ok(Installed::AlreadyThere) => ok("OFTC configuration already exists"),
+        Err(failure) => failure.outcome(),
     }
 }
 
@@ -150,24 +284,16 @@ pub(crate) fn status(ctx: &Ctx) -> Outcome {
     }
 }
 
-/// `stop`: asks the supervisor to stand down, then stops the tunnel. The supervisor
-/// is told first so an intentional disconnect cannot start another sign-in; if it
-/// cannot be told, the VPN is left running.
+/// `stop`: [`stop_profile`] for the selected profile.
 pub(crate) fn stop(ctx: &Ctx) -> Outcome {
     let entry = match ctx.entry() {
         Ok(entry) => entry,
         Err(outcome) => return outcome,
     };
-    if !crate::lease::request_stop(&registry::entry_directory(ctx.env.root(), &entry.id)) {
-        return fail("Could not signal OFTC supervisor; VPN left running");
-    }
-    match ctx.load_manager(&entry) {
-        Err(outcome) => outcome,
-        Ok(None) => ok("OFTC configuration absent"),
-        Ok(Some(vpn)) => {
-            ctx.vpn().stop(&vpn);
-            ok("Stop requested")
-        }
+    match stop_profile(&ctx.access(), &entry) {
+        Ok(Stopped::Requested) => ok("Stop requested"),
+        Ok(Stopped::NoConfiguration) => ok("OFTC configuration absent"),
+        Err(failure) => failure.outcome(),
     }
 }
 
@@ -194,9 +320,8 @@ pub(crate) fn remove_config(ctx: &Ctx) -> Outcome {
     ok("OFTC configuration removed")
 }
 
-/// Erases the selected profile, or every profile when none is selected (so an
-/// uninstall can clean up): its VPN entry, PSK, trusted gateway certificate and
-/// files. Nothing is erased while any of its tunnels is up.
+/// `erase-profile`: [`erase_profiles`] for the selected profile, or every profile
+/// when none is selected (so an uninstall can clean up).
 pub(crate) fn erase_profile(ctx: &Ctx) -> Outcome {
     let targets = if ctx.selected.is_some() {
         match ctx.entry() {
@@ -206,60 +331,11 @@ pub(crate) fn erase_profile(ctx: &Ctx) -> Outcome {
     } else {
         registry::entries(ctx.env.root())
     };
-    if targets.is_empty() {
-        return ok("OFTC profile absent; nothing erased");
+    match erase_profiles(&ctx.access(), &targets) {
+        Ok(Erased::Done) => ok("OFTC profile, VPN entry and Keychain PSK erased"),
+        Ok(Erased::NothingToErase) => ok("OFTC profile absent; nothing erased"),
+        Err(failure) => failure.outcome(),
     }
-    let all = match ctx.vpn().load_all() {
-        Ok(all) => all,
-        Err(_) => return fail("Could not load VPN configuration"),
-    };
-    let mut doomed: Vec<&VpnEntry> = Vec::new();
-    for entry in &targets {
-        for vpn in all.iter().filter(|vpn| ctx.belongs(entry, vpn)) {
-            if !matches!(
-                ctx.vpn().status(vpn),
-                VpnStatus::Disconnected | VpnStatus::Invalid
-            ) {
-                return fail(&format!(
-                    "Disconnect {} before erasing its profile",
-                    entry.name()
-                ));
-            }
-            doomed.push(vpn);
-        }
-    }
-    // Each profile's VPN entry goes with it, so none is left orphaned.
-    for vpn in doomed {
-        if ctx.vpn().remove(vpn).is_err() {
-            return fail("Could not remove an OFTC VPN entry; profile left in place");
-        }
-    }
-    for entry in &targets {
-        if ctx
-            .backends
-            .keychain
-            .delete(&entry.profile.gateway)
-            .is_err()
-        {
-            return fail(&format!(
-                "Could not erase OFTC Keychain PSK for {}; profile left in place",
-                entry.name()
-            ));
-        }
-        // Its trusted gateway certificate goes too; a re-added VPN asks again.
-        let pin = ctx.env.pin_dir().join(format!(
-            "{}_{}.pem",
-            entry.profile.gateway, entry.profile.saml_port
-        ));
-        let _ = std::fs::remove_file(pin);
-        if std::fs::remove_dir_all(registry::entry_directory(ctx.env.root(), &entry.id)).is_err() {
-            return fail(&format!(
-                "Keychain PSK erased, but profile {} could not be removed",
-                entry.name()
-            ));
-        }
-    }
-    ok("OFTC profile, VPN entry and Keychain PSK erased")
 }
 
 #[derive(Clone, Copy)]
