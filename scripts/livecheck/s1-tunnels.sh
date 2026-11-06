@@ -45,8 +45,7 @@ lc_info "supervisors (pid:pgid) before: ${sup_before:-none}"
 for id in ${=PROFILES}; do
   lc_step "profile $id: connected and reachable"
   if lc_live; then
-    lc_refresh_status
-    expect_eq "profile $id state" "$(lc_pfield "$id" state)" connected
+    expect_pstate "$id" connected "profile $id state"
     addr=$(lc_target_for "$id" PING_TARGETS) || { lc_fail "no PING_TARGETS entry for $id"; continue; }
     lc_run ping -c 10 -t 20 "$addr"
     expect_contains "ping through $id at 0% loss" "$LC_OUT" " 0.0% packet loss"
@@ -73,8 +72,7 @@ for id in ${=PROFILES}; do
   if lc_live; then
     lc_run ping -c 10 -t 20 "$(lc_target_for "$id" PING_TARGETS)"
     expect_contains "protected traffic continues after rekeys ($id)" "$LC_OUT" " 0.0% packet loss"
-    lc_refresh_status
-    expect_eq "profile $id still connected after rekeys" "$(lc_pfield "$id" state)" connected
+    expect_pstate "$id" connected "profile $id still connected after rekeys"
   fi
 
   lc_step "profile $id: transport"
@@ -82,7 +80,9 @@ for id in ${=PROFILES}; do
   lc_info "configured: $(print -r -- "$LC_OUT" | grep -o 'transport=[a-z]*')"
   lc_run -q netstat -an
   if lc_live; then
-    if print -r -- "$LC_OUT" | grep -q 'ESTABLISHED' && print -r -- "$LC_OUT" | grep -E '\.4443 +ESTABLISHED' >/dev/null; then
+    # Not a pipeline into grep -q: netstat -an is long, grep -q exits at the first match,
+    # and under pipefail the writer's SIGPIPE turns a match into a failure.
+    if grep -E '^tcp.*\.4443 +ESTABLISHED' <<< "$LC_OUT" >/dev/null; then
       lc_info "in use (inferred from sockets, not per profile): a TCP connection to port 4443 is established"
     else
       lc_info "in use (inferred): no TCP 4443 connection; UDP presumed. The CLI does not report the transport in use."
@@ -95,13 +95,14 @@ if lc_live; then
   typeset -i ticks
   ticks=$(( SOAK_MINUTES * 60 / SOAK_INTERVAL ))
   (( ticks < 1 )) && ticks=1
+  lc_state_readable && soak_state=1 || { soak_state=0; lc_info "SKIP soak state checks: tunnel state cannot be read; probing with ping only"; }
   lc_info "soaking $SOAK_MINUTES min: $ticks probes every ${SOAK_INTERVAL}s"
   broke=0
   for (( t = 1; t <= ticks && ! broke; t++ )); do
     lc_sleep "$SOAK_INTERVAL"
-    lc_refresh_status
+    (( soak_state )) && lc_refresh_status
     for id in ${=PROFILES}; do
-      st=$(lc_pfield "$id" state)
+      st=connected; (( soak_state )) && st=$(lc_pfield "$id" state)
       if [[ $st != connected ]]; then lc_fail "soak probe $t: profile $id is '$st', not connected"; broke=1; continue; fi
       lc_ping_clean "$(lc_target_for "$id" PING_TARGETS)" 3 || { lc_fail "soak probe $t: ping through $id lost packets"; broke=1; }
     done

@@ -78,9 +78,11 @@ write_procs() {   # hostpid id...
 world_up()   { write_status p1:connected p2:connected; write_procs "${1:-200}" p1 p2; }
 world_down() { write_status p1:disconnected p2:disconnected; write_procs "${1:-200}"; }
 bump_rekeys() { local f="$SHIM_STATE/out/rekeys"; local n; n=$(grep -o '[0-9]*' "$f" | head -1); print "child_rekeys local=$(( n + 1 )) remote=0" > "$f"; }
-set_version() {   # build
+set_version() {   # host build; the provider's build differs (host + 8), as in a real release
+  local pb=$(( $1 + 8 )) xi="$FAKE_APP/Contents/Library/SystemExtensions/t.systemextension/Contents/Info.plist"
   plutil -replace CFBundleVersion -string "$1" "$FAKE_APP/Contents/Info.plist"
-  print "*	*	$BID.provider (1.2.2/$1)	OFTCTunnel	[activated enabled]" > "$SHIM_STATE/out/ext"
+  mkdir -p "${xi:h}"; plutil -create xml1 "$xi"; plutil -insert CFBundleVersion -string "$pb" "$xi"
+  print "*	*	$BID.provider (1.2.2/$pb)	OFTCTunnel	[activated enabled]" > "$SHIM_STATE/out/ext"
   print "*	*	$BID.provider (1.2.2/41)	OFTCTunnel	[terminated waiting to uninstall on reboot]" >> "$SHIM_STATE/out/ext"
 }
 
@@ -299,6 +301,12 @@ eq "S1 good world" "$RC" 0; has "S1 connected" "$OUT" "PASS profile p1 state (= 
 has "S1 tcp" "$OUT" "PASS TCP connect through p1"; has "S1 child rekey" "$OUT" "PASS CHILD_SA rekey probe p1"; has "S1 ike rekey" "$OUT" "PASS IKE_SA rekey probe p2"
 has "S1 counters" "$OUT" "PASS rekey counters increased for p1 (1 -> 2)"; has "S1 soak" "$OUT" "PASS soak: 2 probes"
 has "S1 transport inferred, not claimed" "$OUT" "inferred"; has "S1 supervisors unchanged" "$OUT" "PASS supervisors unchanged across S1"
+# transport inference: a long netstat with the 4443 socket late in it (an early ESTABLISHED line made grep -q quit while print was still writing; pipefail then lost the match)
+reset_world; { print 'tcp4  0  0  10.0.0.2.50000  192.0.2.10.443  ESTABLISHED'; for i in {1..3000}; do print "tcp4  0  0  10.0.0.2.$((10000+i))  198.51.100.7.443  TIME_WAIT"; done; print 'tcp4  0  0  10.0.0.2.51000  203.0.113.5.4443  ESTABLISHED'; } > "$SHIM_STATE/out/netstat"; run s1-tunnels.sh
+has "S1 finds an established 4443 socket in a long netstat" "$OUT" "a TCP connection to port 4443 is established"
+# an older CLI cannot report state: say so, do not fail
+reset_world; rule '^(oftc|OFTCAgent) status --json' '' 2; run s1-tunnels.sh
+has "S1 old CLI: state skipped with a reason" "$OUT" "INFO SKIP profile p1 state: tunnel state cannot be read"; lacks "S1 old CLI: no state FAIL" "$OUT" "FAIL profile p1 state"
 reset_world; put ping_ok '10 packets transmitted, 0 packets received, 100.0% packet loss'; run s1-tunnels.sh
 eq "S1 fails on packet loss" "$RC" 1; has "S1 names the failed ping" "$OUT" "FAIL ping through p1 at 0% loss"
 reset_world; rule '^OFTCAgent .*rekey-once' passed1 0 ''; run s1-tunnels.sh
@@ -379,13 +387,17 @@ eq "S4 bad signature" "$RC" 1; has "S4 names it" "$OUT" "FAIL package signature 
 lacks "S4 never calls installer after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "installer -pkg"
 s4_world; put_n installer 1 'installer: The install was successful.'; rm -f "$SHIM_STATE/out/installer.1.rc"
 run s4-installer.sh --yes; has "S4 bad: installer ran with a tunnel up" "$OUT" "FAIL installer exit status is nonzero (refused)"
+s4_world; rule '^(oftc|OFTCAgent) status --json' '' 2; run s4-installer.sh --yes
+has "S4 old CLI: guard test skipped with a reason" "$OUT" "INFO SKIP guard test: tunnel state cannot be read"; lacks "S4 old CLI: not a FAIL" "$OUT" "FAIL guard test"
+s4_world; put_n installer 2 'installer: The upgrade was successful.'; run s4-installer.sh --yes
+has "S4 accepts 'The upgrade was successful'" "$OUT" "PASS installer says it succeeded"; has "S4 waits on the provider build, not the host's" "$OUT" "provider build 50"
 s4_world; write_status p1:disconnected p2:disconnected; run s4-installer.sh --yes
 has "S4 bad: guard needs a tunnel" "$OUT" "FAIL guard test needs a connected tunnel"
 s4_world; rule '^pgrep -f ' '' 0; run s4-installer.sh --yes
 has "S4 bad: host service trips the preinstall guard" "$OUT" "FAIL a process still matches the preinstall guard"
 s4_world; rule '^OFTCAgent activate' act 0; put act 'macOS approval required for com.chris.openforticlient.oftc.provider'
 rm -f "$SHIM_STATE/out/installer.1.rc"; put_n installer 1 'installer: The install was successful.'
-rule '^installer' installer 0 'plutil -replace CFBundleVersion -string 42 "$FAKE_APP/Contents/Info.plist"; write_procs 201'
+rule '^installer' installer 0 'plutil -replace CFBundleVersion -string 42 "$FAKE_APP/Contents/Info.plist"; plutil -replace CFBundleVersion -string 50 "$FAKE_APP"/Contents/Library/SystemExtensions/t.systemextension/Contents/Info.plist; write_procs 201'
 run s4-installer.sh --yes --skip-guard
 has "S4 asks a human for approval when activate says so" "$OUT" "approval requested: yes"; has "S4 approval human act" "$OUT" "HUMAN >>> ACTION REQUIRED (one act): approve the OFTC Network Extension"
 

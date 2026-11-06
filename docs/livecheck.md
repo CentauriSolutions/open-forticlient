@@ -125,6 +125,8 @@ Each stage takes a snapshot first and last and prints their diff.
 | **S6** `s6-failures.sh` | connect `FAIL_PROFILE`; `oftc status --json` gets `profiles[].error.code` equal to `FAIL_EXPECT_CODE`, `detail` containing `FAIL_EXPECT_DETAIL`, state `attention`, no IPv4 address in the detail, no `psk` in the document; `disconnect` clears the error | SSO for that profile |
 | **S7** `s7-screenshots.sh` | numbered `screencapture -x` images in `<run>/shots/` at baseline, popover with tunnels up, popover after `disconnect`, popover after reconnect. The popover opening is observed as a change in the screen region under the menu bar. | open the menu popover (once); SSO on the reconnect |
 
+When the CLI cannot report state (an older build has no `status --json`), S1 and S4 print `INFO SKIP ... tunnel state cannot be read` for the state-dependent checks instead of failing; a `FAIL` means the state was readable and wrong. S4 waits for the extension at the *provider* build read from the bundled extension, which is not the host build, and accepts either "The install was successful" or "The upgrade was successful".
+
 `lc_shot name` (in `lib.sh`) takes the same numbered screenshots from any stage.
 
 ### Setting up S6
