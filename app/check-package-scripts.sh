@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Offline checks of the installer scripts against a temporary tree.
+# Offline checks of the installer's postinstall cleanup against a temporary tree.
 # It never touches /Applications, the user session, launchd or the real system:
 # OFTC_POSTINSTALL_ROOT makes the script stop after the cleanup.
 set -euo pipefail
@@ -63,4 +63,25 @@ run "$r"; [[ ! -e "$r/Applications/OFTC.app" ]] || fail 'old OFTC.app remained'
 r="$tmp/oftc-foreign"; fake_bundle "$r/Applications/OFTC.app" com.example.other
 run "$r"; [[ -d "$r/Applications/OFTC.app" ]] || fail 'removed an OFTC.app that is not ours'
 
-print 'postinstall cleanup checks passed'
+# 6. The installer's "an OFTC VPN is active" test (Distribution.xml checkUpdate) sees
+# every profile's VPN entry, not just one named "OFTC VPN". Its shell command is
+# run with scutil replaced by canned lists.
+cmd=$(python3 -I - "$root/package-resources/Distribution.xml" <<'PY'
+import re, sys
+m = re.search(r"system\.run\('/bin/sh', '-c',\s*'(.*?)'\);", open(sys.argv[1]).read(), re.S)
+print(m.group(1))
+PY
+)
+[[ "$cmd" == '/usr/sbin/scutil --nc list'* ]] || fail 'could not extract the checkUpdate command'
+vpn_list() { printf '%s\n' "* ($1) 0000 VPN (com.chris.openforticlient.oftc) \"$2\" [VPN:com.chris.openforticlient.oftc]" \
+    '* (Connected) 1111 VPN (com.example.other) "Other VPN" [VPN]' > "$tmp/nc-list"; }
+guard() { sh -c "${cmd/\/usr\/sbin\/scutil --nc list/cat $tmp/nc-list}" >/dev/null 2>&1; }
+for row in 'Disconnected|OFTC VPN|0' 'Connected|OFTC VPN|10' 'Connecting|OFTC VPN (lab)|10' 'Reasserting|Team|10'; do
+    parts=("${(@s:|:)row}"); vpn_list "$parts[1]" "$parts[2]"
+    rc=0; guard || rc=$?
+    [[ $rc == $parts[3] ]] || fail "checkUpdate for '$row' exited $rc"
+done
+printf '%s\n' '* (Connected) 1111 VPN (com.example.other) "Other VPN" [VPN]' > "$tmp/nc-list"
+rc=0; guard || rc=$?; [[ $rc == 0 ]] || fail 'checkUpdate blocked on another vendor VPN'
+
+print 'installer script checks passed'
