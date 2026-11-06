@@ -37,10 +37,37 @@ zsh app/gate-build.sh   # fresh /private/tmp/oftc-build-gate-*, sign, notarize; 
 It uses the same environment as `release.sh` (`~/.config/oftc/release.env`), needs no
 installer identity, and installs nothing. Afterwards run `zsh app/release-dev-assets.sh`.
 
+## Version policy
+
+macOS moves a system extension forward only. It will not replace an activated
+provider with one whose version is not higher, and a rollback is not a downgrade: a
+rollback build must be numbered **higher than the build it replaces**, which is higher
+than every build ever activated.
+
+- `app/Provider/Info.plist` (`CFBundleVersion`, and `CFBundleShortVersionString`)
+  must be higher than every provider build activated on any maintained Mac.
+  `app/provider-version-floor` records that highest build and version (36 / 1.0.13:
+  the dev Mac's gate builds 1.0.8/31, 1.0.10/33 and 1.0.13/36 came from local
+  uncommitted plist bumps, while `main` still said 1.0.5/29).
+- `app/check-versions.sh` fails unless the provider is above that floor. `release.sh`
+  runs it first and CI runs it in the lint job.
+- Gate builds (`app/gate-build.sh`) do not bump anything. When a gate needs a newer
+  provider than `main` has, bump `app/Provider/Info.plist` locally, uncommitted, to a
+  build above everything activated so far. Once such a build is activated, raise
+  `app/provider-version-floor` to it in a PR before the next release; the check then
+  keeps `main` from shipping below it.
+- The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
+  update notice use it. It is not subject to the extension rule.
+- The first generally available release is 1.3.0, host build 42, provider build 50. The
+  host continues from 1.2.2/41 (the last shipped host, so the update notice sees an
+  upgrade). The provider takes 1.3.0 to match the product and build 50, which is above
+  the floor of 36 with room for further local gate bumps before release.
+
 ## Cutting a release
 
 1. Bump the version in `app/Host/Info.plist` (`CFBundleShortVersionString`,
-   `CFBundleVersion`) and, if the provider changed, `app/Provider/Info.plist`.
+   `CFBundleVersion`) and, if the provider changed, `app/Provider/Info.plist`, keeping
+   the provider above `app/provider-version-floor` (see Version policy).
    Scripts read the version from there; nothing else needs editing.
 2. Update `docs/` and the update-feed expectations if behaviour changed, commit, and
    merge to `main`.
