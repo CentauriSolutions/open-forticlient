@@ -47,6 +47,12 @@ pub enum ErrorCode {
     TunnelsActive,
     Busy,
     UnknownOp,
+    /// The arguments of a known op are missing or malformed (4.7: added by PR 3).
+    BadRequest,
+    /// A profile file or path the user named cannot be used.
+    InvalidFile,
+    /// The client asked for the op to stop (`cancel`).
+    Cancelled,
     #[serde(other)]
     Internal,
 }
@@ -57,17 +63,18 @@ impl ErrorCode {
     /// mismatch, `6` busy, `1` anything else.
     pub fn exit(self) -> i32 {
         match self {
-            ErrorCode::UnknownOp => 2,
+            ErrorCode::UnknownOp | ErrorCode::BadRequest => 2,
             ErrorCode::NotConfigured
             | ErrorCode::AlreadyConfigured
             | ErrorCode::MigrationNeeded
-            | ErrorCode::TunnelsActive => 3,
+            | ErrorCode::TunnelsActive
+            | ErrorCode::InvalidFile => 3,
             ErrorCode::ApprovalRequired | ErrorCode::PskUnavailable => 4,
             ErrorCode::AgentUnavailable
             | ErrorCode::HostUnavailable
             | ErrorCode::UnsupportedSchema => 5,
             ErrorCode::Busy => 6,
-            ErrorCode::Internal => 1,
+            ErrorCode::Internal | ErrorCode::Cancelled => 1,
         }
     }
 }
@@ -77,6 +84,10 @@ pub struct ErrorBody {
     pub code: ErrorCode,
     pub detail: String,
     pub exit: i32,
+    /// The profile the failure is about, for `already_configured` (the UI offers to
+    /// select it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 impl ErrorBody {
@@ -85,7 +96,13 @@ impl ErrorBody {
             code,
             detail: detail.to_owned(),
             exit: code.exit(),
+            profile_id: None,
         }
+    }
+
+    pub fn for_profile(mut self, id: &str) -> ErrorBody {
+        self.profile_id = Some(id.to_owned());
+        self
     }
 }
 
@@ -308,6 +325,179 @@ pub enum Event {
     },
 }
 
+/// `connect` and `disconnect`: one profile, or all of them without `profile`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ProfileArgs {
+    pub profile: Option<String>,
+}
+
+/// `remove`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RemoveArgs {
+    pub profile: String,
+}
+
+/// `export`: the named profiles (all without `profiles`), written to `path`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ExportArgs {
+    pub profiles: Option<Vec<String>>,
+    pub path: String,
+}
+
+/// `import_preview` and `import`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PathArgs {
+    pub path: String,
+}
+
+/// One profile of a `.oftc` file as `import_preview` shows it. The PSK is never part
+/// of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewItem {
+    pub name: String,
+    pub gateway: String,
+    pub saml_port: u32,
+    pub transport: Transport,
+    pub already_configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewResult {
+    pub profiles: Vec<PreviewItem>,
+}
+
+/// The `result` of `import`: the ids of the profiles this call created.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportResult {
+    pub added: Vec<String>,
+}
+
+/// Where `add_profile` gets the PSK. A typed PSK is stored first by the
+/// `provision-psk --stdin` child (`saved`); it never crosses the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PskSource {
+    Saved,
+    Forticlient,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AddProfileArgs {
+    pub gateway: String,
+    pub saml_port: u32,
+    pub transport: Transport,
+    pub name: Option<String>,
+    pub psk_source: PskSource,
+    /// The FortiClient profile to take the PSK from, for `forticlient`.
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddProfileResult {
+    pub profile_id: String,
+}
+
+/// One importable FortiClient profile. Never carries its PSK.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceInfo {
+    pub label: String,
+    pub gateway: String,
+    pub saml_port: u32,
+    pub already_configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourcesResult {
+    pub sources: Vec<SourceInfo>,
+}
+
+/// `settings_set`: `menu_login` and `auto_update` take a boolean, `auto_start:<id>`
+/// too.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SettingsArgs {
+    pub key: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateOffer {
+    pub version: String,
+    pub page: String,
+}
+
+/// The `result` of `check_update`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateResult {
+    pub available: Option<UpdateOffer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pane {
+    Extensions,
+    LoginItems,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PaneArgs {
+    pub pane: Pane,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CancelArgs {
+    pub target: u64,
+}
+
+/// The stages of `add_profile` and `component_update`; the UI owns the wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    Keychain,
+    Profile,
+    ExtensionApproval,
+    VpnEntry,
+    #[serde(other)]
+    Other,
+}
+
+/// `running` has begun, `waiting` needs the user (not a failure), `done` finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Running,
+    Waiting,
+    Done,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A progress line of request `id` (4.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    pub id: u64,
+    pub event: ProgressTag,
+    pub step: Step,
+    pub state: StepState,
+}
+
+/// The constant `"progress"` of a progress line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressTag {
+    Progress,
+}
+
+/// A progress line, without the newline.
+pub fn progress_line(id: u64, step: Step, state: StepState) -> String {
+    serde_json::to_string(&Progress {
+        id,
+        event: ProgressTag::Progress,
+        step,
+        state,
+    })
+    .unwrap_or_default()
+}
+
 #[derive(Serialize)]
 struct Ok<'a, T: Serialize> {
     id: u64,
@@ -362,6 +552,9 @@ mod tests {
             (TunnelsActive, "tunnels_active", 3),
             (Busy, "busy", 6),
             (UnknownOp, "unknown_op", 2),
+            (BadRequest, "bad_request", 2),
+            (InvalidFile, "invalid_file", 3),
+            (Cancelled, "cancelled", 1),
             (Internal, "internal", 1),
         ] {
             assert_eq!(code.exit(), exit, "{name}");

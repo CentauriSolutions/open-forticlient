@@ -128,6 +128,19 @@ failures print `host_unavailable: <reason>` and exit 1. `host restart` runs
 `OFTC host restarted` (exit 0) or `Could not restart OFTC host; is its service
 registered?` (exit 1, also when no host plist is registered yet).
 
+The socket's ops (`docs/ui-edge.md` 4.3) and these verbs share their internals, so they
+cannot disagree: `stop` and `erase-profile` and the `disconnect` and `remove` ops run
+`vpn::stop_profile` and `vpn::erase_profiles`; `install-config` and `add_profile` run
+`vpn::install_profile`; `export-profiles` and the `export` op run `commands::export_bundle`;
+`import-profiles` and the `import` op run `commands::import_bundle`; `set-autostart` and
+`settings_set auto_start:<id>` run `commands::change_autostart`; `save-profile` and
+`add_profile` run `commands::save_profile`. Each returns a typed result or a
+`typed::Failure` (a code, the text the verb prints, the verb's exit code, and for
+`already_configured` the profile's id); the verb prints it and the op replies with it.
+No verb text, exit code or usage line changed. `connect`, `add_profile`'s steps in
+order, `list_sources` and `check_update` have no verb: the CLI's `connect` starts
+`supervise-profile` itself, and the host does the same through `ProcessSpawner`.
+
 `login-settings`, `unregister-menu-login`, `host serve` and `host restart` are not in
 the usage text (the first two never were); the verb table marks them hidden so the
 text stays byte-for-byte, and a test pins it.

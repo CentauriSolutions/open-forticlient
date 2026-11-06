@@ -73,7 +73,7 @@ impl AgentKind {
 }
 
 /// `launchctl`, for the two calls the agent needs.
-pub trait Launchctl {
+pub trait Launchctl: Send + Sync {
     /// `launchctl enable gui/<uid>/<label>`; true when it exited 0.
     fn enable(&self, label: &str) -> bool;
     /// `launchctl disable gui/<uid>/<label>`; true when it exited 0. The supervisor

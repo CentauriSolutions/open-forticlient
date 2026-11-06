@@ -11,6 +11,10 @@ pub mod frame;
 pub mod hub;
 pub mod info;
 pub mod listener;
+pub mod ops;
+pub mod ops_setup;
+pub mod ops_system;
+pub mod ops_update;
 pub mod session;
 pub mod state;
 pub mod traffic;
@@ -48,6 +52,8 @@ pub struct Services<'a> {
     pub now: &'a (dyn Fn() -> SystemTime + Sync),
     /// How long a new connection has, in total, to say `hello`.
     pub hello_timeout: Duration,
+    /// What the ops beyond `status` reach.
+    pub ops: ops::OpsDeps<'a>,
 }
 
 /// How often the provider is asked for a traffic reading while someone listens.
@@ -84,11 +90,14 @@ pub fn serve(
     let hub = Hub::new();
     let (wake, woken) = mpsc::channel();
     let collector = Collector::new(services, &hub, wake.clone());
+    let busy = ops::Busy::default();
     let shared = Shared {
         hub: &hub,
         collector: &collector,
         host: &services.host,
         hello_timeout: services.hello_timeout,
+        services,
+        busy: &busy,
     };
     let open: Mutex<HashMap<u64, UnixStream>> = Mutex::new(HashMap::new());
     let failed = AtomicBool::new(false);
@@ -240,6 +249,7 @@ pub fn run(
     extensions: &dyn ExtensionControl,
     login: &dyn LoginItems,
     signals: &dyn Signals,
+    ops: ops::OpsDeps,
 ) -> (String, i32) {
     use listener::StartError;
     signals.arm();
@@ -258,6 +268,7 @@ pub fn run(
         host: info::host_block(env.exe(), &env.provider_id()),
         now: &SystemTime::now,
         hello_timeout: Duration::from_secs(10),
+        ops,
     };
     let healthy = serve(
         &bound.listener,
@@ -274,7 +285,10 @@ pub fn run(
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_ops;
+
+#[cfg(test)]
+pub(super) mod tests {
     use super::*;
     use crate::profile::testutil::TempDir;
     use crate::profile::{Profile, Transport};
@@ -282,7 +296,20 @@ mod tests {
     use crate::supervisor::ManualSignals;
     use oftc_apple::login::{LoginItem, LoginStatus, MockLoginItems};
     use oftc_apple::manager::{MockEntry, MockVpn, VpnStatus};
-    use oftc_apple::sysext::{ExtensionProperties, MockExtensions};
+    use crate::agent::RecordingLaunchctl;
+    use crate::commands::{FortiClientProfile, FortiClientProfiles};
+    use crate::keychain::{Keychain, MemoryKeychain};
+    use crate::registry::FortiClientSource;
+    use ops::OpsDeps;
+    use ops_system::{SettingsOpener, Spawner};
+    use ops_update::UpdateSource;
+    use oftc_apple::error::AppleError;
+    use oftc_apple::sysext::{
+        EventSink, ExtensionControl, ExtensionEvent, ExtensionProperties, Finish, MockExtensions,
+    };
+    use oftc_ui_edge::{Pane, UpdateOffer};
+    use std::sync::{Condvar, Mutex as StdMutex};
+    use zeroize::Zeroizing;
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Write};
     use std::path::{Path, PathBuf};
@@ -294,25 +321,150 @@ mod tests {
 
     /// The world the server sees: one profile ("lab") with a VPN entry, a bundle at
     /// build 24, and an extension at build 24 enabled.
-    struct Rig {
-        dir: TempDir,
-        env: HostEnv,
-        vpn: MockVpn,
-        entry: Arc<MockEntry>,
-        extensions: MockExtensions,
-        login: MockLoginItems,
+    pub(super) struct Rig {
+        pub dir: TempDir,
+        pub env: HostEnv,
+        pub vpn: MockVpn,
+        pub entry: Arc<MockEntry>,
+        pub extensions: Gated,
+        pub login: MockLoginItems,
+        pub keychain: MemoryKeychain,
+        pub forticlient: Forti,
+        pub launchctl: RecordingLaunchctl,
+        pub spawner: Spawned,
+        pub opener: Opened,
+        pub feed: Feed,
+        /// Runs at every `pause` of an op (`remove` waiting for the tunnel).
+        pub on_pause: PauseHook,
+        pause: Box<dyn Fn(Duration) + Sync>,
+    }
+
+    pub(super) type PauseHook = Arc<StdMutex<Option<Box<dyn Fn() + Send>>>>;
+
+    /// A system extension whose `activate` can be held open, as one waiting on the user.
+    pub(super) struct Gated {
+        pub mock: MockExtensions,
+        /// While true, `activate` blocks after raising `NeedsApproval`.
+        pub hold: StdMutex<bool>,
+        pub changed: Condvar,
+        pub entered: StdMutex<u32>,
+    }
+
+    impl Gated {
+        pub fn hold(&self) {
+            *self.hold.lock().unwrap() = true;
+        }
+        pub fn release(&self) {
+            *self.hold.lock().unwrap() = false;
+            self.changed.notify_all();
+        }
+        /// Waits until an `activate` is blocked.
+        pub fn wait_entered(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while *self.entered.lock().unwrap() == 0 {
+                assert!(Instant::now() < deadline, "activate never started");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl ExtensionControl for Gated {
+        fn activate(&self, id: &str, events: EventSink) -> Result<Finish, AppleError> {
+            let mut held = self.hold.lock().unwrap();
+            if *held {
+                events(ExtensionEvent::NeedsApproval);
+                *self.entered.lock().unwrap() += 1;
+                while *held {
+                    held = self.changed.wait(held).unwrap();
+                }
+            }
+            drop(held);
+            self.mock.activate(id, events)
+        }
+        fn deactivate(&self, id: &str, events: EventSink) -> Result<Finish, AppleError> {
+            self.mock.deactivate(id, events)
+        }
+        fn properties(
+            &self,
+            id: &str,
+            timeout: Duration,
+        ) -> Result<Vec<ExtensionProperties>, AppleError> {
+            self.mock.properties(id, timeout)
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct Spawned {
+        pub ids: StdMutex<Vec<String>>,
+        pub fail: AtomicBool,
+    }
+
+    impl Spawner for Spawned {
+        fn spawn_supervisor(&self, id: &str) -> std::io::Result<()> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("no"));
+            }
+            self.ids.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct Opened(pub StdMutex<Vec<Pane>>);
+
+    impl SettingsOpener for Opened {
+        fn open(&self, pane: Pane) -> bool {
+            self.0.lock().unwrap().push(pane);
+            true
+        }
+    }
+
+    pub(super) struct Feed(pub StdMutex<Result<Option<UpdateOffer>, ops_update::FeedUnreachable>>);
+
+    impl UpdateSource for Feed {
+        fn latest(&self, _: &str) -> Result<Option<UpdateOffer>, ops_update::FeedUnreachable> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// FortiClient with one importable profile, "Example Office", whose PSK is
+    /// `FORTI_PSK`.
+    pub(super) struct Forti;
+
+    pub(super) const FORTI_PSK: &str = "forti-secret-psk";
+
+    impl FortiClientProfiles for Forti {
+        fn list(&self) -> Vec<FortiClientSource> {
+            vec![FortiClientSource {
+                label: "Example Office".into(),
+                gateway: "vpn.example.com".into(),
+                saml_port: 9443,
+            }]
+        }
+        fn import(&self, _: &str) -> Option<FortiClientProfile> {
+            None
+        }
+        fn psk(&self, name: &str, gateway: &str) -> Option<Zeroizing<Vec<u8>>> {
+            (name == "Example Office" && gateway == "vpn.example.com")
+                .then(|| Zeroizing::new(FORTI_PSK.as_bytes().to_vec()))
+        }
     }
 
     impl Rig {
-        fn new() -> Rig {
+        pub fn new() -> Rig {
             let dir = TempDir::new("serve");
             let env = HostEnv::new("a", &dir.0.join("h")).unwrap();
             let lab = Profile::new("lab.example.com", 8443, Transport::Tcp, Some("Lab"), None);
             registry::add(env.root(), &lab.unwrap(), None).unwrap();
             let vpn = MockVpn::new();
             let entry = vpn.add_entry(&env.provider_id(), Some("lab"), true);
-            let extensions = MockExtensions::new();
-            extensions.set_properties(
+            let extensions = Gated {
+                mock: MockExtensions::new(),
+                hold: StdMutex::new(false),
+                changed: Condvar::new(),
+                entered: StdMutex::new(0),
+            };
+            extensions.mock.set_properties(
                 &env.provider_id(),
                 Ok(vec![ExtensionProperties {
                     short_version: "1.0".into(),
@@ -326,6 +478,10 @@ mod tests {
             login.set_status(&LoginItem::MainApp, LoginStatus::Enabled);
             let host_agent = LoginItem::Agent(crate::agent::HOST_PLIST.to_owned());
             login.set_status(&host_agent, LoginStatus::RequiresApproval);
+            let on_pause: PauseHook = Arc::new(StdMutex::new(None));
+            let hook = on_pause.clone();
+            let keychain = MemoryKeychain::default();
+            keychain.set("lab.example.com", b"lab-secret-psk").unwrap();
             Rig {
                 dir,
                 env,
@@ -333,10 +489,34 @@ mod tests {
                 entry,
                 extensions,
                 login,
+                keychain,
+                forticlient: Forti,
+                launchctl: RecordingLaunchctl::new(true),
+                spawner: Spawned::default(),
+                opener: Opened::default(),
+                feed: Feed(StdMutex::new(Ok(None))),
+                on_pause,
+                pause: Box::new(move |_| {
+                    if let Some(hook) = hook.lock().unwrap().as_ref() {
+                        hook();
+                    }
+                }),
             }
         }
 
-        fn services(&self) -> Services<'_> {
+        pub fn ops(&self) -> OpsDeps<'_> {
+            OpsDeps {
+                keychain: &self.keychain,
+                forticlient: &self.forticlient,
+                launchctl: &self.launchctl,
+                spawner: &self.spawner,
+                updates: &self.feed,
+                opener: &self.opener,
+                pause: &*self.pause,
+            }
+        }
+
+        pub fn services(&self) -> Services<'_> {
             Services {
                 env: &self.env,
                 vpn: &self.vpn,
@@ -349,12 +529,13 @@ mod tests {
                 },
                 now: &|| SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_794_800),
                 hello_timeout: Duration::from_millis(400),
+                ops: self.ops(),
             }
         }
 
         /// Runs the server on a socket in the rig's directory for the length of `body`,
         /// with `peer` standing in for the kernel's credential read.
-        fn serving<R>(
+        pub fn serving<R>(
             &self,
             peer: &(dyn Fn(&UnixStream) -> Option<u32> + Sync),
             body: impl FnOnce(&Path) -> R,
@@ -376,17 +557,19 @@ mod tests {
         }
     }
 
-    fn me(_: &UnixStream) -> Option<u32> {
+    pub(super) fn me(_: &UnixStream) -> Option<u32> {
         Some(501)
     }
 
-    struct Client {
-        writer: UnixStream,
-        reader: BufReader<UnixStream>,
+    pub(super) struct Client {
+        pub writer: UnixStream,
+        pub reader: BufReader<UnixStream>,
+        /// Every line received, as sent, for checks that something never appears.
+        pub log: Vec<String>,
     }
 
     impl Client {
-        fn connect(socket: &Path) -> Client {
+        pub fn connect(socket: &Path) -> Client {
             let stream = UnixStream::connect(socket).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
@@ -394,36 +577,40 @@ mod tests {
             Client {
                 reader: BufReader::new(stream.try_clone().unwrap()),
                 writer: stream,
+                log: Vec::new(),
             }
         }
 
-        fn send(&mut self, line: &str) {
+        pub fn send(&mut self, line: &str) {
             // The server may already have closed on us; that shows in the next read.
             let _ = self.writer.write_all(format!("{line}\n").as_bytes());
         }
 
         /// The next line, or `None` at end of stream.
-        fn next(&mut self) -> Option<Value> {
+        pub fn next(&mut self) -> Option<Value> {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) | Err(_) => None,
-                Ok(_) => Some(serde_json::from_str(&line).unwrap()),
+                Ok(_) => {
+                    self.log.push(line.clone());
+                    Some(serde_json::from_str(&line).unwrap())
+                }
             }
         }
 
-        fn call(&mut self, line: &str) -> Value {
+        pub fn call(&mut self, line: &str) -> Value {
             self.send(line);
             self.next().expect("a reply")
         }
 
-        fn hello(&mut self) -> Value {
+        pub fn hello(&mut self) -> Value {
             self.call(r#"{"id":1,"op":"hello","protocol":[1,1],"client":{"kind":"test","version":"0","build":"0"}}"#)
         }
     }
 
     /// The `status` result once the background component check has answered; the
     /// sequence number is only deterministic from then on.
-    fn settled(client: &mut Client) -> Value {
+    pub(super) fn settled(client: &mut Client) -> Value {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let status = client.call(r#"{"id":90,"op":"status"}"#)["result"].clone();
@@ -891,6 +1078,7 @@ mod tests {
                     &rig.extensions,
                     &rig.login,
                     &signals,
+                    rig.ops(),
                 )
             });
             let _stop = OnDrop(|| signals.raise());
@@ -907,7 +1095,8 @@ mod tests {
                     &rig.vpn,
                     &rig.extensions,
                     &rig.login,
-                    &second
+                    &second,
+                    rig.ops()
                 ),
                 (String::new(), 0)
             );
@@ -926,10 +1115,11 @@ mod tests {
         let home: PathBuf = dir.0.join("u".repeat(60));
         let env = HostEnv::new("com.example.oftc", &home).unwrap();
         let signals = ManualSignals::default();
+        let rig = Rig::new();
         let (vpn, extensions, login) =
             (MockVpn::new(), MockExtensions::new(), MockLoginItems::new());
         assert_eq!(
-            run(&env, env.root(), &vpn, &extensions, &login, &signals),
+            run(&env, env.root(), &vpn, &extensions, &login, &signals, rig.ops()),
             ("host_unavailable: path too long".to_owned(), 1)
         );
         assert!(!home.exists());
