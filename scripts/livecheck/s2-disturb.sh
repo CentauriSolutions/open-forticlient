@@ -1,14 +1,18 @@
 #!/bin/zsh
 # S2 disturbance tests: network drop, sleep and wake, deliberate stop. Needs the tunnels up
 # (run S1 first). Each test ends by asserting recovery and traffic, then restoring state.
-#   zsh s2-disturb.sh [--only drop|sleep|stop] [--no-restore]
+#   (disturbs the network and sleeps the Mac: needs --yes)
+#   zsh s2-disturb.sh --yes [--only drop|sleep|stop] [--no-restore]
 set -u
 setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s2-disturb.sh
-LC_STAGE_USAGE='[--only drop|sleep|stop] [--no-restore]'
+LC_STAGE_USAGE='--yes [--only drop|sleep|stop] [--no-restore]'
+LC_STAGE_FLAGS=(--no-restore)
+LC_STAGE_OPTS=(--only)
 lc_init S2 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
+lc_need_yes
 only=''
 (( ${LC_ARGS[(Ie)--only]} )) && only=${LC_ARGS[$(( ${LC_ARGS[(Ie)--only]} + 1 ))]}
 restore=1
@@ -20,11 +24,17 @@ want() { [[ -z $only || $only == "$1" ]]; }
 dropped_how=''
 s2_restore_network() {
   [[ -n $dropped_how ]] || return 0
+  local manual=''
   case $dropped_how in
-    service) lc_run sudo -n networksetup -setnetworkserviceenabled "$NETWORK_SERVICE" on ;;
-    wifi) lc_run networksetup -setairportpower "$WIFI_DEVICE" on ;;
+    service) manual="sudo networksetup -setnetworkserviceenabled \"$NETWORK_SERVICE\" on"; lc_run sudo -n networksetup -setnetworkserviceenabled "$NETWORK_SERVICE" on ;;
+    wifi) manual="networksetup -setairportpower $WIFI_DEVICE on"; lc_run networksetup -setairportpower "$WIFI_DEVICE" on ;;
   esac
-  dropped_how=''
+  if (( LC_RC != 0 )); then
+    lc_fail "could not restore the network (exit $LC_RC)"
+    lc_emit "RESTORE" "MANUALLY: $manual"
+  else
+    dropped_how=''
+  fi
 }
 lc_on_exit s2_restore_network
 
@@ -109,17 +119,18 @@ fi
 if want sleep; then
   lc_step "sleep and wake"
   wake_at=$(date -v+$(( SLEEP_SECONDS + 15 ))S '+%m/%d/%y %H:%M:%S')
-  t0=$(date +%s)
   lc_sudo pmset schedule wake "$wake_at"
   expect_rc "scheduled wake" "$LC_RC" 0
   lc_run pmset sleepnow
-  # The script resumes after wake. Elapsed time proves the Mac really slept.
-  t1=$(date +%s)
+  # pmset returns before the Mac suspends and the script freezes with it: a jump in the
+  # wall clock between one-second ticks is the evidence that it really slept.
   if lc_live; then
-    (( t1 - t0 >= SLEEP_SECONDS - 5 )) && lc_pass "Mac slept ($(( t1 - t0 ))s wall clock >= $(( SLEEP_SECONDS - 5 ))s)" || lc_fail "Mac did not sleep long enough ($(( t1 - t0 ))s)"
-  fi
+    if lc_detect_sleep $(( SLEEP_SECONDS + 180 )); then
+      (( LC_SLEPT >= SLEEP_SECONDS - 5 )) && lc_pass "Mac slept (clock jumped ${LC_SLEPT}s, wanted >= $(( SLEEP_SECONDS - 5 ))s)" || lc_fail "Mac slept only ${LC_SLEPT}s, wanted >= $(( SLEEP_SECONDS - 5 ))s"
+    else lc_fail "no sleep detected within $(( SLEEP_SECONDS + 180 ))s of pmset sleepnow"; fi
+  else lc_dry "would watch for a wall-clock jump of at least $(( SLEEP_SECONDS - 5 ))s"; fi
   lc_sudo pmset schedule cancel wake "$wake_at"
-  lc_run pmset -g log
+  lc_run -q pmset -g log
   lc_live && lc_info "last wake lines: $(print -r -- "$LC_OUT" | grep -E ' Wake ' | tail -2 | tr '\n' ';' | cut -c1-200)"
   reconnect_with_sso
   assert_back "after wake"
@@ -128,7 +139,7 @@ fi
 if want stop; then
   lc_step "deliberate stop"
   mark=$(lc_log_lines "${${=PROFILES}[1]}")
-  lc_run "$cli" disconnect
+  lc_run -q "$cli" disconnect ${=PROFILES}
   wait_for "every profile reports disconnected" 60 3 all_stopped
   lc_info "holding ${DISCONNECT_WAIT}s: nothing may reconnect and no supervisor may remain"
   if lc_live; then
@@ -145,7 +156,7 @@ if want stop; then
     lc_dry "would hold ${DISCONNECT_WAIT}s asserting disconnected, no supervisor, no new attempt"
   fi
   if (( restore )); then
-    lc_run "$cli" connect
+    lc_run -q "$cli" connect ${=PROFILES}
     for id in ${=PROFILES}; do
       human "complete the browser sign-in for $id" "profile $id reports connected" "$SSO_TIMEOUT" lc_is_connected "$id"
     done

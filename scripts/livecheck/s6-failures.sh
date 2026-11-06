@@ -8,7 +8,7 @@ setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s6-failures.sh
 lc_init S6 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 cli=$(lc_cli)
 [[ -n $FAIL_PROFILE ]] || { lc_fail "FAIL_PROFILE is not configured (see docs/livecheck.md)"; exit 1; }
 has_error() { lc_refresh_status; [[ -n $(lc_pfield "$FAIL_PROFILE" error.code) ]]; }
@@ -20,7 +20,7 @@ lc_step "precondition: $FAIL_PROFILE is not connected"
 lc_live && { lc_is_connected "$FAIL_PROFILE" && { lc_fail "$FAIL_PROFILE is already connected"; exit 1; } || lc_pass "not connected"; }
 
 lc_step "connect the failing profile"
-lc_run "$cli" connect "$FAIL_PROFILE"
+lc_run -q "$cli" connect "$FAIL_PROFILE"
 human "complete the browser sign-in for $FAIL_PROFILE (the connection fails after it, on purpose)" "profiles[].error is set for $FAIL_PROFILE" 420 has_error
 if lc_live; then
   lc_refresh_status
@@ -37,7 +37,7 @@ else
 fi
 
 lc_step "clean up: disconnect clears the error"
-lc_run "$cli" disconnect "$FAIL_PROFILE"
+lc_run -q "$cli" disconnect "$FAIL_PROFILE"
 wait_for "error cleared and profile disconnected" 60 3 no_error
 lc_snapshot end
 lc_snapdiff "$snap_start" "$LC_SNAP"

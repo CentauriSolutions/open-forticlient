@@ -6,7 +6,7 @@ setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s3-host.sh
 lc_init S3 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 agent=$(lc_agent)
 label="$LC_BUNDLE_ID.host"
 target="gui/$(id -u)/$label"
@@ -37,13 +37,13 @@ else
 fi
 
 lc_step "registration"
-lc_run launchctl print "$target"
+lc_run -q launchctl print "$target"
 expect_rc "host service is loaded in the gui domain" "$LC_RC" 0
-lc_run launchctl list
+lc_run -q launchctl list
 lc_live && expect_eq "host label listed once by launchctl list" "$(print -r -- "$LC_OUT" | grep -c "$label")" 1
-lc_run launchctl print-disabled "gui/$(id -u)"
+lc_run -q launchctl print-disabled "gui/$(id -u)"
 lc_live && expect_not_contains "host label is not disabled" "$(print -r -- "$LC_OUT" | grep "$label")" "disabled"
-lc_run sudo -n sfltool dumpbtm
+lc_sudoq sfltool dumpbtm
 if lc_live; then
   if (( LC_RC == 0 )); then
     expect_eq "Login Items / BTM entries for the host label" "$(print -r -- "$LC_OUT" | grep -c "$label")" 1

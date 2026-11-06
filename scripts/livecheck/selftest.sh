@@ -11,11 +11,19 @@ set -u
 # ======================= shim mode: a fake command ========================================
 shim_main() {
   local name=$SHIM_NAME S=$SHIM_STATE call="$SHIM_NAME $*" i=0 line rx outn rc hook n=0
+  if [[ $name == date ]]; then   # passthrough, except `date +%s` jumps by the clock offset a hook sets
+    local d; d=$(/bin/date "$@")
+    if [[ "$*" == "+%s" ]]; then
+      if [[ -f $S/clock_pending ]]; then mv "$S/clock_pending" "$S/clock_offset"   # the call that sees the suspend: this one is still before it
+      elif [[ -f $S/clock_offset ]]; then d=$(( d + $(cat "$S/clock_offset") )); fi
+    fi
+    print -r -- "$d"; exit 0
+  fi
   print -r -- "$call" >> "$S/calls.log"
   # sudo -v / sudo -n <cmd>: run the rest through PATH, so it hits the shim too.
   if [[ $name == sudo ]]; then
     while [[ ${1:-} == -n ]]; do shift; done
-    [[ ${1:-} == -v ]] && exit 0
+    [[ ${1:-} == -v || ${1:-} == -k ]] && exit 0
     exec "$@"
   fi
   if [[ $name == ps ]]; then ps_table "$@"; exit 0; fi
@@ -96,7 +104,7 @@ export FAKE_APP="$T/Applications/Open Forticlient.app"
 export APP=$FAKE_APP
 mkdir -p "$SHIM_STATE/out" "$HOME/Library/LaunchAgents" "$TMPDIR" "$T/shims"
 for c in oftc OFTCAgent sudo launchctl systemextensionsctl scutil pmset networksetup hdiutil installer pkgutil spctl stapler codesign \
-         ping nc netstat ps pgrep shutdown screencapture osascript route sfltool xcrun ifconfig; do
+         ping nc netstat ps pgrep shutdown screencapture osascript route sfltool xcrun ifconfig date; do
   ln -s "$HERE/selftest.sh" "$T/shims/$c"
 done
 make_app() {   # the fake installed bundle; S5's uninstall hook deletes it
@@ -129,7 +137,7 @@ NETWORK_SERVICE=Test Wi-Fi
 DMG_PATH=$T/OFTC-test.dmg
 EXPECT_VERSION=1.2.2
 FAIL_PROFILE=p3
-SLEEP_SECONDS=0
+SLEEP_SECONDS=60
 DISCONNECT_WAIT=30
 BOGUS_KEY=ignored
 CFG
@@ -140,7 +148,7 @@ reset_world() {
   rm -rf "$SHIM_STATE/out" "$SHIM_STATE"/count.* "$SHIM_STATE/calls.log" "$HOME/Library/Logs" "$HOME/Library/Application Support" "$T/old" "$T/mnt"
   mkdir -p "$SHIM_STATE/out" "$HOME/Library/Logs/OFTC" "$HOME/Library/Application Support/$BID/profiles/p1"
   : > "$SHIM_STATE/calls.log"; : > "$SHIM_STATE/rules"
-  rm -f "$HOME/Library/LaunchAgents"/*.plist "$INSTALL_LOG"
+  rm -f "$HOME/Library/LaunchAgents"/*.plist "$INSTALL_LOG" "$SHIM_STATE/clock_offset" "$SHIM_STATE/clock_pending"
   make_app
   set_version 41 >/dev/null; put ext "$(grep activated "$SHIM_STATE/out/ext" | head -1)"
   world_up 200
@@ -176,6 +184,7 @@ reset_world() {
   rule '^OFTCAgent host restart' restarted 0
   rule '^OFTCAgent quit-menu' '' 0
   rule '^OFTCAgent activate' '' 0
+  rule '^pmset sleepnow' '' 0 'print 75 > "$SHIM_STATE/clock_pending"'
   rule '^hdiutil attach' '' 0 'touch "${@[-2]}/OFTC-1.2.2.pkg"'
   rule '^hdiutil detach' '' 0
   rule '^pkgutil --check-signature' sig 0
@@ -241,8 +250,8 @@ lib human; has "human asks once, marked" "$OUT" "HUMAN >>> ACTION REQUIRED (one 
 has "human timeout" "$OUT" "FAIL human act not observed within 10s: Y done"; has "human counted" "$OUT" "humans=2"
 lib dry; has "dry assert" "$OUT" "DRY  would assert"; has "dry human" "$OUT" "DRY  would ask a human"; has "dry counts" "$OUT" "pass=0 fail=0 humans=1"
 lib cfg "$LIVECHECK_CONFIG"; has "config parsed, spaces kept" "$OUT" "NS=Test Wi-Fi"; has "config profiles" "$OUT" "PROFILES=p1 p2"
-has "config unknown key ignored" "$OUT" "ignoring unknown key 'BOGUS_KEY'"; has "gateway scrubbed" "$OUT" "gateway=<gateway>"
-has "configured address scrubbed" "$OUT" "addr <addr> y"; lacks "no raw address in log" "$(cat "$T/libruns/lib.log")" "192.0.2.10"
+has "config unknown key ignored" "$OUT" "ignoring unknown key 'BOGUS_KEY'"; has "gateway scrubbed in the log" "$(cat "$T/libruns/lib.log")" "gateway=<gateway>"
+has "configured address scrubbed in the log" "$(cat "$T/libruns/lib.log")" "addr <addr> y"; lacks "no raw address in log" "$(cat "$T/libruns/lib.log")" "192.0.2.10"
 OUT=$(zsh -c "source '$HERE/s0-preflight.sh'" 2>&1); has "stage refuses to be sourced" "$OUT" "never sourced"
 
 # ======================= 2. snapshot and compare ======================================================
@@ -269,7 +278,7 @@ for st in s0-preflight s1-tunnels s2-disturb s3-host s4-installer s5-uninstall-r
   [[ -z $(ls "$TMPDIR/oftc-livecheck" 2>/dev/null) ]] && ok || bad "$st dry run created a run directory"
 done
 reset_world; run s2-disturb.sh --dry-run; has "S2 dry run names the human acts" "$OUT" "would ask a human"
-for st in s4-installer s5-uninstall-reboot; do
+for st in s2-disturb s4-installer s5-uninstall-reboot; do
   reset_world; run $st.sh; eq "$st refuses without --yes" "$RC" 3; has "$st says why" "$OUT" "--yes"; no_calls "$st refusal"
 done
 
@@ -302,30 +311,38 @@ reset_world; rule '^OFTCAgent .*rekey-once' passed1 0 'bump_rekeys'; rule '^ping
 put_n ping_ok 40 '10 packets transmitted, 9 packets received, 10.0% packet loss'; : # (soak failure covered by the loss test above)
 
 # S2 stop: good, then bad (a supervisor survives the stop)
-reset_world; run s2-disturb.sh --only stop --no-restore
+reset_world; run s2-disturb.sh --yes --only stop --no-restore
 eq "S2 stop good" "$RC" 0; has "S2 no reconnect" "$OUT" "PASS no reconnect during 30s"; has "S2 no supervisors" "$OUT" "PASS supervisor processes after the hold"
 has "S2 no new attempt" "$OUT" "PASS no new connection attempt after the stop"
-reset_world; rule '^oftc disconnect' '' 0 'write_status p1:disconnected p2:disconnected; write_procs 200 p1'; run s2-disturb.sh --only stop --no-restore
+reset_world; rule '^oftc disconnect' '' 0 'write_status p1:disconnected p2:disconnected; write_procs 200 p1'; run s2-disturb.sh --yes --only stop --no-restore
 eq "S2 stop bad: supervisor remains" "$RC" 1; has "S2 names the supervisor check" "$OUT" "FAIL supervisor processes after the hold"
-reset_world; rule '^oftc disconnect' '' 0 'write_status p1:connected p2:disconnected'; run s2-disturb.sh --only stop --no-restore
+reset_world; rule '^oftc disconnect' '' 0 'write_status p1:connected p2:disconnected'; run s2-disturb.sh --yes --only stop --no-restore
 eq "S2 stop bad: tunnel stays up" "$RC" 1; has "S2 names the stop check" "$OUT" "FAIL every profile reports disconnected"
 # S2 drop: the scripted drop takes the tunnel down, restore brings it back with the log lines
 reset_world
 rule '^networksetup -setnetworkserviceenabled .* off' '' 0 'write_status p1:disconnected p2:disconnected'
 rule '^networksetup -setnetworkserviceenabled .* on' '' 0 'write_status p1:connected p2:connected; print "OFTC supervisor: VPN disconnected; fetching error\nOFTC supervisor: starting fresh SSO recovery\nOFTC supervisor: VPN connected" >> "$HOME/Library/Logs/OFTC/p1.log"'
-run s2-disturb.sh --only drop
+run s2-disturb.sh --yes --only drop
 eq "S2 drop good" "$RC" 0; has "S2 drop scripted" "$OUT" "RUN  sudo -n networksetup -setnetworkserviceenabled Test Wi-Fi off"
 has "S2 drop sees the disconnect" "$OUT" "PASS supervisor log shows the disconnect"; has "S2 drop sees fresh sign-in" "$OUT" "PASS supervisor log shows fresh sign-in recovery"
 has "S2 traffic after" "$OUT" "PASS after network drop: traffic through p1 at 0% loss"
 reset_world
+rule '^networksetup -setnetworkserviceenabled .* off' '' 0 'write_status p1:disconnected p2:disconnected'
+rule '^networksetup -setnetworkserviceenabled .* on' '' 1 ''
+run s2-disturb.sh --yes --only drop
+eq "S2 drop: a failed network restore fails the stage" "$RC" 1; has "S2 prints the manual restore" "$OUT" "RESTORE MANUALLY: sudo networksetup -setnetworkserviceenabled \"Test Wi-Fi\" on"
+reset_world
 rule '^networksetup -setnetworkserviceenabled .* off' '' 1 ''
 rule '^route' '' 0
-run s2-disturb.sh --only drop
+run s2-disturb.sh --yes --only drop
 has "S2 falls back to a human when scripting fails" "$OUT" "HUMAN >>> ACTION REQUIRED (one act): turn Wi-Fi off"
 # S2 sleep
-reset_world; run s2-disturb.sh --only sleep
+reset_world; run s2-disturb.sh --yes --only sleep
 eq "S2 sleep good" "$RC" 0; has "S2 scheduled wake" "$OUT" "PASS scheduled wake"; has "S2 slept" "$OUT" "PASS Mac slept"; has "S2 sleepnow printed" "$OUT" "RUN  pmset sleepnow"
 has "S2 wake traffic" "$OUT" "PASS after wake: traffic through p1 at 0% loss"
+has "S2 sleep proven by a clock jump" "$OUT" "PASS Mac slept (clock jumped 75s"
+reset_world; rule '^pmset sleepnow' '' 0 ''; run s2-disturb.sh --yes --only sleep
+eq "S2 sleep bad: the Mac never slept" "$RC" 1; has "S2 names it" "$OUT" "FAIL no sleep detected"
 
 # S3
 reset_world; rule '^launchctl kickstart' '' 0 'write_procs 201 p1 p2'; run s3-host.sh
@@ -357,6 +374,7 @@ has "S4 user data survived" "$OUT" "PASS profiles, PSK presence, auto-start, tra
 has "S4 approval recorded" "$OUT" "approval requested: no"; lacks "S4 never exports or provisions a PSK" "$(cat "$SHIM_STATE/calls.log")" "export-profiles"
 s4_world; put sig $'Package "OFTC.pkg":\n   Status: no signature'; run s4-installer.sh --yes
 eq "S4 bad signature" "$RC" 1; has "S4 names it" "$OUT" "FAIL package signature chain"
+lacks "S4 never calls installer after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "installer -pkg"
 s4_world; put_n installer 1 'installer: The install was successful.'; rm -f "$SHIM_STATE/out/installer.1.rc"
 run s4-installer.sh --yes; has "S4 bad: installer ran with a tunnel up" "$OUT" "FAIL installer exit status is nonzero (refused)"
 s4_world; write_status p1:disconnected p2:disconnected; run s4-installer.sh --yes
@@ -371,7 +389,7 @@ has "S4 asks a human for approval when activate says so" "$OUT" "approval reques
 
 # S5 pre and post
 reset_world; put ext ''; write_procs 200 p1 p2
-rule '^oftc uninstall' '' 0 'write_status; : > "$SHIM_STATE/procs"; rm -rf "$FAKE_APP" "$OFTC_CLI"; put ext "*	*	$BID.provider (1.2.2/41)	OFTCTunnel	[terminated waiting to uninstall on reboot]"; put pkgs ""; put launchctl ""; rule "^launchctl (print|list|print-disabled)" "" 113 ""'
+rule '^oftc uninstall' '' 0 'write_status; : > "$SHIM_STATE/procs"; rm -rf "$FAKE_APP" "$OFTC_CLI"; put ext "*	*	$BID.provider (1.2.2/41)	OFTCTunnel	[terminated waiting to uninstall on reboot]"; put pkgs ""; put launchctl ""; put btm ""; rule "^launchctl (print|list|print-disabled)" "" 113 ""'
 mkdir -p "$HOME/Library/Application Support/$BID/profiles/p1"
 cp -R "$FAKE_APP" "$T/keep.app"
 run s5-uninstall-reboot.sh --yes --no-reinstall --no-reboot
@@ -381,7 +399,7 @@ has "S5 deferred extension is info, not a pass" "$OUT" "expected until reboot"; 
 [[ -f "$HOME/Library/Application Support/oftc-livecheck/s5.marker" ]] && ok || bad "S5 marker not written"
 plutil -lint "$HOME/Library/LaunchAgents/local.oftc-livecheck.s5-resume.plist" >/dev/null && ok || bad "S5 plist invalid"
 has "S5 plist runs the post phase" "$(cat "$HOME/Library/LaunchAgents/local.oftc-livecheck.s5-resume.plist")" "<string>post</string>"
-PRE_RUN=$(print -r -- "$OUT" | sed -n 's/^.*log: \(.*\)\/S5.log$/\1/p' | tail -1)
+PRE_RUN=$(print -r -- "$OUT" | sed -n 's/^.*log: \(.*\)\/S5.log (private.*$/\1/p' | tail -1)
 run s5-uninstall-reboot.sh --yes --no-reinstall --no-reboot
 eq "S5 detects a half-run" "$RC" 1; has "S5 half-run message" "$OUT" "a previous S5 did not finish"
 # post: stale entry still there -> FAIL, marker stays
@@ -395,6 +413,12 @@ write_procs 300; put ext ''
 run s5-uninstall-reboot.sh --yes --no-reinstall --phase post --run-dir "$PRE_RUN"
 eq "S5 post good" "$RC" 0; has "S5 post host" "$OUT" "PASS host service running after login"; has "S5 post extension cleared" "$OUT" "PASS no OFTC extension entries remain"
 [[ ! -e "$HOME/Library/Application Support/oftc-livecheck/s5.marker" ]] && ok || bad "S5 marker must be removed after a good post"
+
+reset_world; put sig $'Package "OFTC.pkg":\n   Status: no signature'; rule '^oftc uninstall' '' 0 ''
+run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
+eq "S5 bad signature stops before uninstalling" "$RC" 1; has "S5 says nothing was uninstalled" "$OUT" "nothing was uninstalled"
+lacks "S5 never uninstalls after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "oftc uninstall"
+lacks "S5 never installs after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "installer -pkg"
 
 # S6
 reset_world; write_status p1:connected p2:connected p3:disconnected
@@ -419,6 +443,22 @@ eq "S7 good" "$RC" 0; has "S7 human opens the popover" "$OUT" "click the OFTC ic
 has "S7 popover observed" "$OUT" "PASS human act observed: the screen region under the menu bar changes"
 [[ $(ls "$TMPDIR"/oftc-livecheck/*/shots/*.png 2>/dev/null | wc -l | tr -d ' ') == 4 ]] && ok || bad "S7 expected 4 screenshots, got: $(ls "$TMPDIR"/oftc-livecheck/*/shots 2>/dev/null | tr '\n' ' ')"
 has "S7 numbered names" "$(ls "$TMPDIR"/oftc-livecheck/*/shots | tr '\n' ' ')" "02-popover-connected.png"
+
+# ======================= 4b. arguments, run dir, shareable logs ============================
+reset_world; run s1-tunnels.sh --noreboot; eq "unknown argument is rejected" "$RC" 2; has "unknown argument named" "$OUT" "unknown argument '--noreboot'"; no_calls "unknown argument"
+reset_world; mkdir -m 755 "$T/open-dir"; run s1-tunnels.sh --run-dir "$T/open-dir"; eq "non-private --run-dir is refused" "$RC" 2
+eq "and is not chmod-ed" "$(stat -f %Lp "$T/open-dir")" 755
+reset_world; run s1-tunnels.sh
+RUNLOG=$(print -r -- "$OUT" | sed -n 's/^.*log: \(.*S1.log\) (private.*$/\1/p' | tail -1)
+[[ -f $RUNLOG ]] && ok || bad "no S1 log path in: ${OUT: -300}"
+eq "log has no raw profile id" "$(grep -cw 'p1\|p2' "$RUNLOG")" 0
+eq "summary has no raw profile id" "$(grep -cw 'p1\|p2' "${RUNLOG:h}/summary.txt")" 0
+eq "log has no IPv4 address" "$(grep -cE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$RUNLOG")" 0
+has "log keeps a placeholder" "$(cat "$RUNLOG")" "<profile-1>"
+lacks "quiet commands do not log their output" "$(cat "$RUNLOG")" "ESTABLISHED"
+for f in "$HERE"/s[0-7]-*.sh; do
+  grep -q "trap 'exit 130' INT TERM" "$f" && ok || bad "${f:t} has no INT/TERM trap"
+done
 
 # ======================= 5. repo hygiene ==============================================================
 hits=$(grep -rnEi 'sfcompute|chris@|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$HERE"/*.sh | grep -vE '192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|\[0-9\]|0\.0\.0|1\.2\.2|10\.0\.0\.2' || true)

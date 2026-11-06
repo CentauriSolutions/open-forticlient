@@ -6,7 +6,7 @@ setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s7-screenshots.sh
 lc_init S7 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 cli=$(lc_cli)
 [[ -n $PROFILES ]] || { lc_fail "PROFILES is not configured"; exit 1; }
 
@@ -35,12 +35,12 @@ human "click the OFTC icon in the menu bar so the popover is open, and leave it 
 lc_sleep 3
 lc_shot popover-connected
 lc_step "popover, disconnected"
-lc_run "$cli" disconnect
+lc_run -q "$cli" disconnect ${=PROFILES}
 wait_for "every profile disconnected" 60 3 all_down
 lc_sleep 3
 lc_shot popover-disconnected
 lc_step "popover, reconnected"
-lc_run "$cli" connect
+lc_run -q "$cli" connect ${=PROFILES}
 for id in ${=PROFILES}; do
   human "complete the browser sign-in for $id" "profile $id reports connected" "$SSO_TIMEOUT" lc_is_connected "$id"
 done

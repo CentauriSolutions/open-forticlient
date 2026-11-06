@@ -7,8 +7,10 @@ setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s1-tunnels.sh
 LC_STAGE_USAGE='[--connect] [--soak-minutes N]'
+LC_STAGE_FLAGS=(--connect)
+LC_STAGE_OPTS=(--soak-minutes)
 lc_init S1 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 do_connect=0
 [[ ${LC_ARGS[(Ie)--connect]} != 0 ]] && do_connect=1
 if (( ${LC_ARGS[(Ie)--soak-minutes]} )); then SOAK_MINUTES=${LC_ARGS[$(( ${LC_ARGS[(Ie)--soak-minutes]} + 1 ))]}; fi
@@ -28,7 +30,7 @@ snap_start=$LC_SNAP
 
 lc_step "connect (only with --connect)"
 if (( do_connect )); then
-  lc_run "$cli" connect
+  lc_run -q "$cli" connect ${=PROFILES}
   for id in ${=PROFILES}; do
     human "complete the browser sign-in for profile $id when it opens" "profile $id reports connected" "$SSO_TIMEOUT" lc_is_connected "$id"
   done
@@ -76,9 +78,9 @@ for id in ${=PROFILES}; do
   fi
 
   lc_step "profile $id: transport"
-  lc_run "$agent" --profile "$id" show-profile
+  lc_run -q "$agent" --profile "$id" show-profile
   lc_info "configured: $(print -r -- "$LC_OUT" | grep -o 'transport=[a-z]*')"
-  lc_run netstat -an
+  lc_run -q netstat -an
   if lc_live; then
     if print -r -- "$LC_OUT" | grep -q 'ESTABLISHED' && print -r -- "$LC_OUT" | grep -E '\.4443 +ESTABLISHED' >/dev/null; then
       lc_info "in use (inferred from sockets, not per profile): a TCP connection to port 4443 is established"

@@ -6,6 +6,7 @@
 # it first. Nothing here reads, prints or logs a PSK or token.
 
 setopt extendedglob
+zmodload -F zsh/datetime b:strftime p:EPOCHSECONDS
 LC_HERE=${${(%):-%x}:A:h}
 LC_DRY=0
 LC_YES=0
@@ -93,12 +94,27 @@ lc_scrub() {
   print -r -- "$s"
 }
 
+# Terminal output is raw (the operator needs the ids); the log and summary are scrubbed:
+# cheaply per line here, and by lc_scrub_files (profile ids, every IPv4 address) at the end.
 lc_emit() {
   local tag=$1; shift
-  local line
-  line=$(lc_scrub "$tag $*")
-  print -r -- "$line"
-  [[ -n $LC_LOG ]] && print -r -- "$(date +%T) $line" >> "$LC_LOG"
+  print -r -- "$tag $*"
+  [[ -n $LC_LOG ]] && print -r -- "$(strftime %T $EPOCHSECONDS) $(lc_scrub "$tag $*")" >> "$LC_LOG"
+  return 0
+}
+
+# One sed pass over the run's log and summary: profile ids become <profile-N>, any IPv4
+# address becomes <ip>, gateway= values are masked. Idempotent.
+lc_scrub_files() {
+  local id n=0 script='' f
+  for id in ${=PROFILES} $FAIL_PROFILE; do
+    (( n++ ))
+    [[ $id == [a-z0-9-]## ]] && script+="s/[[:<:]]${id}[[:>:]]/<profile-$n>/g;"
+  done
+  script+='s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<ip>/g;s/gateway=[^ ]+/gateway=<gateway>/g'
+  for f in "$LC_LOG" "$LC_RUN/summary.txt"; do
+    [[ -f $f ]] && sed -E -i '' "$script" "$f"
+  done
   return 0
 }
 
@@ -115,11 +131,15 @@ lc_live() { (( ! LC_DRY )); }
 # Prints the exact command, then runs it and captures stdout+stderr in LC_OUT and the
 # exit status in LC_RC. In --dry-run it only prints. Always returns 0: callers assert.
 lc_run() {
+  local quiet=0
+  [[ ${1:-} == -q ]] && { quiet=1; shift; }   # -q: output is used but never logged
   if (( LC_DRY )); then lc_emit "DRY " "would run: $*"; LC_OUT=''; LC_RC=0; return 0; fi
   lc_emit "RUN " "$*"
   LC_OUT=$("$@" 2>&1)
   LC_RC=$?
-  if [[ -n $LC_OUT ]]; then
+  if (( quiet )); then
+    lc_log_only "  (output not logged)"
+  elif [[ -n $LC_OUT ]]; then
     local l
     while IFS= read -r l; do lc_log_only "  | $l"; done <<< "${LC_OUT:0:4000}"
   fi
@@ -128,17 +148,18 @@ lc_run() {
 }
 
 lc_log_only() {
-  [[ -n $LC_LOG ]] && print -r -- "$(date +%T) $(lc_scrub "$*")" >> "$LC_LOG"
+  [[ -n $LC_LOG ]] && print -r -- "$(strftime %T $EPOCHSECONDS) $(lc_scrub "$*")" >> "$LC_LOG"
   return 0
 }
 
 # Like lc_run, but through sudo. Needs the credential cached by S0 (`sudo -v`), so it
 # never prompts mid-stage: -n fails instead of waiting for a password nobody sees.
 lc_sudo() { lc_run sudo -n "$@"; }
+lc_sudoq() { lc_run -q sudo -n "$@"; }
 
 lc_sleep() {
-  # $1 seconds; scaled so the selftest does not wait.
-  (( LC_SLEEP_SCALE == 0 )) && return 0
+  # $1 seconds; scaled so the selftest does not wait; nothing waits in a dry run.
+  (( LC_SLEEP_SCALE == 0 || LC_DRY )) && return 0
   sleep $(( $1 * LC_SLEEP_SCALE ))
 }
 
@@ -311,14 +332,21 @@ lc_init() {
     print -u2 "livecheck stages are run by name, never sourced"; return 3
   fi
   LC_ARGS=()
+  local flags=(${LC_STAGE_FLAGS[@]:-}) opts=(${LC_STAGE_OPTS[@]:-})
   while (( $# )); do
     case $1 in
       --dry-run) LC_DRY=1 ;;
       --yes) LC_YES=1 ;;
-      --config) LIVECHECK_CONFIG=$2; shift ;;
-      --run-dir) LIVECHECK_RUN_DIR=$2; shift ;;
+      --config|--run-dir)
+        (( $# >= 2 )) || { print -u2 "$1 needs a value"; exit 2; }
+        if [[ $1 == --config ]]; then LIVECHECK_CONFIG=$2; else LIVECHECK_RUN_DIR=$2; fi; shift ;;
       -h|--help) lc_usage; exit 0 ;;
-      *) LC_ARGS+=("$1") ;;
+      *)
+        if (( ${flags[(Ie)$1]} )); then LC_ARGS+=("$1")
+        elif (( ${opts[(Ie)$1]} )); then
+          (( $# >= 2 )) || { print -u2 "$1 needs a value"; exit 2; }
+          LC_ARGS+=("$1" "$2"); shift
+        else print -u2 "unknown argument '$1'"; lc_usage >&2; exit 2; fi ;;
     esac
     shift
   done
@@ -327,8 +355,13 @@ lc_init() {
     LC_RUN=${LIVECHECK_RUN_DIR:-}
   else
     LC_RUN=${LIVECHECK_RUN_DIR:-${TMPDIR:-/tmp}/oftc-livecheck/$(date +%Y%m%d-%H%M%S)}
-    (umask 077; mkdir -p "$LC_RUN") || { print -u2 "cannot create $LC_RUN"; exit 2; }
-    chmod 700 "$LC_RUN"
+    if [[ -d $LC_RUN ]]; then
+      # An existing --run-dir is only reused if it is ours and already private.
+      [[ -O $LC_RUN && ! -L $LC_RUN && $(stat -f %Lp "$LC_RUN") == 700 ]] || { print -u2 "$LC_RUN exists and is not a private (0700) directory of yours"; exit 2; }
+    else
+      (umask 077; mkdir -p "$LC_RUN") || { print -u2 "cannot create $LC_RUN"; exit 2; }
+      chmod 700 "$LC_RUN"
+    fi
     LC_LOG="$LC_RUN/$LC_STAGE.log"
   fi
   lc_emit "STAGE" "$LC_STAGE$( (( LC_DRY )) && print ' (dry run: nothing executes)')"
@@ -343,8 +376,8 @@ lc_init() {
 # Stages that change the system refuse to run without --yes (a dry run needs none).
 lc_need_yes() {
   if (( ! LC_YES && ! LC_DRY )); then
-    print -u2 "$LC_STAGE changes this Mac (installer / uninstall / reboot). Re-run with --yes, or --dry-run to see the plan."
-    trap - EXIT
+    print -u2 "$LC_STAGE changes this Mac. Re-run with --yes, or --dry-run to see the plan."
+    LC_ABORT_QUIET=1
     exit 3
   fi
 }
@@ -352,6 +385,7 @@ lc_need_yes() {
 lc_finish() {
   local rc=$?
   trap - EXIT
+  (( ${LC_ABORT_QUIET:-0} )) && exit $rc
   lc_run_cleanups
   print
   if (( LC_DRY )); then
@@ -364,7 +398,9 @@ lc_finish() {
   for f in "${LC_FAILS[@]}"; do lc_emit "SUMMARY" "  FAILED: $f"; done
   print -r -- "$line$( ((LC_FAIL)) && print ' RESULT=FAIL' || print ' RESULT=OK')" >> "$LC_RUN/summary.txt"
   for f in "${LC_HUMAN_LOG[@]}"; do print -r -- "  human: $f" >> "$LC_RUN/summary.txt"; done
-  lc_emit "SUMMARY" "log: $LC_LOG"
+  lc_emit "SUMMARY" "log: $LC_LOG (private: profile ids and addresses are masked in it, but review before sharing)"
+  lc_scrub_files
+  sudo -k 2>/dev/null   # drop the cached admin credential this run asked for
   (( LC_FAIL )) && exit 1
   exit $rc
 }
@@ -377,14 +413,19 @@ lc_finish() {
 # visible), then every later lc_sudo uses the cached credential with -n.
 lc_sudo_prime() {
   if (( LC_DRY )); then lc_dry "would ask a human (one act): type the admin password at the sudo prompt (sudo -v)"; (( LC_HUMANS++ )); LC_HUMAN_LOG+=("$LC_STAGE: admin password at the sudo prompt"); return 0; fi
-  if sudo -n true 2>/dev/null; then lc_pass "sudo credential already cached"; return 0; fi
-  (( LC_HUMANS++ )); LC_HUMAN_LOG+=("$LC_STAGE: admin password at the sudo prompt")
-  lc_emit "HUMAN" ">>> ACTION REQUIRED (one act): type your admin password at the sudo prompt below"
-  lc_emit "RUN " "sudo -v"
-  sudo -v
-  if sudo -n true 2>/dev/null; then lc_pass "sudo credential cached"; else lc_fail "sudo credential not cached; stage cannot continue"; exit 1; fi
+  if sudo -n true 2>/dev/null; then
+    lc_pass "sudo credential already cached"
+  else
+    (( LC_HUMANS++ )); LC_HUMAN_LOG+=("$LC_STAGE: admin password at the sudo prompt")
+    lc_emit "HUMAN" ">>> ACTION REQUIRED (one act): type your admin password at the sudo prompt below"
+    lc_emit "RUN " "sudo -v"
+    sudo -v
+    if sudo -n true 2>/dev/null; then lc_pass "sudo credential cached"; else lc_fail "sudo credential not cached; stage cannot continue"; exit 1; fi
+  fi
   if (( LC_SLEEP_SCALE != 0 )); then
-    ( while :; do sleep 45; sudo -n true 2>/dev/null || exit 0; done ) &
+    # Refreshes the credential only while this script is alive: it ends when the parent is gone.
+    local parent=$$
+    ( while kill -0 "$parent" 2>/dev/null; do sleep 45; sudo -n true 2>/dev/null || exit 0; done ) &
     LC_KEEPALIVE=$!
   fi
 }
@@ -411,7 +452,7 @@ lc_run_tty() {
   "$@" 2>&1 | tee "$tmp"
   LC_RC=${pipestatus[1]}
   LC_OUT=$(cat "$tmp")
-  lc_log_only "  | ${LC_OUT:0:3000}"
+  lc_log_only "  (output shown on the terminal, not logged)"
   lc_log_only "  = exit $LC_RC"
   rm -f "$tmp"
   return 0
@@ -469,4 +510,56 @@ lc_shot() {   # name
   mkdir -p "$LC_RUN/shots"
   lc_run screencapture -x "$f"
   [[ -s $f ]] && lc_info "screenshot: $f" || lc_fail "screenshot $1 was not written (Screen Recording permission for the terminal?)"
+}
+
+# True when the Mac has a default route (a network is up).
+lc_has_network() { route -n get default >/dev/null 2>&1; }
+
+# Seconds since the epoch; a seam so the selftest can jump the clock.
+lc_now() { date +%s; }
+
+# Waits for the Mac to really suspend, by watching for a jump in the wall clock between
+# one-second ticks (`pmset sleepnow` returns before the machine sleeps, and the script
+# is frozen while it does). Succeeds with the length of the jump in LC_SLEPT.
+lc_detect_sleep() {   # max-ticks
+  local prev now i
+  prev=$(lc_now); LC_SLEPT=0
+  for (( i = 0; i < $1; i++ )); do
+    lc_sleep 1
+    now=$(lc_now)
+    if (( now - prev > 10 )); then LC_SLEPT=$(( now - prev )); return 0; fi
+    prev=$now
+  done
+  return 1
+}
+
+# `OFTCAgent activate` waits for the user's approval with no timeout of its own, so it
+# runs in the background; its output goes to a file in the run dir. Returns once the
+# approval request appears (LC_APPROVAL=1) or the command finished (LC_APPROVAL=0).
+lc_activate() {
+  LC_APPROVAL=0; LC_ACT_PID=''
+  if (( LC_DRY )); then lc_dry "would run in the background: $(lc_agent) activate, watching for the approval request"; return 0; fi
+  local f="$LC_RUN/activate.out" i
+  lc_emit "RUN " "$(lc_agent) activate (background; output kept in the run dir, not the log)"
+  "$(lc_agent)" activate > "$f" 2>&1 &
+  LC_ACT_PID=$!
+  for (( i = 0; i < 120; i++ )); do
+    grep -q 'approval required' "$f" 2>/dev/null && { LC_APPROVAL=1; return 0; }
+    kill -0 "$LC_ACT_PID" 2>/dev/null || return 0
+    lc_sleep 1
+  done
+  lc_fail "activate neither finished nor asked for approval within 120s"
+}
+lc_act_done() { ! kill -0 "$LC_ACT_PID" 2>/dev/null; }
+# After the approval act: let activate finish (it exits 3 when a reboot is needed).
+lc_activate_finish() {
+  LC_ACT_RC=0
+  [[ -n $LC_ACT_PID ]] || return 0
+  if lc_poll 60 2 lc_act_done; then
+    wait "$LC_ACT_PID"; LC_ACT_RC=$?
+    lc_info "activate exited $LC_ACT_RC"
+  else
+    kill "$LC_ACT_PID" 2>/dev/null
+    lc_fail "activate was still waiting 60s after the approval; stopped it"
+  fi
 }

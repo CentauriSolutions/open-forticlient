@@ -7,8 +7,9 @@ setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s0-preflight.sh
 LC_STAGE_USAGE='[--expect-connected]'
+LC_STAGE_FLAGS=(--expect-connected)
 lc_init S0 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 expect_connected=0
 [[ ${LC_ARGS[(Ie)--expect-connected]} != 0 ]] && expect_connected=1
 
@@ -37,7 +38,7 @@ else
 fi
 
 lc_step "system extension"
-lc_run systemextensionsctl list
+lc_run -q systemextensionsctl list
 if lc_live; then
   oftc_ext=$(print -r -- "$LC_OUT" | grep -i oftc || true)
   lc_info "oftc extension entries: $(print -r -- "$oftc_ext" | grep -c . || true)"
@@ -45,7 +46,7 @@ if lc_live; then
 fi
 
 lc_step "connection state"
-lc_run scutil --nc list
+lc_run -q scutil --nc list
 if lc_live; then
   nconn=$(print -r -- "$LC_OUT" | grep "$LC_BUNDLE_ID" | grep -c '(Connected)' || true)
   if (( expect_connected )); then
@@ -56,7 +57,7 @@ if lc_live; then
 fi
 
 lc_step "host service"
-lc_run launchctl print "gui/$(id -u)/$LC_BUNDLE_ID.host"
+lc_run -q launchctl print "gui/$(id -u)/$LC_BUNDLE_ID.host"
 if lc_live; then
   (( LC_RC == 0 )) && lc_info "host service is loaded in the gui domain" || lc_info "host service is not loaded (not registered, or an old build)"
 fi

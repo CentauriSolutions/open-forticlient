@@ -12,9 +12,18 @@ set -u
 setopt pipefail
 source "${${(%):-%x}:A:h}/lib.sh"
 LC_STAGE_SCRIPT=s5-uninstall-reboot.sh
-LC_STAGE_USAGE='[--phase pre|post] [--no-reinstall] [--no-reboot] [--dmg PATH] [--force]'
+LC_STAGE_USAGE='--yes [--phase pre|post] [--no-reinstall] [--no-reboot] [--dmg PATH] [--force]'
+LC_STAGE_FLAGS=(--no-reinstall --no-reboot --force)
+LC_STAGE_OPTS=(--phase --dmg)
+# The resume agent must never run twice: the post phase removes its own plist before
+# anything else can fail. The run directory is persistent so it survives the reboot.
+state_dir="$HOME/Library/Application Support/oftc-livecheck"
+label=local.oftc-livecheck.s5-resume
+plist="$HOME/Library/LaunchAgents/$label.plist"
+[[ " $* " == *" --phase post "* && " $* " != *" --dry-run "* ]] && rm -f "$plist"
+[[ -n ${LIVECHECK_RUN_DIR:-} ]] || LIVECHECK_RUN_DIR="$state_dir/runs/$(date +%Y%m%d-%H%M%S)"
 lc_init S5 "$@" || exit $?
-trap lc_finish EXIT
+trap lc_finish EXIT; trap 'exit 130' INT TERM
 lc_need_yes
 phase=pre
 (( ${LC_ARGS[(Ie)--phase]} )) && phase=${LC_ARGS[$(( ${LC_ARGS[(Ie)--phase]} + 1 ))]}
@@ -24,10 +33,7 @@ reinstall=$(( ${LC_ARGS[(Ie)--no-reinstall]} ? 0 : 1 ))
 do_reboot=$(( ${LC_ARGS[(Ie)--no-reboot]} ? 0 : 1 ))
 force=$(( ${LC_ARGS[(Ie)--force]} ? 1 : 0 ))
 cli=$(lc_cli); agent=$(lc_agent)
-state_dir="$HOME/Library/Application Support/oftc-livecheck"
 marker="$state_dir/s5.marker"
-label=local.oftc-livecheck.s5-resume
-plist="$HOME/Library/LaunchAgents/$label.plist"
 sup="$HOME/Library/Application Support/$LC_BUNDLE_ID"
 ext_lines() { systemextensionsctl list 2>/dev/null | grep -i oftc; }
 no_ext() { [[ -z $(ext_lines) ]]; }
@@ -51,23 +57,34 @@ if [[ $phase == pre ]]; then
   lc_sudo_prime
   dirs_before=$(lc_live && profile_dirs || print 0)
 
+  # Verify the package BEFORE uninstalling anything: a bad DMG must not leave this Mac
+  # with no app.
+  if (( reinstall )); then
+    lc_step "mount and verify the package before touching the installed app"
+    lc_live && [[ ! -f $dmg ]] && { lc_fail "DMG not found: $dmg"; exit 1; }
+    lc_attach_dmg "$dmg" || exit 1
+    lc_verify_pkg "$LC_PKG"
+    if lc_live && (( LC_FAIL )); then lc_info "package verification failed: nothing was uninstalled"; exit 1; fi
+  fi
+
   lc_step "oftc uninstall"
   lc_info "this may ask for the admin password again (in this terminal or a dialog): that is the same one act as S0"
   lc_run_tty "$cli" uninstall
   expect_rc "oftc uninstall" "$LC_RC" 0
+  if lc_live && [[ $LC_RC != 0 ]]; then lc_info "uninstall failed: not reinstalling, not rebooting"; exit 1; fi
   lc_snapshot uninstalled
   if lc_live; then
     [[ ! -d $APP ]] && lc_pass "app bundle removed" || lc_fail "app bundle still present"
     [[ ! -e $OFTC_CLI ]] && lc_pass "$OFTC_CLI removed" || lc_fail "$OFTC_CLI still present"
-    lc_run pkgutil --pkgs
+    lc_run -q pkgutil --pkgs
     expect_not_contains "installer receipts" "$LC_OUT" openforticlient
-    lc_run launchctl list
+    lc_run -q launchctl list
     expect_not_contains "launchctl list" "$(print -r -- "$LC_OUT" | grep -i oftc || true)" oftc
     for l in agent host; do
-      lc_run launchctl print "gui/$(id -u)/$LC_BUNDLE_ID.$l"
+      lc_run -q launchctl print "gui/$(id -u)/$LC_BUNDLE_ID.$l"
       expect_eq "launch agent $l is gone" "$([[ $LC_RC == 0 ]] && print loaded || print absent)" absent
     done
-    lc_run sudo -n sfltool dumpbtm
+    lc_sudoq sfltool dumpbtm
     (( LC_RC == 0 )) && expect_not_contains "Login Items / BTM entries" "$LC_OUT" "$LC_BUNDLE_ID" || lc_info "Login Items/BTM not observable without root; check System Settings > Login Items shows no OFTC entry"
     exts=$(ext_lines)
     expect_not_contains "extension is not left activated" "$exts" "activated enabled"
@@ -78,17 +95,16 @@ if [[ $phase == pre ]]; then
 
   if (( reinstall )); then
     lc_step "reinstall so connect-at-login has an app"
-    lc_attach_dmg "$dmg" || exit 1
-    lc_verify_pkg "$LC_PKG"
     lc_install_pkg "$LC_PKG"
     expect_rc "installer exit status" "$LC_RC" 0
     lc_detach_dmg
-    lc_run "$agent" activate
-    if [[ $LC_OUT == *"approval required"* ]]; then
+    ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -q 'activated enabled'; }
+    lc_activate
+    if (( LC_APPROVAL )); then
       lc_info "approval requested: yes"
-      ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -q 'activated enabled'; }
       human "approve the OFTC Network Extension in System Settings > General > Login Items & Extensions > Network Extensions" "an OFTC extension is 'activated enabled'" 300 ext_active
     fi
+    lc_activate_finish
     for id in ${=PROFILES}; do lc_run "$cli" autostart "$id" on; expect_rc "autostart on for $id" "$LC_RC" 0; done
   else
     lc_info "--no-reinstall: the post phase checks extension cleanup only"
@@ -96,6 +112,10 @@ if [[ $phase == pre ]]; then
   lc_snapshot pre-reboot
 
   lc_step "marker, resume agent, reboot"
+  if lc_live && (( LC_FAIL )); then
+    lc_info "failures above: not arming the resume agent and not rebooting"
+    exit 1
+  fi
   args=(--phase post --yes --run-dir "$LC_RUN")
   [[ -n ${LIVECHECK_CONFIG:-} ]] && args+=(--config "$LIVECHECK_CONFIG")
   (( reinstall )) || args+=(--no-reinstall)
@@ -121,7 +141,7 @@ if [[ $phase == pre ]]; then
   fi
   lc_snapshot pre-reboot-final
   if (( do_reboot )); then
-    lc_info "rebooting in one minute. After the reboot, LOG IN: the resume agent then runs the post phase and writes $LC_RUN/summary.txt"
+    lc_info "rebooting in one minute (to abort: sudo pkill shutdown, then re-run with --force). After the reboot, LOG IN: the resume agent then runs the post phase and writes $LC_RUN/summary.txt"
     lc_sudo shutdown -r +1
     expect_rc "reboot scheduled" "$LC_RC" 0
   else
