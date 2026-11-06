@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use oftc_apple::login::{LoginItem, LoginStatus};
 use oftc_apple::manager::{Subscription, VpnEntry, VpnStatus};
 use oftc_ui_edge::{
-    rfc3339, Component, ConnectionState, Login, LoginState, NeStatus, Phase, ProfileInfo,
+    rfc3339, Component, ConnectionState, Login, LoginState, NeStatus, Phase, ProfileError, ProfileInfo,
     ProfileStatus, ProfilesResult, StatusDocument, Transport, PROTOCOL,
 };
 
@@ -18,6 +18,7 @@ use super::state::resolve_connection;
 use super::Services;
 use crate::agent::{agent_item, HOST_PLIST};
 use crate::profile;
+use crate::reason;
 use crate::snapshot::{self, ProfileFacts};
 use crate::status;
 use crate::vpn::owns_key;
@@ -217,7 +218,10 @@ impl<'a> Collector<'a> {
             phase,
             connected_since: since.cloned(),
             traffic: None,
-            error: None,
+            error: (phase == Some(Phase::Failed))
+                .then(|| facts.failure.and_then(reason::explain))
+                .flatten()
+                .map(|(code, detail)| ProfileError { code, detail: detail.to_owned() }),
         }
     }
 

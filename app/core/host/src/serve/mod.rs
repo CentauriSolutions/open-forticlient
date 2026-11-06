@@ -591,6 +591,41 @@ mod tests {
         });
     }
 
+    /// A failed supervisor's recorded provider code becomes `profiles[].error` (code
+    /// and plain message); a failure with no plain reason, or any other phase, has none.
+    #[test]
+    fn a_failed_profile_says_why() {
+        let rig = Rig::new();
+        let directory = registry::entry_directory(rig.env.root(), "lab");
+        let record = |phase, failure| {
+            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_794_800);
+            let lease = "A4DF24C9-D3A9-4D2E-896A-95AC0C2B535A";
+            crate::status::StatusStore::new(&directory)
+                .publish_failure(phase, failure, lease, now);
+        };
+        rig.serving(&me, |socket| {
+            let mut client = Client::connect(socket);
+            client.hello();
+            settled(&mut client);
+            for (phase, failure, want) in [
+                (crate::status::Phase::Failed, Some(201), Some("network_blocked")),
+                (crate::status::Phase::Failed, Some(900), None),
+                (crate::status::Phase::Connecting, Some(201), None),
+            ] {
+                record(phase, failure);
+                let status = client.call(r#"{"id":3,"op":"status"}"#)["result"].clone();
+                let error = &status["profiles"][0]["error"];
+                assert_eq!(error["code"].as_str(), want, "{phase:?} {failure:?}");
+                if want.is_some() {
+                    assert!(error["detail"].as_str().unwrap().contains("UDP"));
+                    assert_eq!(status["profiles"][0]["state"], "attention");
+                } else {
+                    assert_eq!(*error, Value::Null);
+                }
+            }
+        });
+    }
+
     /// The component is `checking` until the extension request answers, then what
     /// the request says, and the change reaches a subscriber as a `status` event.
     #[test]

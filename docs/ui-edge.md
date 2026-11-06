@@ -247,7 +247,7 @@ payload of `status` events.
 | `profiles[].phase` | enum or null | `acquiring`, `connecting`, `connected`, `recovering`, `failed`, `stopped`; null without a live supervisor (the liveness rules of `StatusStore::read`) |
 | `profiles[].connected_since` | string or null | when this host first saw the profile connected (`NEVPNConnection.connectedDate` is not on the `VpnControl` seam), so `null` for a tunnel already up when the host started and for a profile that is not connected. A follow-up may add the date to `VpnControl`. |
 | `profiles[].traffic` | object or null | the newest sample while the profile is connected and some client subscribes to `traffic` (an idle host does not sample, so `null` otherwise). Rates are bytes per second derived in Rust; null until two samples of one session are 5 s or less apart, and after a missed sample (the totals stay). `session` is the first 8 hex digits, lower case, of the provider's session UUID and changes on a new provider connection; totals survive a rekey. `sample_seq` is one counter for the host, increasing with every sample of any profile. |
-| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7. Always `null` in PR 2; PR 3 fills it. |
+| `profiles[].error` | object or null | `{ "code", "detail" }`; set only while `phase` is `failed` and the supervisor recorded a provider failure with a plain reason, otherwise `null`. `code` is one of the connection reasons in 4.7 and `detail` is a short English message with no host, address or secret; the UI may localise by `code`. The reasons come from the provider's `OFTCProvider` error code (`core/host/src/reason.rs`). |
 
 The profile fields (`id`, `name`, `gateway`, `saml_port`, `transport`,
 `auto_start`, `phase`) are exactly what `core/host/src/snapshot.rs` already
@@ -304,6 +304,12 @@ stable part and replaces the substring match in `MenuCommandFailure.classify`:
 | `tunnels_active` | 3 | new |
 | `busy` | 6 | new; another op holds that profile's lock |
 | `unknown_op` | 2 | new |
+| `network_blocked` | 1 | `profiles[].error` only: the UDP attempt got no answer and the TCP 4443 fallback failed (provider code 201, the log line `OFTC provider stage 201 failed`) |
+| `gateway_not_found` | 1 | `profiles[].error` only: the gateway name did not resolve (200) |
+| `gateway_no_answer` | 1 | `profiles[].error` only: no answer in time (202) |
+| `gateway_refused` | 1 | `profiles[].error` only: IKE_SA_INIT, the pre-shared key check or CHILD_SA was refused (203, 204, 209 to 212) |
+| `sign_in_rejected` | 1 | `profiles[].error` only: EAP or the final AUTH was rejected, e.g. an expired sign-in (205 to 208) |
+| `connection_lost` | 1 | `profiles[].error` only: an established tunnel dropped and the three automatic recoveries in ten minutes are used up |
 | `internal` | 1 | everything else; `detail` is for the log, never shown verbatim |
 
 `timeout` and `launch` stay UI-side. The user-facing messages stay in Swift and

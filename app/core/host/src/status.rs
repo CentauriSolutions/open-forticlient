@@ -62,6 +62,10 @@ pub struct SupervisorStatus {
     pub process_id: i32,
     /// Seconds since 2001-01-01 UTC.
     pub updated: f64,
+    /// The provider's failure code (`OFTCProvider` NSError code) when the tunnel
+    /// failed or dropped for good; absent otherwise. The Swift reader ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<i32>,
 }
 
 fn reference_seconds(time: SystemTime) -> f64 {
@@ -104,15 +108,22 @@ impl StatusStore {
     /// Records that this process, holding lease `lease_id`, is in `phase`. Best
     /// effort, like the Swift writer: a failure leaves the previous record.
     pub fn publish(&self, phase: Phase, lease_id: &str, now: SystemTime) {
-        self.write(phase, lease_id, std::process::id() as i32, now);
+        self.write(phase, None, lease_id, std::process::id() as i32, now);
     }
 
-    fn write(&self, phase: Phase, lease_id: &str, process_id: i32, now: SystemTime) {
+    /// Like [`publish`](Self::publish), with the provider failure code that ended
+    /// the attempt.
+    pub fn publish_failure(&self, phase: Phase, failure: Option<i32>, lease_id: &str, now: SystemTime) {
+        self.write(phase, failure, lease_id, std::process::id() as i32, now);
+    }
+
+    fn write(&self, phase: Phase, failure: Option<i32>, lease_id: &str, process_id: i32, now: SystemTime) {
         let record = SupervisorStatus {
             phase,
             lease_id: lease_id.to_owned(),
             process_id,
             updated: reference_seconds(now),
+            failure,
         };
         if let Ok(data) = serde_json::to_vec(&record) {
             let _ = lease::write_private(&self.directory, FILE_NAME, &data);
@@ -188,6 +199,7 @@ mod tests {
                 lease_id: "A4DF24C9-D3A9-4D2E-896A-95AC0C2B535A".to_owned(),
                 process_id: 4242,
                 updated: FIXTURE_UPDATED,
+                failure: None,
             }
         );
     }
@@ -284,7 +296,7 @@ mod tests {
         let lease = "A4DF24C9-D3A9-4D2E-896A-95AC0C2B535A";
         // 2001-based 815509075 exactly, so the golden holds no rounding.
         let now = UNIX_EPOCH + Duration::from_secs(1_793_816_275);
-        StatusStore::new(&dir.0).write(Phase::Failed, lease, 4242, now);
+        StatusStore::new(&dir.0).write(Phase::Failed, None, lease, 4242, now);
         let json =
             |p: &Path| serde_json::from_slice::<serde_json::Value>(&fs::read(p).unwrap()).unwrap();
         assert_eq!(

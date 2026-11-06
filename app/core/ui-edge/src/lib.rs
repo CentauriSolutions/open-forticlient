@@ -47,6 +47,13 @@ pub enum ErrorCode {
     TunnelsActive,
     Busy,
     UnknownOp,
+    /// `profiles[].error` only: why a connection failed or was lost (4.5).
+    NetworkBlocked,
+    GatewayNotFound,
+    GatewayNoAnswer,
+    GatewayRefused,
+    SignInRejected,
+    ConnectionLost,
     #[serde(other)]
     Internal,
 }
@@ -67,7 +74,13 @@ impl ErrorCode {
             | ErrorCode::HostUnavailable
             | ErrorCode::UnsupportedSchema => 5,
             ErrorCode::Busy => 6,
-            ErrorCode::Internal => 1,
+            ErrorCode::Internal
+            | ErrorCode::NetworkBlocked
+            | ErrorCode::GatewayNotFound
+            | ErrorCode::GatewayNoAnswer
+            | ErrorCode::GatewayRefused
+            | ErrorCode::SignInRejected
+            | ErrorCode::ConnectionLost => 1,
         }
     }
 }
