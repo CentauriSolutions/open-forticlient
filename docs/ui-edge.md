@@ -181,6 +181,7 @@ release.
 | `list_sources` | | `{ "sources": [ { label, gateway, saml_port, already_configured } ] }`: importable FortiClient profiles, never a PSK |
 | `component_update` | | progress then `{}`: finishes setup for the profiles that exist (PSKs, system extension, VPN entries); `tunnels_active` if any profile is up, `psk_unavailable` with `profile_id` if one has no saved PSK |
 | `settings_set` | `key`: `menu_login`, `auto_start:<id>`, `auto_update`; `value`: a boolean | `{}` |
+| `menu_login_default` | `first_setup`: boolean, true when the setup window started with no profile | `{ "state": "registered" \| "requires_approval" \| "skipped" \| "failed" }`, never an error |
 | `check_update` | | `{ "available": { "version", "page" } \| null }`; the host fetches |
 | `open_settings` | `pane`: `extensions` or `login_items` | `{}` |
 | `cancel` | `target`: an earlier request `id` of this connection | `{}`; see 4.6 |
@@ -201,6 +202,18 @@ Details PR 3 settled where this document was silent:
   `profile:<id>` key, so none can race another into a VPN entry with no profile.
   Profile creation itself is serialised, since ids are chosen from the profiles that
   exist. `import` and `import_preview` read only regular files.
+- **Menu login item default.** "OFTC at login" (`SMAppService.mainApp`, `login.menu_item`) is turned on
+  once, by the first successful setup, so the menu-bar icon is back after a reboot: at the end of
+  `add_profile` when the registry was empty, by `menu_login_default` when the Swift setup window
+  that started with no profile closes (the host checks a profile exists), and by the hidden
+  verb `menu-login-default` that `oftc setup` runs after making its first profile. It registers
+  and nothing else (no sign-in, no connection); macOS holding it for approval shows as
+  `requires_approval` in the Login Items UI, not as a failed setup. The host records the offer in
+  `menu-login-default.json` in its support directory (the file the Swift first-launch default used
+  to write, as `{}` or `[]`; only the file's existence counts, whatever it holds, and it never means
+  on or off), and any `settings_set menu_login` writes it too, so nothing registers it a second
+  time or against the user's choice; repairs, extra profiles and `oftc uninstall` never offer it.
+  Turn it off in the menu's Settings ("OFTC at login") or `OFTCAgent unregister-menu-login`.
 - `settings_set auto_update` is stored by the host in `host-settings.json` in its own
   directory. Nothing reads it back over the socket yet (`UpdateStore` stays UI-private,
   4.5 has no field for it); the UI keeps its own value as the source of truth until a

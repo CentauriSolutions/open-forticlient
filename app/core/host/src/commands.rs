@@ -22,6 +22,7 @@ use crate::agent::{self, Launchctl};
 use crate::bundle;
 use crate::env::HostEnv;
 use crate::intent;
+use crate::menu_login;
 use crate::keychain::{read_psk_line, Keychain, KeychainError};
 use crate::out::Out;
 use crate::profile::{Profile, Transport};
@@ -113,6 +114,7 @@ pub const VERBS: &[Verb] = &[
     hidden("login-settings"),
     hidden("unregister-menu-login"),
     hidden("unregister-host"),
+    hidden("menu-login-default"),
     hidden("host serve"),
     hidden("host restart"),
     hidden("host register"),
@@ -143,6 +145,7 @@ pub enum Command {
     UnregisterHost,
     LoginSettings,
     UnregisterMenuLogin,
+    MenuLoginDefault,
     /// `host serve`: the socket service (`serve`).
     HostServe,
     /// `host restart`: `launchctl kickstart -k` of the host service.
@@ -249,6 +252,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("register-agent", []) => Command::RegisterAgent,
         ("unregister-agent", []) => Command::UnregisterAgent,
         ("unregister-host", []) => Command::UnregisterHost,
+        ("menu-login-default", []) => Command::MenuLoginDefault,
         ("login-settings", []) => Command::LoginSettings,
         ("unregister-menu-login", []) => Command::UnregisterMenuLogin,
         ("host", [sub]) if sub == "serve" => Command::HostServe,
@@ -543,6 +547,21 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
                 return finish(io, "Could not unregister the OFTC menu login item", 1);
             }
             finish(io, "OFTC menu login item unregistered", 0)
+        }
+        Command::MenuLoginDefault => {
+            // Run by `oftc setup` after it made the first profile; never on a repair.
+            use menu_login::Outcome;
+            let first = !registry::entries(env.root()).is_empty();
+            match menu_login::offer(env.root(), backends.login, first) {
+                Outcome::Registered => finish(io, "OFTC menu login item enabled", 0),
+                Outcome::NeedsApproval => finish(
+                    io,
+                    "OFTC menu login item waits for approval in System Settings → Login Items",
+                    0,
+                ),
+                Outcome::Skipped => finish(io, "OFTC menu login item left as it is", 0),
+                Outcome::Failed => finish(io, "Could not enable the OFTC menu login item", 1),
+            }
         }
         Command::HostServe => {
             let spawner = serve::ops_system::ProcessSpawner {
