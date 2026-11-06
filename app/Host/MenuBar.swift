@@ -789,7 +789,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
 
     private func updateWelcome() {
         welcome?.update(WelcomePresentation(upgrade: welcomeIsUpgrade,
-            configured: configured, active: presentation.anyActive, component: componentState))
+            configured: configured, active: presentation.anyActive, component: componentState,
+            profilesExist: !runtimes.isEmpty))
     }
 
     private func showWelcome() {

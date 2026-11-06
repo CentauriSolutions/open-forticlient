@@ -26,7 +26,9 @@ struct WelcomePresentation {
     var button: String
     var action: Action
 
-    init(upgrade: Bool, configured: Bool, active: Bool, component: VPNComponentState) {
+    /// `profilesExist`: profiles are on disk although none is `configured` (their VPN entries are
+    /// gone, as after an uninstall and reinstall), so setup finishes them and asks for no form.
+    init(upgrade: Bool, configured: Bool, active: Bool, component: VPNComponentState, profilesExist: Bool = false) {
         title = upgrade ? "OFTC is updated" : "Welcome to OFTC"
         if active {
             heading = "Your VPN is running"
@@ -38,6 +40,11 @@ struct WelcomePresentation {
             detail = component.detail
             button = "Check again"
             action = .check
+        } else if !configured && profilesExist {
+            heading = "Finish setting up your VPN"
+            detail = "Your saved VPN settings are still here, but macOS needs them added back. Finishing setup asks for no details and starts no sign-in."
+            button = "Finish setup"
+            action = .setup
         } else if !configured {
             heading = "Set up your VPN"
             detail = "Choose your VPN profile and approve OFTC when macOS asks. Then choose Connect in OFTC and sign in with your browser."

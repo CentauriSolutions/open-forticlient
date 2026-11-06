@@ -89,6 +89,10 @@ struct ComponentUpdatePresentation: Equatable {
         builds = Self.builds(document?.component)
         login = Self.loginLines(document?.login)
         let waiting = phase == .waiting || phase == .stillWaiting
+        // A profile in the host's `setup` state has no VPN entry (docs/ui-edge.md 4.5): the case
+        // after an uninstall and reinstall, where the component is ready and only the entries are gone.
+        let entriesMissing = document?.profiles.contains { $0.state == .setup } ?? false
+        let blocked = anyActive && (state == .updateRequired || entriesMissing)
         let loginPending = document.map { [$0.login.menuItem, $0.login.agent, $0.login.hostAgent].contains(.requiresApproval) } ?? false
         showSettings = waiting || state == .approval || loginPending
         pane = loginPending && !(waiting || state == .approval) ? .loginItems : .extensions
@@ -96,12 +100,15 @@ struct ComponentUpdatePresentation: Equatable {
         case .working: status = SetupProgress.working
         case .waiting: status = SetupProgress.waiting
         case .stillWaiting: status = SetupProgress.stillWaiting
-        case .idle: status = anyActive && state == .updateRequired
-            ? "Disconnect OFTC before updating its VPN component." : ""
+        case .idle:
+            if blocked { status = "Disconnect OFTC before finishing setup." }
+            else if state == .ready && entriesMissing {
+                status = "Your saved VPNs will be added back to macOS. No sign-in is started."
+            } else { status = "" }
         }
         button = state == .updateRequired ? "Update VPN component" : "Finish setup"
-        canRun = document != nil && (phase == .idle || phase == .stillWaiting) && !(anyActive && state == .updateRequired)
-            && state != .newer && state != .ready && state != .checking
+        canRun = document != nil && (phase == .idle || phase == .stillWaiting) && !blocked
+            && state != .newer && state != .checking && (state != .ready || entriesMissing)
     }
 
     static func builds(_ component: HostComponent?) -> String {

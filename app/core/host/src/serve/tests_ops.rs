@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use super::tests::{me, settled, Client, Rig, FORTI_PSK};
 use crate::keychain::Keychain;
+use crate::profile::{Profile, Transport};
 use crate::profile::testutil::TempDir;
 use crate::registry;
 
@@ -603,6 +604,24 @@ fn component_update_installs_missing_vpn_entries() {
         assert_eq!(reply["ok"], true);
         let (_, again) = op(&mut client, ADD);
         assert_eq!(error(&again), ("already_configured", 3));
+    });
+}
+
+/// The extension is already current but every VPN entry is gone (an uninstall, then a
+/// reinstall): `component_update` must not stop at "ready", it recreates the entries.
+#[test]
+fn component_update_recreates_entries_when_the_component_is_ready() {
+    let rig = Rig::new();
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        let profile = Profile::new("vpn.example.com", 9443, Transport::Udp, Some("Office VPN"), None).unwrap();
+        crate::commands::save_profile(rig.env.root(), &profile, None).unwrap();
+        rig.keychain.set("vpn.example.com", b"psk").unwrap();
+        let (progress, reply) = op(&mut client, r#"{"id":3,"op":"component_update"}"#);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(progress[4..], [json!(["vpn_entry", "running"]), json!(["vpn_entry", "done"])]);
+        assert_eq!(error(&op(&mut client, ADD).1), ("already_configured", 3));
     });
 }
 
