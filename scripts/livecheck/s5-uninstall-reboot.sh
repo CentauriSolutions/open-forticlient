@@ -35,7 +35,7 @@ force=$(( ${LC_ARGS[(Ie)--force]} ? 1 : 0 ))
 cli=$(lc_cli); agent=$(lc_agent)
 marker="$state_dir/s5.marker"
 sup="$HOME/Library/Application Support/$LC_BUNDLE_ID"
-ext_lines() { systemextensionsctl list 2>/dev/null | grep -i oftc; }
+ext_lines() { lc_ext_lines; }
 no_ext() { [[ -z $(ext_lines) ]]; }
 no_stale() { local e; e=$(ext_lines); [[ $e != *'terminated waiting'* ]]; }
 host_pids() { ps -axo pid,command 2>/dev/null | awk '/OFTCAgent host serve/ && !/awk/ {print $1}' | sort | tr '\n' ' '; }
@@ -84,8 +84,14 @@ if [[ $phase == pre ]]; then
       lc_run -q launchctl print "gui/$(id -u)/$LC_BUNDLE_ID.$l"
       expect_eq "launch agent $l is gone" "$([[ $LC_RC == 0 ]] && print loaded || print absent)" absent
     done
+    # BTM keeps records for a removed app until a reboot or reset, so right after the uninstall this
+    # is information only; the post phase asserts that no record points at a missing path.
     lc_sudoq sfltool dumpbtm
-    (( LC_RC == 0 )) && expect_not_contains "Login Items / BTM entries" "$LC_OUT" "$LC_BUNDLE_ID" || lc_info "Login Items/BTM not observable without root; check System Settings > Login Items shows no OFTC entry"
+    if (( LC_RC == 0 )); then
+      lc_info "BTM right after uninstall: $(print -r -- "$LC_OUT" | lc_btm_oftc_urls | grep -c .) record(s) for this app, $(print -r -- "$LC_OUT" | lc_btm_missing_paths | grep -c .) pointing at a missing path (expected until reboot; asserted in the post phase)"
+    else
+      lc_info "Login Items/BTM not observable without root; the post phase checks again"
+    fi
     exts=$(ext_lines)
     expect_not_contains "extension is not left activated" "$exts" "activated enabled"
     if [[ $exts == *"terminated waiting"* ]]; then lc_info "extension removal deferred ('terminated waiting to uninstall'): expected until reboot; the post phase asserts it clears"; else lc_pass "no OFTC extension entries remain"; fi
@@ -99,14 +105,26 @@ if [[ $phase == pre ]]; then
     expect_rc "installer exit status" "$LC_RC" 0
     (( LC_RC == 0 )) && lc_open_app_after_install
     lc_detach_dmg
-    ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -q 'activated enabled'; }
+    prov=$(lc_provider_build)
+    ext_active() { lc_provider_active "$prov"; }
     lc_activate
     if (( LC_APPROVAL )); then
       lc_info "approval requested: yes"
-      human "approve the OFTC Network Extension in System Settings > General > Login Items & Extensions > Network Extensions" "an OFTC extension is 'activated enabled'" 300 ext_active
+      human "approve the OFTC Network Extension in System Settings > General > Login Items & Extensions > Network Extensions" "the OFTC provider (build ${prov:-?}) is 'activated enabled'" 300 ext_active
     fi
     lc_activate_finish
     for id in ${=PROFILES}; do lc_run "$cli" autostart "$id" on; expect_rc "autostart on for $id" "$LC_RC" 0; done
+    # A clean uninstall removed the VPN configurations; a reinstall does not recreate them, so
+    # connect-at-login cannot work until the app's setup repairs them. Wait for that before the
+    # reboot is armed (no --force shortcut: the human completes Set up in the app).
+    lc_step "repair: Set up in the app recreates the VPN configurations"
+    if lc_live && ! lc_state_readable; then
+      lc_fail "cannot read 'oftc status --json': the repair cannot be observed, so the reboot is not armed"
+    elif lc_live && lc_all_configured; then
+      lc_info "every profile is already configured"
+    else
+      human "open OFTC from Applications and complete Set up for every profile (do not sign in yet)" "every profile is configured in 'oftc status --json' (no profile in state setup)" 900 lc_all_configured
+    fi
   else
     lc_info "--no-reinstall: the post phase checks extension cleanup only"
   fi
@@ -163,6 +181,13 @@ wait_for "host service running after login" 120 5 host_up
 if lc_live; then
   expect_eq "exactly one 'host serve' process" "$(host_pids | wc -w | tr -d ' ')" 1
   wait_for "extension list has no stale 'terminated waiting' entries" 60 5 no_stale
+  lc_sudoq sfltool dumpbtm
+  if (( LC_RC == 0 )); then
+    missing=$(print -r -- "$LC_OUT" | lc_btm_missing_paths)
+    [[ -z $missing ]] && lc_pass "no Login Items/BTM record for this app points at a missing path" || lc_fail "Login Items/BTM records point at missing paths: $(print -r -- "$missing" | grep -c .) record(s)"
+  else
+    lc_info "Login Items/BTM not observable without a cached sudo credential; run 'sudo sfltool dumpbtm' and check no OFTC record points at a missing path"
+  fi
   if (( reinstall )); then
     expect_eq "one activated enabled extension" "$(ext_lines | grep -c 'activated enabled')" 1
     lc_poll 90 5 lc_any_connected && lc_info "connect-at-login connected without a prompt" || lc_info "no tunnel yet: connect-at-login should have opened the browser sign-in"

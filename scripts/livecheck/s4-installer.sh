@@ -26,7 +26,7 @@ host_pid_changed() { local now; now=$(host_pids); [[ -n $now && $now != "$1" ]];
 app_version() { /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null; }
 # The provider has its own build number (it need not equal the host's); systemextensionsctl
 # lists the provider build, so read it from the bundled extension.
-provider_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP"/Contents/Library/SystemExtensions/*/Contents/Info.plist(N[1]) 2>/dev/null; }
+provider_build() { lc_provider_build; }
 app_build() { /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist" 2>/dev/null; }
 none_matches_guard() { ! pgrep -f "$guard_re" >/dev/null 2>&1; }
 user_lines() { grep -E '^(profile#|profile dirs:|pins:|logs:)' "$1" | sed -E 's/logs: [0-9]+ files/logs/'; }
@@ -123,7 +123,7 @@ if (( installed )) || (( LC_DRY )); then
   lc_step "system extension replaced"
   lc_run -q systemextensionsctl list
   if lc_live; then
-    ext_active() { systemextensionsctl list 2>/dev/null | grep -i oftc | grep -F "/$prov_after)" | grep -q 'activated enabled'; }
+    ext_active() { [[ -n $prov_after ]] && lc_provider_active "$prov_after"; }
     if ext_active; then
       lc_info "approval requested: no (the new build's extension is already activated enabled)"
     else
