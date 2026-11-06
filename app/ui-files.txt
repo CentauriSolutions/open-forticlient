@@ -22,3 +22,5 @@ Host/RateSparklineView.swift
 Host/TrafficHistory.swift
 Host/UpdateCheck.swift
 Host/Welcome.swift
+Host/SetupPlan.swift
+Host/SetupRepair.swift

@@ -47,7 +47,9 @@ const MAX_INNER_PACKET: usize = 65_535;
 /// inbound packet, 7 write refused, 8 peer deleted the SA, 9 stopped by the
 /// host, 10 tunnel closed by the OS (new: Swift's packet flow cannot close),
 /// 900 a worker panicked (new); 100+n connect, 200+n send, 300+n receive,
-/// 400+n liveness, 500+n rekey probe, with n the engine status.
+/// 400+n liveness, 500+n rekey probe, with n the engine status. A session error's
+/// status is already 100+kind, so a connect `Error::Socket` (status 101) is 201, a
+/// send one 301; see `oftc_host::reason` for what the host tells the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Failure(pub i32);
 

@@ -1,0 +1,7 @@
+# Highest provider (system extension) version known to have been activated on any
+# maintained Mac. macOS only moves a system extension forward, so every release
+# provider must be higher than these, and a rollback build higher still.
+# `app/check-versions.sh` (run by release.sh and CI) enforces it; docs/releasing.md
+# explains when to raise it. Format: `key value`, one per line; `#` starts a comment.
+build 36
+version 1.0.13

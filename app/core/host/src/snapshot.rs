@@ -22,6 +22,8 @@ pub struct ProfileFacts {
     pub transport: Transport,
     pub adopts_unkeyed_vpn_entry: bool,
     pub phase: Option<Phase>,
+    /// The provider failure code the supervisor recorded, see [`crate::reason`].
+    pub failure: Option<i32>,
     pub connect_at_login: bool,
 }
 
@@ -37,13 +39,15 @@ pub fn facts(root: &Path, agent_enabled: &dyn Fn() -> bool, now: SystemTime) -> 
             let directory = registry::entry_directory(root, &entry.id);
             let adopted = entry.profile.adopts_unkeyed_vpn_entry == Some(true);
             let legacy = adopted && *agent.get_or_insert_with(agent_enabled);
+            let record = StatusStore::new(&directory).read(now);
             ProfileFacts {
                 name: entry.name().to_owned(),
                 gateway: entry.profile.gateway.clone(),
                 saml_port: entry.profile.saml_port,
                 transport: entry.profile.transport,
                 adopts_unkeyed_vpn_entry: adopted,
-                phase: StatusStore::new(&directory).read(now).map(|s| s.phase),
+                phase: record.as_ref().map(|s| s.phase),
+                failure: record.and_then(|s| s.failure),
                 connect_at_login: intent::connect_at_login(&directory, legacy),
                 id: entry.id,
             }

@@ -44,6 +44,12 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_REF"
           zsh app/check-ui-edge.sh --grew-since "origin/$BASE_REF"
 
+      - name: Provider version above the activated floor
+        run: zsh app/check-versions.sh
+
+      - name: Installer script checks
+        run: zsh app/check-package-scripts.sh
+
       - name: Cache Rust dependencies
         uses: actions/cache@v4
         with:

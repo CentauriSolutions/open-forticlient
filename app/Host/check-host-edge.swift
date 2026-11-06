@@ -204,7 +204,8 @@ final class FakeStarter: HostStarter {
         require(first.state == .connected && first.connectedDate == Date(timeIntervalSince1970: 1_793_791_080))
         require(first.traffic == HostTraffic(session: "9f1c2e7a", rxBytes: 842_000_000, txBytes: 96_000_000,
                                                   rxRate: 1_200_000, txRate: 84_000, sampleSeq: 12))
-        require(second.state == .signIn && second.traffic == nil && second.error == nil && !second.autoStart)
+        require(second.state == .signIn && second.traffic == nil && !second.autoStart)
+        require(second.error == HostProfileError(code: .networkBlocked, detail: "The gateway did not answer over UDP or over TCP. This network may block UDP."))
 
         func frame(_ name: String) throws -> HostFrame { HostFrame.parse(try golden(dir, name)) }
         guard case .status(let event) = try frame("event_status.json") else { failNow("status event") }

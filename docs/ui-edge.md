@@ -277,7 +277,7 @@ payload of `status` events.
 | `profiles[].phase` | enum or null | `acquiring`, `connecting`, `connected`, `recovering`, `failed`, `stopped`; null without a live supervisor (the liveness rules of `StatusStore::read`) |
 | `profiles[].connected_since` | string or null | when this host first saw the profile connected (`NEVPNConnection.connectedDate` is not on the `VpnControl` seam), so `null` for a tunnel already up when the host started and for a profile that is not connected. A follow-up may add the date to `VpnControl`. |
 | `profiles[].traffic` | object or null | the newest sample while the profile is connected and some client subscribes to `traffic` (an idle host does not sample, so `null` otherwise). Rates are bytes per second derived in Rust; null until two samples of one session are 5 s or less apart, and after a missed sample (the totals stay). `session` is the first 8 hex digits, lower case, of the provider's session UUID and changes on a new provider connection; totals survive a rekey. `sample_seq` is one counter for the host, increasing with every sample of any profile. |
-| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7: the failure of the last `connect` or `disconnect` of that profile. Cleared when the next `connect`, `disconnect` or `remove` of that profile starts. |
+| `profiles[].error` | object or null | `{ "code", "detail" }`, codes in 4.7: the failure of the last `connect` or `disconnect` of that profile. Cleared when the next `connect`, `disconnect` or `remove` of that profile starts. When no op failure is held and `phase` is `failed`, it is the supervisor's recorded provider failure with a plain reason (`core/host/src/reason.rs`): `detail` is then a short English message with no host, address or secret, and the code is one of the connection reasons in 4.7. |
 
 The profile fields (`id`, `name`, `gateway`, `saml_port`, `transport`,
 `auto_start`, `phase`) are exactly what `core/host/src/snapshot.rs` already
@@ -353,6 +353,12 @@ stable part and replaces the substring match in `MenuCommandFailure.classify`:
 | `bad_request` | 2 | new (PR 3): arguments missing or malformed, a relative path, an export over an existing file, an unknown setting |
 | `invalid_file` | 3 | new (PR 3): a `.oftc` file that cannot be read or decoded, including one from a newer OFTC |
 | `cancelled` | 1 | new (PR 3): the client sent `cancel` |
+| `network_blocked` | 1 | `profiles[].error` only: the UDP attempt got no answer and the TCP 4443 fallback was refused or unanswered (provider code 201, the log line `OFTC provider stage 201 failed`) |
+| `gateway_not_found` | 1 | `profiles[].error` only: the gateway name did not resolve (200) |
+| `gateway_no_answer` | 1 | `profiles[].error` only: no answer in time (202) |
+| `gateway_refused` | 1 | `profiles[].error` only: IKE_SA_INIT, the pre-shared key check or CHILD_SA was refused (203, 204, 209 to 212) |
+| `sign_in_rejected` | 1 | `profiles[].error` only: EAP or the final AUTH was rejected, e.g. an expired sign-in (205 to 208) |
+| `connection_lost` | 1 | `profiles[].error` only: an established tunnel dropped and the three automatic recoveries in ten minutes are used up |
 | `internal` | 1 | everything else; `detail` is for the log, never shown verbatim |
 
 `already_configured` carries `profile_id` beside `detail`. The verbs and the ops return
@@ -431,6 +437,13 @@ PR 6 settled, where this section was silent:
   approval) is what `HostEdge` runs, directly, when `launchctl kickstart` finds no service.
   Approval shows as `unavailable(approval)` with a row linking to Login Items; it is not retried
   into a loop. `oftc setup` does not register the service yet.
+- #105's first-run repair (`SetupPlan`, `SetupRepair`) stays, reading the host's document (profile
+  count, per-profile `setup` state, component state) instead of the system. Two things it still
+  does itself, both in `app/ui-edge-baseline.txt`: the Keychain presence check and prompt for a
+  PSK (no op reports it), and `oftc setup`, run by `HostCLI` in `HostEdge.swift` with only its exit
+  status read (4 is approval). No op finishes every existing profile (`add_profile` needs one,
+  `component_update` skips the VPN entries); PR 7 adds it and removes both. The `.oftc` import
+  uses the `import` op, not the CLI.
 - The UI starts the host once per outage (kickstart, then register), not on every retry; a
   window opening or a wake starts the count again. An unsupported protocol is not retried.
 - `HostEdge` ignores a `status` whose `seq` is not above the last one of that connection and
@@ -596,6 +609,13 @@ construction. `showSetup()` routes by `component.state`: `update_required` opens
 the update view; `missing` and `approval` open the add view; a gateway that
 already exists returns `already_configured` with the profile id and the UI says
 so and offers to select it. Welcome's `.setup` action uses the same routing.
+
+Interim (issue 88, before the edge carries `component_update`): the Swift UI
+already routes by `SetupPlan` (`app/Host/SetupPlan.swift`). A profile that exists
+but is not finished (extension missing, older or awaiting approval, or no VPN
+entry) is finished by running `oftc setup` with no form; the form is only for a
+VPN that does not exist. Waiting for approval is a state with the Settings deep
+link, not an error. PR 7 replaces this with the update view above.
 
 ### 10.2 No menu-bar access to version info or options
 

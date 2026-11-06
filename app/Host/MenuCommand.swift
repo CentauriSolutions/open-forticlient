@@ -19,7 +19,9 @@ enum MenuCommandFailure: Equatable {
         case .busy: self = .busy
         case .tunnelsActive: self = .tunnelsActive
         case .timeout: self = .timeout
-        case .alreadyConfigured, .unknownOp, .badRequest, .invalidFile, .cancelled, .internalFailure:
+        case .alreadyConfigured, .unknownOp, .badRequest, .invalidFile, .cancelled, .internalFailure,
+             .networkBlocked, .gatewayNotFound, .gatewayNoAnswer, .gatewayRefused, .signInRejected,
+             .connectionLost:
             self = .failed(Int32(error.exit))
         }
     }
@@ -48,6 +50,22 @@ enum MenuCommandFailure: Equatable {
             return "Disconnect your VPNs first, then try again."
         case .failed(let status):
             return "Could not \(action) (helper exit \(status)). Check VPN setup and try again."
+        }
+    }
+}
+
+enum MenuCommandResult: Equatable {
+    case success
+    case failure(MenuCommandFailure)
+
+    /// The CLI's exit statuses are the wire's (4 is approval, docs/ui-edge.md 4.7).
+    init(_ end: HostCLIEnd) {
+        switch end {
+        case .exited(0): self = .success
+        case .exited(4): self = .failure(.approval)
+        case .exited(let status): self = .failure(.failed(status))
+        case .timedOut: self = .failure(.timeout)
+        case .launchFailed: self = .failure(.failed(127))
         }
     }
 }

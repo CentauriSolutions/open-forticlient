@@ -112,6 +112,7 @@ pub const VERBS: &[Verb] = &[
     rust("remove-config"),
     hidden("login-settings"),
     hidden("unregister-menu-login"),
+    hidden("unregister-host"),
     hidden("host serve"),
     hidden("host restart"),
     hidden("host register"),
@@ -139,6 +140,7 @@ pub enum Command {
     AgentStatus,
     RegisterAgent,
     UnregisterAgent,
+    UnregisterHost,
     LoginSettings,
     UnregisterMenuLogin,
     /// `host serve`: the socket service (`serve`).
@@ -242,6 +244,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
         ("agent-status", []) => Command::AgentStatus,
         ("register-agent", []) => Command::RegisterAgent,
         ("unregister-agent", []) => Command::UnregisterAgent,
+        ("unregister-host", []) => Command::UnregisterHost,
         ("login-settings", []) => Command::LoginSettings,
         ("unregister-menu-login", []) => Command::UnregisterMenuLogin,
         ("host", [sub]) if sub == "serve" => Command::HostServe,
@@ -511,6 +514,14 @@ pub fn run(args: &[String], env: &HostEnv, backends: &Backends, io: &mut Io) -> 
             Err(e) => finish(
                 io,
                 &format!("Could not unregister OFTC login agent: {e}"),
+                1,
+            ),
+        },
+        Command::UnregisterHost => match agent::unregister_host(backends.login) {
+            Ok(()) => finish(io, "OFTC host service unregistered", 0),
+            Err(e) => finish(
+                io,
+                &format!("Could not unregister OFTC host service: {e}"),
                 1,
             ),
         },
@@ -1094,7 +1105,7 @@ fn import_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{agent_item, RecordingLaunchctl};
+    use crate::agent::{agent_item, host_item, RecordingLaunchctl};
     use crate::keychain::MemoryKeychain;
     use crate::out::Capture;
     use crate::profile::testutil::{fixture, TempDir};
@@ -2754,6 +2765,22 @@ mod tests {
         h.expect(
             &["unregister-agent"],
             "Could not unregister OFTC login agent: OFTC login agent is unknown\n",
+            1,
+        );
+
+        // The host service has its own item: unregistering it leaves the login agent
+        // alone, and an unknown state is refused like the agent's.
+        let host = host_item();
+        h.login.set_status(&agent, LoginStatus::Enabled);
+        h.login.set_status(&host, LoginStatus::Enabled);
+        h.expect(&["unregister-host"], "OFTC host service unregistered\n", 0);
+        assert_eq!(h.login.status(&host), LoginStatus::NotRegistered);
+        assert_eq!(h.login.status(&agent), LoginStatus::Enabled);
+        h.expect(&["unregister-host"], "OFTC host service unregistered\n", 0);
+        h.login.set_status(&host, LoginStatus::Unknown);
+        h.expect(
+            &["unregister-host"],
+            "Could not unregister OFTC host service: OFTC host service is unknown\n",
             1,
         );
 

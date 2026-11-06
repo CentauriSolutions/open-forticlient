@@ -113,6 +113,16 @@ const NE_RECOVERABLE: [i64; 6] = [
     ne_vpn_error::SERVER_DISCONNECTED,
 ];
 
+/// The code of an `OFTCProvider` error; any other error says nothing about our tunnel.
+fn provider_code(error: &AppleError) -> Option<i32> {
+    match error {
+        AppleError::Ns { domain, code, .. } if domain == PROVIDER_DOMAIN => {
+            i32::try_from(*code).ok()
+        }
+        _ => None,
+    }
+}
+
 /// Which drops are worth a fresh sign-in, at most [`MAXIMUM`] in [`WINDOW`].
 #[derive(Default)]
 pub struct ReconnectPolicy {
@@ -187,6 +197,8 @@ pub struct Supervisor<'a> {
     unreachable_backoff: Duration,
     restart_after: Option<Duration>,
     published: Phase,
+    /// The provider failure code that ended the attempt, once known; published with `Failed`.
+    failure: Option<i32>,
     /// The message and exit code, once the supervisor has stopped.
     exit: Option<(String, i32)>,
 }
@@ -216,6 +228,7 @@ impl<'a> Supervisor<'a> {
             unreachable_backoff: BACKOFF_FIRST,
             restart_after: None,
             published: Phase::Acquiring,
+            failure: None,
             exit: None,
         }
     }
@@ -270,7 +283,7 @@ impl<'a> Supervisor<'a> {
     fn publish(&mut self, phase: Phase) {
         self.published = phase;
         let now = UNIX_EPOCH + Duration::from_secs(self.d.clock.unix_secs());
-        self.status.publish(phase, self.lease.id(), now);
+        self.status.publish_failure(phase, self.failure, self.lease.id(), now);
     }
 
     fn attach_observer(&mut self) {
@@ -549,6 +562,9 @@ impl<'a> Supervisor<'a> {
             return;
         }
         if !(self.ever_connected && self.connected_this_attempt) {
+            // The system log has the provider's code; the status document needs it
+            // too, so the user is told why.
+            self.failure = self.provider_failure();
             return self.stop("VPN disconnected before establishment; no token retry", 1);
         }
         self.connected_this_attempt = false;
@@ -583,6 +599,8 @@ impl<'a> Supervisor<'a> {
             self.diag(&format!("disconnect error domain={domain} code={code}"));
         }
         if !self.policy.allow_recovery(&error, now) {
+            // Only an exhausted recovery says "lost"; other drops have no plain reason.
+            self.failure = ReconnectPolicy::recoverable(&error).then_some(crate::reason::LOST);
             return self.stop("VPN disconnected; automatic recovery unavailable", 1);
         }
         self.restart_after = Some(now + RECOVERY_DELAY);
@@ -590,6 +608,17 @@ impl<'a> Supervisor<'a> {
         self.acquisition_deadline = None;
         self.unreachable_backoff = BACKOFF_FIRST;
         self.diag("starting fresh SSO recovery");
+    }
+
+    /// The provider's code for the drop the system reports, if it is one of ours.
+    fn provider_failure(&self) -> Option<i32> {
+        let error = self
+            .d
+            .vpn
+            .last_disconnect_error(&self.vpn_entry, ERROR_FETCH)
+            .ok()
+            .flatten()?;
+        provider_code(&error)
     }
 
     /// Keeps the login agent from reconnecting after a drop nobody explained.
@@ -944,6 +973,12 @@ mod tests {
             self.clock.sleep(Duration::from_secs(secs));
         }
 
+        /// The failure code the supervisor published, if any.
+        fn failure(&self) -> Option<i32> {
+            let now = UNIX_EPOCH + Duration::from_secs(self.clock.unix_secs());
+            StatusStore::new(&self.directory()).read(now).and_then(|status| status.failure)
+        }
+
         fn phase(&self) -> Option<Phase> {
             let now = UNIX_EPOCH + Duration::from_secs(self.clock.unix_secs());
             StatusStore::new(&self.directory())
@@ -1125,6 +1160,8 @@ mod tests {
             assert_eq!(exit(s), None);
             rig.mock.set_status(VpnStatus::Connecting);
             s.observe();
+            // UDP blocked and TCP refused: the provider's connect/Socket code.
+            rig.mock.set_last_error(Some(provider(201)));
             rig.mock.set_status(VpnStatus::Disconnected);
             s.observe();
             assert_eq!(
@@ -1132,6 +1169,8 @@ mod tests {
                 Some(("VPN disconnected before establishment; no token retry", 1))
             );
         });
+        assert_eq!(rig.phase(), Some(Phase::Failed));
+        assert_eq!(rig.failure(), Some(201), "the status document can say why");
         assert_eq!(rig.calls.borrow().len(), 1);
     }
 
@@ -1220,6 +1259,7 @@ mod tests {
                 Some(("VPN disconnected; automatic recovery unavailable", 1))
             );
         });
+        assert_eq!(rig.failure(), Some(crate::reason::LOST));
     }
 
     /// An unreachable gateway is retried with 5, 10, 20, then 30 second waits until

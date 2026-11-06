@@ -37,6 +37,10 @@ enum HostErrorCode: String, Decodable {
     case tunnelsActive = "tunnels_active", busy, unknownOp = "unknown_op", badRequest = "bad_request"
     case invalidFile = "invalid_file", cancelled
     case internalFailure = "internal"
+    /// `profiles[].error` only: why a connection failed or was lost (docs/ui-edge.md 4.5).
+    case networkBlocked = "network_blocked", gatewayNotFound = "gateway_not_found"
+    case gatewayNoAnswer = "gateway_no_answer", gatewayRefused = "gateway_refused"
+    case signInRejected = "sign_in_rejected", connectionLost = "connection_lost"
     /// Never on the wire: a request the UI gave up waiting for.
     case timeout
 
@@ -304,6 +308,55 @@ protocol HostStarter {
 
 /// `launchctl kickstart`, then `OFTCAgent host register` (registration and a kickstart, exit 4
 /// when macOS wants the user's approval) and `OFTCAgent host restart`, each with a timeout.
+enum HostCLIEnd: Equatable {
+    case exited(Int32), timedOut, launchFailed
+}
+
+/// Runs the bundled `oftc` for the one flow no host op covers yet (`oftc setup`, in
+/// SetupRepair: finish every existing profile). Only the exit status is reported; no output is
+/// captured or matched. PR 7 replaces this with a host op.
+final class HostCLI {
+    private let process = Process()
+    private let lock = NSLock()
+    private var finished = false
+    private var completion: ((HostCLIEnd) -> Void)?
+
+    func run(executable: URL, arguments: [String], home: URL, timeout: TimeInterval,
+             completion: @escaping (HostCLIEnd) -> Void) {
+        self.completion = completion
+        process.executableURL = executable
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = home.path
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            self?.finish(.exited(process.terminationStatus))
+        }
+        do { try process.run() } catch {
+            finish(.launchFailed)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self else { return }
+            if self.process.isRunning { self.process.terminate() }
+            self.finish(.timedOut)
+        }
+    }
+
+    private func finish(_ result: HostCLIEnd) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let handler = completion
+        completion = nil
+        lock.unlock()
+        DispatchQueue.main.async { handler?(result) }
+    }
+}
+
 struct LaunchctlStarter: HostStarter {
     let label: String
     let executable: URL?

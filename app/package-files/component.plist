@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<!-- Installer replaces the whole bundle at this path: files the new bundle
+		     does not have (an old Frameworks directory) are deleted, never merged. -->
+		<key>BundleOverwriteAction</key>
+		<string>upgrade</string>
+		<!-- Always the bundle in /Applications. A relocatable bundle makes Installer
+		     update any other copy with this identifier (a build in /private/tmp)
+		     instead. -->
+		<key>BundleIsRelocatable</key>
+		<false/>
+		<!-- Only overwrite a bundle with our identifier. -->
+		<key>BundleHasStrictIdentifier</key>
+		<true/>
+		<!-- Install what the package says even when the disk holds a higher build, so
+		     the app never silently stays old while the install reports success. -->
+		<key>BundleIsVersionChecked</key>
+		<false/>
+		<key>RootRelativeBundlePath</key>
+		<string>Applications/Open Forticlient.app</string>
+	</dict>
+</array>
+</plist>

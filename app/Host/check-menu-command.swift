@@ -25,6 +25,11 @@ import Foundation
         }
         precondition(failure.message(action: "connect") ==
                      "Could not connect (helper exit 8). Check VPN setup and try again.")
+        // `oftc setup` runs as a process (HostCLI): only its exit status is read, 4 being approval.
+        precondition(MenuCommandResult(.exited(0)) == .success)
+        precondition(MenuCommandResult(.exited(4)) == .failure(.approval))
+        precondition(MenuCommandResult(.exited(3)) == .failure(.failed(3)))
+        precondition(MenuCommandResult(.timedOut) == .failure(.timeout))
         print("Menu failure message checks passed: the host's typed error codes choose the text.")
     }
 }

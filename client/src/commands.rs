@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_APP: &str = "/Applications/Open Forticlient.app";
 const HOST_BINARY: &str = "Contents/MacOS/OFTCAgent";
 const AGENT_LABEL: &str = "com.chris.openforticlient.oftc.agent";
+const HOST_LABEL: &str = "com.chris.openforticlient.oftc.host";
 const PROVIDER_ID: &str = "com.chris.openforticlient.oftc.provider";
 /// The installed app's bundle identifier; the host's files and socket live under
 /// `~/Library/Application Support/<bundle id>/`.
@@ -1035,11 +1036,19 @@ fn run_uninstall(erase_profile: bool) -> Result<(), Box<dyn Error>> {
         );
     }
     let host = host_executable(Path::new(DEFAULT_APP))?;
-    let (home, _, target) = user_home_and_target()?;
+    let (home, domain, target) = user_home_and_target()?;
     if agent_plist(&home).is_file() {
         uninstall_legacy_agent()?;
     } else {
         stop_all_profiles(&host)?;
+    }
+    // The resident host service is a bundled login item: unregistering it is the only
+    // way to leave no Login Items entry behind (removing the app does not). Its job
+    // stops with it; supervisors are gone already, and package removal refuses a
+    // running OFTCAgent.
+    run_host(&host, &["unregister-host"])?;
+    if !wait_unloaded(&format!("{domain}/{HOST_LABEL}")) {
+        return Err("OFTC host service is still loaded; package removal stopped".into());
     }
     run_host(&host, &["unregister-agent"])?;
     if !wait_unloaded(&target) {

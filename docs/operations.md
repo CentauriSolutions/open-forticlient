@@ -28,6 +28,13 @@ request. If the provider needs an update, follow **Update VPN component** or
 does not establish that the provider update is complete. OFTC does not replace
 a connected provider or downgrade a newer provider from this setup flow.
 
+For a VPN that is already saved, **Set up…**, **Continue setup** and **Update VPN
+component** show no form: OFTC activates the component and finishes each VPN's
+entry itself, and shows "Waiting for approval in System Settings" until you turn
+OFTC on. It asks for a PSK only if that VPN has none saved. When OFTC starts and
+saved VPNs exist but the component is not ready, it does this once on its own
+(never for a login-item launch).
+
 Intentional app opening reveals the welcome window for an unacknowledged
 build, or a compact controls window after acknowledgement. Automatic login/service
 launch stays quiet; acknowledging a welcome does not enable VPN connection
@@ -103,7 +110,7 @@ login choice alone. The menu bar stays available to reconnect. Use
 Concurrent VPNs are separate tunnels: macOS chooses between them by the most
 specific route, so two gateways that push the same prefix are ambiguous.
 OFTC does not yet detect overlapping routes or conflicting DNS between
-profiles; see Issue 40.
+profiles; see #40.
 
 The upper icon arches use fine lines. The tunnel is grey when disconnected.
 While connected, each connected VPN's row shows its connection duration,
@@ -165,7 +172,7 @@ active or recovering VPN, then uses its native app-closing declaration for
 an idle running app. The final preinstall guard still requires the host to
 have exited; command-line and managed installs must quit it first. Installer's
 welcome and completion pages explain the controls and preserve saved settings.
-Actual native app closing remains a pilot validation step for build 27.
+Actual native app closing has not been validated with the real Installer; it is on the live checklist in [releasing.md](releasing.md).
 
 `oftc disconnect` stops every VPN; it leaves the app open. Open **OFTC** from Applications for its controls and choose **Quit OFTC**.
 For an older version with inaccessible controls, quit **OFTCAgent** in Activity
@@ -173,7 +180,7 @@ Monitor after disconnecting. Do not kill **OFTCTunnel**: it is the system-manage
 VPN component. Reopen OFTC after updating and connect when ready.
 
 If Installer reports a failure, view its log and find the OFTC package error.
-The build 24 preinstall script reports either `OFTC is running` or
+The package's preinstall script reports either `OFTC is running` or
 `An OFTC VPN is active` (any profile) when it refuses an update for those reasons. The generic
 failure summary alone does not establish the cause. Share only the relevant
 package error lines for diagnosis, rather than VPN logs or credentials.
@@ -206,6 +213,8 @@ their tunnels up (not yet verified live); the Network Extension owns packet flow
   `agent-status` and `register-agent` cover the login agent only. The menu app
   registers the host service itself, by the hidden verb `OFTCAgent host register`, the first
   time it finds nothing to start (macOS may ask the user to allow it in Login Items; exit 4).
+  The hidden `unregister-host` verb removes its registration, and `oftc uninstall` calls it so
+  no Login Items entry is left behind.
 - The package's postinstall runs
   `launchctl kickstart -k gui/<uid>/com.chris.openforticlient.oftc.host` for the
   logged-in user, so an upgrade replaces the running host with the new bundle's
@@ -215,8 +224,8 @@ their tunnels up (not yet verified live); the Network Extension owns packet flow
 - The login agent's `launchctl disable` after an unexplained drop never touches
   the host service's label.
 
-`oftc uninstall` stops the agent and VPN, closes the menu app, unregisters its
-login launch, removes OFTC's VPN configuration,
+`oftc uninstall` stops the agent and VPN, unregisters the host service and the login
+agent, closes the menu app, unregisters its login launch, removes OFTC's VPN configuration,
 requests system extension deactivation, then invokes the package removal
 helper with administrator access. It retains the OFTC profile, Keychain PSK,
 and logs. Use `oftc uninstall --erase-profile` to erase that profile and its
@@ -224,6 +233,5 @@ PSK as well. If macOS defers extension removal, complete its approval or
 reboot and rerun uninstall; the helper refuses to remove an active extension.
 
 The older Fortinet-backed controller remains available from Git history (the
-`legacy-controller` tag), not from the active source tree. See
-Issue 17 for release
-validation status.
+`legacy-controller` tag), not from the active source tree. See #17 for release
+validation status. When something fails, [support.md](support.md) lists what to send.
