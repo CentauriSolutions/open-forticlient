@@ -106,7 +106,7 @@ export FAKE_APP="$T/Applications/Open Forticlient.app"
 export APP=$FAKE_APP
 mkdir -p "$SHIM_STATE/out" "$HOME/Library/LaunchAgents" "$TMPDIR" "$T/shims"
 for c in oftc OFTCAgent sudo launchctl systemextensionsctl scutil pmset networksetup hdiutil installer pkgutil spctl stapler codesign \
-         ping nc netstat ps pgrep shutdown screencapture osascript route sfltool xcrun ifconfig date; do
+         ping nc netstat ps pgrep shutdown screencapture osascript route sfltool xcrun ifconfig date open; do
   ln -s "$HERE/selftest.sh" "$T/shims/$c"
 done
 make_app() {   # the fake installed bundle; S5's uninstall hook deletes it
@@ -122,7 +122,7 @@ make_app() {   # the fake installed bundle; S5's uninstall hook deletes it
 make_app
 export PATH="$T/shims:/usr/bin:/bin:/usr/sbin:/sbin"
 # Safety: every command that changes a system must resolve to its shim, or we stop.
-for c in sudo launchctl installer pmset networksetup shutdown hdiutil systemextensionsctl; do
+for c in sudo launchctl installer pmset networksetup shutdown hdiutil systemextensionsctl open; do
   [[ $(command -v $c) == "$T/shims/$c" ]] || { print "selftest: $c does not resolve to its shim; refusing to run"; exit 2; }
 done
 export LC_SLEEP_SCALE=0 OFTC_CLI="$T/shims/oftc" OLD_APP="$T/old/OFTC.app" INSTALL_LOG="$T/install.log"
@@ -381,6 +381,8 @@ has "S4 stapled" "$OUT" "PASS notarization ticket stapled"; has "S4 guard refuse
 has "S4 guard reason from installer output" "$OUT" "PASS installer refused with an OFTC message: Disconnect every OFTC VPN"; has "S4 install.log line is only INFO" "$OUT" "INFO no preinstall line in install.log"; has "S4 installed" "$OUT" "PASS installer says it succeeded"
 has "S4 replaced" "$OUT" "PASS bundle replaced (build 41 -> 42)"; has "S4 no Frameworks" "$OUT" "PASS Frameworks directories in the bundle (= 0)"
 has "S4 user data survived" "$OUT" "PASS profiles, PSK presence, auto-start, transport and pins"; has "S4 host kickstarted" "$OUT" "PASS postinstall kickstarted the host service"
+has "S4 opens the app after a successful install" "$OUT" "RUN  open $FAKE_APP --args --after-install"; has "S4 records it" "$OUT" "INFO opened the app for the console user"
+eq "S4 opens the app exactly once, after the last installer call" "$(grep -E '^(open |sudo -n installer|installer )' "$SHIM_STATE/calls.log" | tail -1 | cut -c1-5)/$(grep -c '^open ' "$SHIM_STATE/calls.log")" "open /1"
 has "S4 approval recorded" "$OUT" "approval requested: no"; lacks "S4 never exports or provisions a PSK" "$(cat "$SHIM_STATE/calls.log")" "export-profiles"
 s4_world; put sig $'Package "OFTC.pkg":\n   Status: no signature'; run s4-installer.sh --yes
 eq "S4 bad signature" "$RC" 1; has "S4 names it" "$OUT" "FAIL package signature chain"
@@ -437,6 +439,10 @@ run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
 eq "S5 bad signature stops before uninstalling" "$RC" 1; has "S5 says nothing was uninstalled" "$OUT" "nothing was uninstalled"
 lacks "S5 never uninstalls after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "oftc uninstall"
 lacks "S5 never installs after a bad signature" "$(cat "$SHIM_STATE/calls.log")" "installer -pkg"
+# good package: the reinstall opens the app, as the postinstall would for an interactive install
+reset_world; rule '^oftc uninstall' '' 0 'write_status; : > "$SHIM_STATE/procs"; rm -rf "$FAKE_APP"'
+run s5-uninstall-reboot.sh --yes --no-reboot --dmg "$T/OFTC-test.dmg"
+has "S5 reinstall opens the app" "$(grep -E '^open ' "$SHIM_STATE/calls.log")" "--args --after-install"
 
 # S6
 reset_world; write_status p1:connected p2:connected p3:disconnected

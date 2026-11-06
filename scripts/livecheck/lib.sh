@@ -514,6 +514,18 @@ lc_install_pkg() {   # pkg
   lc_sudo installer -pkg "$1" -target /
 }
 
+# The postinstall opens the app only for an interactive (Installer app) install; installer(8)
+# sets COMMAND_LINE_INSTALL and it does not, so no menu-bar icon appears. Do what the GUI path
+# does, as the console user (stages never run as root), after a successful install.
+lc_open_app_after_install() {
+  if (( EUID == 0 )); then lc_info "not opening the app: running as root, open OFTC from Applications"; return 0; fi
+  lc_run open "$APP" --args --after-install
+  if lc_live; then
+    (( LC_RC == 0 )) && lc_info "opened the app for the console user, as the postinstall does for an interactive install (installer(8) does not)" \
+      || lc_info "could not open the app (exit $LC_RC): open OFTC from Applications to get the menu-bar icon"
+  fi
+}
+
 LC_SHOTN=0
 # Numbered screenshot of the main display into the run directory, for a reviewer to look at.
 lc_shot() {   # name
