@@ -14,6 +14,7 @@ oftc \- standalone macOS FortiGate IPsec VPN client
 \fB\-\-from\fR \fIFILE\fR
 .br
 .B oftc profiles
+[\fB\-\-json\fR]
 .br
 .B oftc export
 [\fIPROFILE\fR...] [\fB\-o\fR \fIFILE\fR]
@@ -29,6 +30,11 @@ oftc \- standalone macOS FortiGate IPsec VPN client
 .br
 .B oftc status
 [\fIPROFILE\fR...]
+.br
+.B oftc status \-\-json
+.br
+.B oftc \-\-version
+[\fB\-\-json\fR]
 .br
 .B oftc autostart
 \fIPROFILE\fR \fBon\fR|\fBoff\fR
@@ -81,7 +87,14 @@ importing never changes an existing profile or its PSK. The file carries each
 profile's PSK, so no PSK prompt follows.
 .TP
 .B profiles
-List configured profiles.
+List configured profiles. The list comes from the OFTC host service when it is
+running, and from the app's host executable when it is not; the text is the same.
+.TP
+.B profiles \-\-json
+Print the host service's answer as one line of JSON:
+\fB{"profiles":[{"id","name","gateway","saml_port","transport","auto_start"}]}\fR.
+This form needs the host service; see
+.BR "HOST SERVICE" .
 .TP
 .B export
 Write the named profiles, or all, with their PSKs, as one file for a colleague
@@ -125,7 +138,21 @@ supervisor for every profile with this setting. New profiles start off.
 .TP
 .B status
 Show each profile's VPN state, nonsecret settings and CHILD SA rekey counts
-while connected, then login agent state and connect-at-login settings.
+while connected, then login agent state and connect-at-login settings. It runs
+the app's host executable directly, so it works when the host service is not
+running or its login item is not approved.
+.TP
+.B status \-\-json
+Print the host service's status document as one line of JSON: schema version,
+host and component versions, login item states, and for each profile its settings,
+connection state, supervisor phase and last error. It lists every profile, so it
+takes no profile names, and it needs the host service.
+.TP
+.B \-\-version
+Print this command's version. With
+.B \-\-json
+print the host service's reply to the version handshake:
+\fB{"protocol":N,"host":{"version","build","provider_build"}}\fR.
 .TP
 .B uninstall
 Disconnect OFTC, close the menu app, unregister both login services, remove any legacy agent and VPN configuration,
@@ -138,6 +165,48 @@ Also erase every OFTC profile and its exact Keychain PSK after disconnecting.
 .TP
 .B help
 Show a short command summary.
+.SH HOST SERVICE
+The app runs a per-user service, the host, that answers on a local socket. The
+commands above that take
+.B \-\-json
+ask it, and print its reply unchanged. Without
+.B \-\-json
+.B profiles
+asks it too but, when it is not running or has not been approved in System
+Settings, runs the app's host executable directly and prints the same text.
+.B setup
+and
+.B uninstall
+never need the service. The
+.B \-\-json
+forms have no direct form: without the service they print
+\fB{"ok":false,"error":{"code":"host_unavailable",...}}\fR and exit 5. A failure
+the service itself reports is printed the same way (its own object) and is never
+retried directly.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Any other failure, including a malformed command line. Errors are written to
+standard error.
+.PP
+With the host service (the
+.B \-\-json
+forms, and
+.B profiles
+when it answers) the failure's exit status is the one the service names:
+.B 2
+unknown request,
+.B 3
+configuration (no such profile, already configured, tunnels active),
+.B 4
+needs the user (approval or a PSK),
+.B 5
+the host service is not reachable or speaks another protocol version (update OFTC),
+.B 6
+busy.
 .SH DEVELOPMENT OPTION
 .TP
 .BI "\-\-app " /absolute/path/OFTC.app
@@ -145,10 +214,25 @@ Prefix
 .BR setup ,
 .BR connect ,
 .BR disconnect ,
+.BR status ,
+.BR profiles ,
 or
-.B status
+.B \-\-version
 to target a signed development build. Its bundled login agent is registered
 from that app. Do not register two OFTC apps with the same bundle identifier.
+.PP
+.BR profiles ,
+.BR "status \-\-json" ,
+and
+.B "\-\-version \-\-json"
+ask the host service at the socket named after the bundle identifier in that app's
+.IR Info.plist .
+A development build that shares the installed app's bundle identifier therefore
+asks whichever host holds that socket, which may be the installed app's, not the
+build's. Without
+.B \-\-json
+.B profiles
+answers from the build's own host executable only when no host service is running.
 .SH FILES
 .TP
 .I "/Applications/Open Forticlient.app"
@@ -162,5 +246,8 @@ Per-profile supervised connection log.
 .TP
 .I ~/Library/Application Support/com.chris.openforticlient.oftc/profiles/ID/
 Per-profile nonsecret settings and supervisor state.
+.TP
+.I ~/Library/Application Support/com.chris.openforticlient.oftc/host.sock
+The host service's local socket (owner only).
 .SH SEE ALSO
 .B systemextensionsctl(8)

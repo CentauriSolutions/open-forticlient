@@ -1,6 +1,7 @@
 //! Command-line interface for the OFTC macOS app and packet-tunnel provider.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 mod commands;
+mod edge;
 mod out;
 
 fn main() {
@@ -12,6 +13,6 @@ fn main() {
     };
     if let Err(error) = commands::run(args) {
         out::errln!("error: {error}");
-        std::process::exit(1);
+        std::process::exit(commands::exit_code(error.as_ref()));
     }
 }

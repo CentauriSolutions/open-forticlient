@@ -15,7 +15,7 @@ use crate::lease::{make_private_dir, open_lock_file};
 use crate::os;
 
 pub const LOCK_FILE: &str = "host.lock";
-pub const SOCKET_FILE: &str = "host.sock";
+pub const SOCKET_FILE: &str = oftc_ui_edge::SOCKET_FILE;
 /// `sun_path` holds 104 bytes including its NUL.
 const MAX_PATH: usize = 103;
 

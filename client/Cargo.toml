@@ -11,6 +11,9 @@ name = "oftc"
 path = "src/main.rs"
 
 [dependencies]
+oftc-ui-edge = { path = "../app/core/ui-edge" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["raw_value"] }
 
 [profile.release]
 opt-level = "z"
