@@ -58,10 +58,15 @@ than every build ever activated.
   keeps `main` from shipping below it.
 - The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
   update notice use it. It is not subject to the extension rule.
-- The first generally available release is 1.3.0, host build 42, provider build 50. The
-  host continues from 1.2.2/41 (the last shipped host, so the update notice sees an
-  upgrade). The provider takes 1.3.0 to match the product and build 50, which is above
-  the floor of 36 with room for further local gate bumps before release.
+- The first generally available release is 1.0.0, host build 44, provider 1.3.2 build 52.
+  The host's display version restarts at 1.0.0 for the public release; its build number
+  (`CFBundleVersion`) keeps rising from the private builds (1.2.2 was build 41), because
+  the app compares builds, not display versions, to tell a stale host from a current one.
+  The package does not version-check the bundle (`BundleIsVersionChecked` is false), so a
+  lower display version still installs over an older private build. Builds shared before
+  1.3.0 have no in-app update notice, so the first public release reaches those users by
+  being handed to them. The provider is separate: it must stay above the activated floor
+  (here 1.3.1 build 51, the highest activated on a maintained Mac), so it is 1.3.2/52.
 
 ## Cutting a release
 
