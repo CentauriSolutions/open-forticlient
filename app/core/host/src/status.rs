@@ -117,6 +117,19 @@ impl StatusStore {
         self.write(phase, failure, lease_id, std::process::id() as i32, now);
     }
 
+    /// Dismisses a recorded failure: a `failed` record becomes `stopped` with no
+    /// failure code. Only done while this process can take the profile's lease, so a
+    /// live supervisor's file is never written; a supervisor that starts afterwards
+    /// writes its own record. Anything other than `failed` is left alone.
+    pub fn clear_failure(&self, now: SystemTime) {
+        if !self.load().is_some_and(|record| record.phase == Phase::Failed) {
+            return;
+        }
+        if let Ok(lease) = lease::SupervisorLease::acquire(&self.directory) {
+            self.write(Phase::Stopped, None, lease.id(), std::process::id() as i32, now);
+        }
+    }
+
     fn write(&self, phase: Phase, failure: Option<i32>, lease_id: &str, process_id: i32, now: SystemTime) {
         let record = SupervisorStatus {
             phase,
@@ -138,15 +151,7 @@ impl StatusStore {
     /// held: after a crash the record outlives its supervisor and must not read as
     /// live.
     pub fn read(&self, now: SystemTime) -> Option<SupervisorStatus> {
-        let path = self.directory.join(FILE_NAME);
-        let meta = fs::metadata(&path).ok()?;
-        if meta.len() > MAX_BYTES {
-            return None;
-        }
-        let record: SupervisorStatus = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
-        if !is_uuid(&record.lease_id) {
-            return None;
-        }
+        let record = self.load()?;
         let age = reference_seconds(now) - record.updated;
         if !(-MAX_SKEW..=MAX_AGE).contains(&age) {
             return None;
@@ -158,6 +163,18 @@ impl StatusStore {
         let holds_lease = fs::read(&lock).is_ok_and(|bytes| bytes == record.lease_id.as_bytes());
         (holds_lease && os::process_alive(record.process_id) && lease::is_held(&lock))
             .then_some(record)
+    }
+}
+
+impl StatusStore {
+    /// The record as written, with no freshness or liveness check.
+    fn load(&self) -> Option<SupervisorStatus> {
+        let path = self.directory.join(FILE_NAME);
+        if fs::metadata(&path).ok()?.len() > MAX_BYTES {
+            return None;
+        }
+        let record: SupervisorStatus = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
+        is_uuid(&record.lease_id).then_some(record)
     }
 }
 
@@ -303,5 +320,42 @@ mod tests {
             json(&dir.0.join(FILE_NAME)),
             json(&fixture("rust/supervisor").join(FILE_NAME))
         );
+    }
+
+    /// `clear_failure` dismisses a failure only while no supervisor holds the lease,
+    /// and only a `failed` record; a supervisor that starts afterwards owns the file.
+    #[test]
+    fn clear_failure_rows() {
+        let now = at(FIXTURE_UPDATED + 10.0);
+        let other = "11111111-2222-4333-8444-555555555555";
+        // (phase written, supervisor live, record read afterwards)
+        for (phase, live, want) in [
+            (Phase::Failed, false, Phase::Stopped),
+            (Phase::Failed, true, Phase::Failed),
+            (Phase::Connected, true, Phase::Connected),
+            (Phase::Stopped, false, Phase::Stopped),
+        ] {
+            let dir = TempDir::new("clear");
+            let store = StatusStore::new(&dir.0);
+            let lease = live.then(|| SupervisorLease::acquire(&dir.0).unwrap());
+            let id = lease.as_ref().map_or(other, |l| l.id()).to_owned();
+            store.write(phase, Some(201), &id, std::process::id() as i32, at(FIXTURE_UPDATED));
+            store.clear_failure(now);
+            let record = store.read(now).unwrap();
+            assert_eq!(record.phase, want, "{phase:?} live={live}");
+            assert_eq!(record.failure.is_none(), want == Phase::Stopped && phase == Phase::Failed);
+            if live {
+                assert_eq!(record.lease_id, id, "a live supervisor's file is not touched");
+            }
+            // A failure after the disconnect is a new supervisor's, and is reported.
+            drop(lease);
+            let next = SupervisorLease::acquire(&dir.0).unwrap();
+            store.publish_failure(Phase::Failed, Some(202), next.id(), now);
+            assert_eq!(store.read(now).unwrap().failure, Some(202));
+        }
+        // No record at all, and an old one, are fine.
+        let dir = TempDir::new("clear-none");
+        StatusStore::new(&dir.0).clear_failure(now);
+        assert_eq!(StatusStore::new(&dir.0).read(now), None);
     }
 }
