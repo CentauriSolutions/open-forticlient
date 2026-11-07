@@ -19,7 +19,15 @@ app="$build/OFTC.app"
 extension="$app/Contents/Library/SystemExtensions/${bundle_id}.provider.systemextension"
 agent_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.agent.plist"
 host_plist="$app/Contents/Library/LaunchAgents/${bundle_id}.host.plist"
-target="$(uname -m)-apple-macosx13.0"
+# The one deployment target: the host's LSMinimumSystemVersion. Rust (rustc and the cc-built C
+# objects), the client and every Swift target use it, so each shipped Mach-O has minos == it.
+min_macos=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$root/Host/Info.plist")
+[[ "$min_macos" =~ '^[0-9]+\.[0-9]+$' && \
+   "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$root/Provider/Info.plist")" == "$min_macos" ]] || {
+    print -u2 'Host and Provider Info.plist must agree on a LSMinimumSystemVersion like 15.0'; exit 2
+}
+export MACOSX_DEPLOYMENT_TARGET="$min_macos"
+target="$(uname -m)-apple-macosx$min_macos"
 
 # A fresh output path protects installed and notarized artifacts.
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources" \
@@ -67,8 +75,10 @@ cp "$root/Host/en.lproj/InfoPlist.strings" "$app/Contents/Resources/en.lproj/Inf
 zsh "$root/check-ui-edge-test.sh"
 zsh "$root/check-ui-edge.sh"
 
+# Compiler and linker output, scanned below for deployment-target mismatches.
+linklog="$build/link.log"
 export CARGO_TARGET_DIR="$build/rust-target"
-cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml"
+cargo build --locked --release --workspace --manifest-path "$root/Cargo.toml" 2>&1 | tee -a "$linklog"
 # The provider is the Rust OFTCTunnel executable from this workspace build; it
 # statically links the engine, provider logic and preflight.
 cp "$CARGO_TARGET_DIR/release/OFTCTunnel" "$extension/Contents/MacOS/OFTCTunnel"
@@ -97,7 +107,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/RateSparklineView.swift" \
     "$root/Host/MenuBar.swift" \
     "$root/Host/main.swift" \
-    -o "$app/Contents/MacOS/OFTCAgent"
+    -o "$app/Contents/MacOS/OFTCAgent" 2>&1 | tee -a "$linklog"
 xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/LauncherAlias.swift" "$root/Host/check-misc.swift" -o "$build/misc-check"
 "$build/misc-check"
@@ -132,7 +142,7 @@ xcrun swiftc -swift-version 5 -target "$target" -framework AppKit \
 "$build/window-policy-check"
 "$build/setup-plan-check"
 CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
-    --manifest-path "$root/../client/Cargo.toml"
+    --manifest-path "$root/../client/Cargo.toml" 2>&1 | tee -a "$linklog"
 cp "$build/client-target/release/oftc" "$build/oftc"
 cp "$build/oftc" "$app/Contents/Helpers/oftc"
 # Every version shown (oftc --version, the man page) is the one in Host/Info.plist.
@@ -145,5 +155,12 @@ fi
 if otool -L "$extension/Contents/MacOS/OFTCTunnel" | grep -E '@rpath|liboftc'; then
     print -u2 'The provider must not depend on an OFTC dylib or an @rpath library'; exit 1
 fi
+# Every shipped Mach-O requires exactly the minimum macOS, and no link warned of a newer object.
+# (The package's usr/local/bin/oftc is a copy of $build/oftc.) The check's own test pins that it fails.
+zsh "$root/check-minos-test.sh"
+shipped=("$app/Contents/MacOS/OFTCAgent" "$app/Contents/Helpers/oftc" "$build/oftc" \
+    "$extension/Contents/MacOS/OFTCTunnel")
+shipped+=("${(@f)$(find "$app" -type f \( -name '*.dylib' -o -name '*.so' \) 2>/dev/null)}")
+zsh "$root/check-minos.sh" "$min_macos" --log "$linklog" ${shipped:#}
 print "Offline unsigned bundle built: $app"
 print 'No SAML flow, VPN start, extension activation, Developer ID signing, or notarization occurred.'
