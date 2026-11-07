@@ -39,7 +39,7 @@ type CfRef = *const std::ffi::c_void;
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGSessionCopyCurrentDictionary() -> CfRef;
-    fn CGMainDisplayID() -> u32;
+    fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayIsAsleep(display: u32) -> u32;
 }
 
@@ -72,15 +72,29 @@ fn session_flag(session: CfRef, key: &std::ffi::CStr) -> Option<bool> {
     }
 }
 
-/// Whether the user could answer a browser sign-in now: the main display is awake
+/// Whether any display is awake: a closed lid with an external display, or a main
+/// display that sleeps while another is on, still has someone looking at a screen.
+fn any_display_awake() -> bool {
+    let mut displays = [0u32; 16];
+    let mut count = 0u32;
+    // SAFETY: `displays` has room for the 16 ids we ask for and `count` is a valid
+    // out-pointer.
+    let status = unsafe { CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count) };
+    status == 0
+        && displays[..(count as usize).min(16)]
+            // SAFETY: takes a display id by value.
+            .iter()
+            .any(|display| unsafe { CGDisplayIsAsleep(*display) } == 0)
+}
+
+/// Whether the user could answer a browser sign-in now: a display is awake
 /// and the console session is this user's, logged in and not locked. A dark wake
 /// (network up, display off) and the login window both read false.
 struct OsPresence;
 
 impl Presence for OsPresence {
     fn can_answer(&self) -> bool {
-        // SAFETY: both calls take plain values and touch no memory of ours.
-        if unsafe { CGDisplayIsAsleep(CGMainDisplayID()) } != 0 {
+        if !any_display_awake() {
             return false;
         }
         // SAFETY: returns a retained dictionary or null.

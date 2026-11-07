@@ -154,20 +154,7 @@ oftc disconnect                  # every profile, or: oftc disconnect warehouse
 
 `connect` starts one supervised connection per profile; each supervisor runs
 independently and retries recoverable drops. Browser SSO may appear, one
-profile at a time.
-
-Recovery needs someone to answer the browser, so it waits for that. After a
-drop, a supervisor starts the fresh sign-in only while the display is awake and
-the console session is yours and unlocked. During a dark wake (network up,
-display off) or behind the lock screen it logs `waiting for the user` and the
-profile shows as recovering; no attempt is used and no deadline runs. It looks
-again every second, so after you wake the Mac and unlock it the browser opens
-within a few seconds. A sign-in that is open when the display goes off, or when
-the Mac sleeps, is abandoned and started afresh later; that is not a failed
-recovery. A recovery that is allowed to run still ends in a clear failure when
-it genuinely fails: three recoveries in ten minutes, a sign-in that times out
-while you are there, or an unreachable gateway past its deadline. The first
-connection you ask for with `connect` is never held back. On the first connection after an upgrade, it removes the
+profile at a time. On the first connection after an upgrade, it removes the
 old per-user LaunchAgent plist. `disconnect` stops the named VPNs and leaves
 their connect-at-login choices alone, so a deliberate stop stays down until
 Connect is requested. `autostart` registers the bundled agent, which starts a
@@ -178,6 +165,21 @@ CHILD SA rekey counts when connected. Supervisor logs are in
 `OFTC supervisor:`. A supervisor ends cleanly on SIGINT or SIGTERM, and when the
 gateway's certificate is not trusted it asks once in a window (decline stops it). Do not share raw SAML callbacks, PSKs, or
 packet captures.
+
+Recovery needs someone to answer the browser, so it waits for that. After a
+drop, a supervisor starts the fresh sign-in only while a display is awake and
+the console session is yours and unlocked. During a dark wake (network up,
+display off) or behind the lock screen it logs `waiting for the user` and the
+profile shows as recovering; no attempt is used and no deadline runs. It looks
+again every second, so after you wake the Mac and unlock it the browser opens
+within a few seconds. A sign-in that is open when the display goes off, or when
+the Mac sleeps, is abandoned and started afresh later; that is not a failed
+recovery. Sleep also restarts the sign-in and start deadlines, so a deadline
+that ran out while the Mac slept never ends a supervisor by itself. A recovery
+that is allowed to run still ends in a clear failure when it genuinely fails:
+three recoveries in ten minutes, a sign-in that times out while you are there,
+or an unreachable gateway past its deadline. The first connection you ask for
+with `connect` is never held back.
 
 A profile is identified by a short id, such as `office-vpn`, made from its name.
 A profile created before multi-profile support is migrated automatically the

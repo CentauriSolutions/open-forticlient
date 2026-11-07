@@ -225,6 +225,8 @@ pub struct Supervisor<'a> {
     published: Phase,
     /// A recovery is on hold until the user can answer a browser sign-in.
     waiting_for_user: bool,
+    /// When `observe` last ran, to notice a sleep between two looks.
+    last_seen: Duration,
     /// The provider failure code that ended the attempt, once known; published with `Failed`.
     failure: Option<i32>,
     /// The message and exit code, once the supervisor has stopped.
@@ -234,6 +236,7 @@ pub struct Supervisor<'a> {
 impl<'a> Supervisor<'a> {
     pub fn new(d: &'a Deps<'a>, job: Job<'a>, lease: SupervisorLease) -> Supervisor<'a> {
         let (notify, events) = channel();
+        let last_seen = d.clock.now();
         Supervisor {
             d,
             status: StatusStore::new(&crate::registry::entry_directory(job.root, &job.entry.id)),
@@ -257,6 +260,7 @@ impl<'a> Supervisor<'a> {
             restart_after: None,
             published: Phase::Acquiring,
             waiting_for_user: false,
+            last_seen,
             failure: None,
             exit: None,
         }
@@ -417,6 +421,12 @@ impl<'a> Supervisor<'a> {
 
     /// Signs in and starts the tunnel. Blocks for the browser sign-in.
     fn begin_attempt(&mut self) {
+        self.attempt();
+        // The sign-in blocked this thread; that was not a sleep.
+        self.last_seen = self.now();
+    }
+
+    fn attempt(&mut self) {
         if self.exit.is_some() {
             return;
         }
@@ -501,6 +511,25 @@ impl<'a> Supervisor<'a> {
         self.observe();
     }
 
+    /// The Mac slept (the clock counts sleep, so a deadline can run out while the
+    /// process is frozen). Whatever the supervisor was waiting for starts its time
+    /// over, so a wake with the display on and the network not yet up retries with the
+    /// normal policy instead of stopping on a deadline nobody could have met.
+    fn woke(&mut self) {
+        self.diag("woke from sleep; deadlines restart");
+        let now = self.now();
+        if self.acquisition_deadline.is_some() {
+            self.acquisition_deadline = Some(now + ACQUISITION_DEADLINE);
+        }
+        if self.start_deadline.is_some() {
+            self.start_deadline = if self.owns_connection {
+                Some(now + START_DEADLINE)
+            } else {
+                self.acquisition_deadline
+            };
+        }
+    }
+
     /// Puts the recovery on hold, with no attempt used and no deadline running, and
     /// looks again in a second. The status says `Recovering`; the policy is untouched,
     /// so a real outage still counts against it once the user is back.
@@ -531,6 +560,8 @@ impl<'a> Supervisor<'a> {
         // Besides a stop request, the sign-in is abandoned when the user can no longer
         // answer (display off, session locked) or the process was suspended.
         let lost = Cell::new(false);
+        // The first sign-in is the user's own request and is never held back.
+        let watch_user = self.ever_connected;
         let last_poll = Cell::new(self.now());
         let last_look = Cell::new(self.now());
         let cancelled = || {
@@ -541,7 +572,7 @@ impl<'a> Supervisor<'a> {
             if now.saturating_sub(last_poll.replace(now)) > SLEEP_GAP {
                 lost.set(true);
             }
-            if now.saturating_sub(last_look.get()) >= PRESENCE_POLL {
+            if watch_user && now.saturating_sub(last_look.get()) >= PRESENCE_POLL {
                 last_look.set(now);
                 if !self.d.presence.can_answer() {
                     lost.set(true);
@@ -553,7 +584,7 @@ impl<'a> Supervisor<'a> {
             // One browser sign-in at a time: each listens on a local port.
             let lock = SamlLock::acquire(self.job.root, &mut || cancelled(), SAML_LOCK_POLL);
             // Whoever held the lock may have taken minutes: look again before the browser.
-            if lock.is_some() && !self.d.presence.can_answer() {
+            if lock.is_some() && watch_user && !self.d.presence.can_answer() {
                 lost.set(true);
                 None
             } else if lock.is_some() && !self.stop_requested() {
@@ -581,10 +612,10 @@ impl<'a> Supervisor<'a> {
         match outcome {
             Some(Ok(options)) => result.options = Some(options),
             // Abandoned or failed with nobody there: not a failure of the recovery.
-            Some(Err(_)) | None
-                if lost.get() && !self.interrupted()
-                    || matches!(outcome, Some(Err(_))) && !self.d.presence.can_answer() =>
-            {
+            // `lost` is set only by the polls inside the wait (and the lock recheck), so a
+            // gateway that was unreachable while the display happens to be off is still
+            // an unreachable gateway.
+            Some(Err(_)) | None if lost.get() && !self.interrupted() => {
                 result.absent = true;
             }
             Some(Err(AcquireFailure::BeforeBrowser)) => {
@@ -606,11 +637,20 @@ impl<'a> Supervisor<'a> {
 
     /// Reacts to the tunnel's current status.
     fn observe(&mut self) {
+        self.react();
+        // The error fetch can block this thread; that was not a sleep.
+        self.last_seen = self.now();
+    }
+
+    fn react(&mut self) {
         if self.exit.is_some() {
             return;
         }
         if self.interrupted() {
             return self.stop("Supervisor stopped", 0);
+        }
+        if self.now().saturating_sub(self.last_seen) > SLEEP_GAP {
+            self.woke();
         }
         let status = self.status_now();
         if status == VpnStatus::Connected {
@@ -1056,6 +1096,7 @@ mod tests {
         calls: RefCell<Vec<(Duration, bool)>>,
         lock_held: RefCell<Vec<bool>>,
         opened_away: RefCell<Vec<bool>>,
+        diags: RefCell<Vec<String>>,
         reviews: RefCell<VecDeque<Trust>>,
         /// Whether `saml.lock` was free each time the review was asked.
         lock_free_at_review: RefCell<Vec<bool>>,
@@ -1107,6 +1148,7 @@ mod tests {
                     |r| r.awake.clone(),
                 ),
                 opened_away: RefCell::new(Vec::new()),
+                diags: RefCell::new(Vec::new()),
                 launchctl: RecordingLaunchctl::new(true),
                 signals: Arc::new(ManualSignals::default()),
                 script: RefCell::new(VecDeque::new()),
@@ -1140,6 +1182,12 @@ mod tests {
         fn failure(&self) -> Option<i32> {
             let now = UNIX_EPOCH + Duration::from_secs(self.clock.unix_secs());
             StatusStore::new(&self.directory()).read(now).and_then(|status| status.failure)
+        }
+
+        /// How many times the supervisor logged `event`.
+        fn logged(&self, event: &str) -> usize {
+            let line = format!("OFTC supervisor: {event}");
+            self.diags.borrow().iter().filter(|l| **l == line).count()
         }
 
         fn phase(&self) -> Option<Phase> {
@@ -1180,7 +1228,7 @@ mod tests {
             signals: &*rig.signals,
             presence: &*rig.awake,
             review: &review,
-            diagnostic: &|_| {},
+            diagnostic: &|line| rig.diags.borrow_mut().push(line.to_owned()),
         };
         let vpn_entry = rig.vpn.load_all().unwrap().remove(0);
         let job = Job {
@@ -1555,8 +1603,11 @@ mod tests {
         with_supervisor(&rig, |s| {
             s.begin_attempt();
             rig.mock.set_status(VpnStatus::Connecting);
-            rig.advance(89);
-            s.observe();
+            // Watched a second at a time, as the runner does (a longer jump is a sleep).
+            for _ in 0..89 {
+                rig.advance(1);
+                s.observe();
+            }
             assert_eq!(exit(s), None);
             rig.advance(1);
             s.observe();
@@ -1727,6 +1778,8 @@ mod tests {
             s.tick();
             assert_eq!(exit(s), None);
             assert_eq!(rig.calls.borrow().len(), 1, "no sign-in while nobody is there");
+            // Held at the door of the attempt, not discovered after the lock.
+            assert_eq!(rig.logged("begin attempt"), 1);
             rig.awake.set(true);
             let woke = rig.clock.now();
             run_for(&rig, s, 3);
@@ -1874,6 +1927,114 @@ mod tests {
         });
     }
 
+    /// The first sign-in is the user's own request (connect-at-login with the display
+    /// off still signs in); only a recovery waits.
+    #[test]
+    fn the_first_sign_in_is_not_held_back() {
+        let rig = Rig::new();
+        rig.awake.set(false);
+        rig.script(vec![Step::ok()]);
+        with_supervisor(&rig, |s| {
+            s.begin_attempt();
+            assert_eq!(exit(s), None);
+        });
+        assert_eq!(rig.mock.started().len(), 1);
+        assert_eq!(rig.opened_away.borrow()[..], [true]);
+    }
+
+    /// A gateway that is unreachable at the moment the display is off is an
+    /// unreachable gateway (backoff, certificate review), not an absent user; the
+    /// retry then waits at the door like any recovery.
+    #[test]
+    fn an_unreachable_gateway_with_the_display_off_is_not_absence() {
+        let rig = Rig::new();
+        let awake = rig.awake.clone();
+        rig.script(vec![
+            Step::ok(),
+            Step::fail(AcquireFailure::BeforeBrowser).meanwhile(move || awake.set(false)),
+            Step::ok(),
+        ]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            run_for(&rig, s, 2);
+            assert_eq!(rig.asked.get(), 1, "the review ran: an unreachable gateway");
+            assert_eq!(rig.logged("SAML bootstrap unavailable; retrying before token use"), 1);
+            run_for(&rig, s, 30);
+            assert_eq!((exit(s), rig.calls.borrow().len()), (None, 2));
+            rig.awake.set(true);
+            run_for(&rig, s, 3);
+            assert_eq!(rig.calls.borrow().len(), 3);
+        });
+    }
+
+    /// The hold must not carry the sign-in deadline of an unreachable-gateway attempt
+    /// (the 390 s) across the wait, however long the user stays away without the
+    /// clock jumping.
+    #[test]
+    fn the_hold_does_not_keep_the_sign_in_deadline() {
+        let rig = Rig::new();
+        let awake = rig.awake.clone();
+        rig.script(vec![
+            Step::ok(),
+            Step::fail(AcquireFailure::BeforeBrowser).meanwhile(move || awake.set(false)),
+            Step::ok(),
+        ]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            run_for(&rig, s, 1000);
+            assert_eq!((exit(s), rig.phase()), (None, Some(Phase::Recovering)));
+            rig.awake.set(true);
+            run_for(&rig, s, 3);
+            assert_eq!((exit(s), rig.calls.borrow().len()), (None, 3));
+        });
+    }
+
+    /// A sleep outlasts the deadline of whatever the supervisor was waiting for; the
+    /// wake, with the display on, starts the time over instead of stopping on it.
+    #[test]
+    fn a_sleep_restarts_the_deadlines() {
+        // The gateway is unreachable, the Mac sleeps past the 390 s, and wakes with
+        // the display on and the network not yet back.
+        let rig = Rig::new();
+        rig.script(vec![
+            Step::ok(),
+            Step::fail(AcquireFailure::BeforeBrowser),
+            Step::fail(AcquireFailure::BeforeBrowser),
+            Step::ok(),
+        ]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            run_for(&rig, s, 2);
+            assert_eq!(rig.calls.borrow().len(), 2);
+            rig.advance(3000);
+            s.tick();
+            assert_eq!(exit(s), None, "the wake gets the normal policy");
+            run_for(&rig, s, 30);
+            assert_eq!((exit(s), rig.calls.borrow().len()), (None, 4));
+        });
+        assert_eq!(rig.mock.started().len(), 2);
+
+        // The Mac sleeps while the tunnel is connecting: the 90 s start deadline.
+        let rig = Rig::new();
+        rig.script(vec![Step::ok()]);
+        with_supervisor(&rig, |s| {
+            s.begin_attempt();
+            rig.mock.set_status(VpnStatus::Connecting);
+            s.observe();
+            rig.advance(3000);
+            s.observe();
+            assert_eq!(exit(s), None);
+            // A fresh 90 s from the wake, watched a second at a time as the runner does.
+            run_for(&rig, s, 89);
+            assert_eq!(exit(s), None);
+            run_for(&rig, s, 1);
+            assert_eq!(exit(s), Some(("VPN start deadline expired", 1)));
+        });
+    }
+
     /// The runner: woken by status changes, it ends on a stop request.
     #[test]
     fn run_ends_when_a_stop_is_requested_after_the_tunnel_comes_up() {
@@ -1897,22 +2058,24 @@ mod tests {
         assert_eq!(rig.phase(), Some(Phase::Stopped));
     }
 
-    /// With no status change at all, the once-a-second tick alone ends a start that
-    /// runs past its deadline.
+    /// With no status change at all, the once-a-second tick alone notices a stop
+    /// request (a jump of ten seconds or more would read as a sleep, so the clock
+    /// moves two).
     #[test]
     fn run_ticks_observe_without_any_status_event() {
         let rig = Rig::new();
         rig.script(vec![Step::ok()]);
-        let (mock, clock) = (rig.mock.clone(), rig.clock.clone());
+        let (mock, clock, directory) = (rig.mock.clone(), rig.clock.clone(), rig.directory());
         let helper = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while mock.started().is_empty() && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            clock.sleep(Duration::from_secs(100)); // no event: only the tick can notice
+            assert!(request_stop(&directory)); // no status event: only the tick can notice
+            clock.sleep(Duration::from_secs(2));
         });
         let result = with_supervisor(&rig, |s| s.run());
         helper.join().unwrap();
-        assert_eq!(result, ("VPN start deadline expired".to_owned(), 1));
+        assert_eq!(result, ("Supervisor stopped".to_owned(), 0));
     }
 }
