@@ -88,6 +88,7 @@ xcrun swiftc -swift-version 5 -target "$target" -O -module-name OFTCAgent \
     "$root/Host/SetupPlan.swift" \
     "$root/Host/SetupRepair.swift" \
     "$root/Host/Welcome.swift" \
+    "$root/Host/WindowPolicy.swift" \
     "$root/Host/ControlsWindow.swift" \
     "$root/Host/HostEdge.swift" \
     "$root/Host/MenuCommand.swift" \
@@ -126,6 +127,9 @@ xcrun swiftc -swift-version 5 -target "$target" \
     "$root/Host/SetupPlan.swift" "$root/Host/SetupRepair.swift" "$root/Host/MenuModel.swift" \
     "$root/Host/TrafficHistory.swift" "$root/Host/check-setup-plan.swift" \
     -o "$build/setup-plan-check"
+xcrun swiftc -swift-version 5 -target "$target" -framework AppKit \
+    "$root/Host/WindowPolicy.swift" "$root/Host/check-window-policy.swift" -o "$build/window-policy-check"
+"$build/window-policy-check"
 "$build/setup-plan-check"
 CARGO_TARGET_DIR="$build/client-target" cargo build --locked --release \
     --manifest-path "$root/../client/Cargo.toml"

@@ -22,6 +22,7 @@ final class OFTCWelcome: NSWindowController, NSWindowDelegate {
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "OFTC"
+        OFTCWindowPolicy.apply(to: window)
         super.init(window: window)
         window.delegate = self
         let content = WelcomeBackground()

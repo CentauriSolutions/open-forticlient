@@ -14,6 +14,7 @@ final class OFTCControlsWindow: NSWindowController, NSWindowDelegate {
         window.title = "OFTC VPN"
         window.isReleasedWhenClosed = false
         window.isMovableByWindowBackground = true
+        OFTCWindowPolicy.apply(to: window)
         super.init(window: window)
         window.delegate = self
         window.contentViewController = content
