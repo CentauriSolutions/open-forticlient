@@ -48,27 +48,74 @@ enum SetupContinuation {
     enum Step: Equatable {
         case startService      // not running, or its approval is pending: start it / open Login Items
         case runUpdate         // the host's component_update
+        case openForm          // no VPN yet: the Add a VPN form is next, not a component update
         case wait              // starting, updating or unsupported: nothing to press yet
     }
 
-    static func step(service: ServiceState) -> Step {
+    static func step(service: ServiceState, plan: SetupPlan) -> Step {
         switch service {
         case .needsApproval, .notRunning: return .startService
-        case .ready: return .runUpdate
         case .starting, .updating, .unsupported: return .wait
+        case .ready:
+            switch plan {
+            case .addForm: return .openForm
+            case .repair: return .runUpdate
+            default: return .wait
+            }
         }
     }
 
-    /// Start the update again without a click: only after the button was pressed, never while a run
-    /// is going, only once the host answers and there is something to repair, and after a run that
-    /// ended waiting for approval only once the component state has moved (so a refused approval
-    /// cannot loop).
-    static func shouldRunNext(intent: Bool, running: Bool, service: ServiceState, plan: SetupPlan,
-                              phase: OFTCSetupRepair.Phase, component: VPNComponentState,
-                              waitedAt: VPNComponentState?) -> Bool {
-        guard intent, !running, service == .ready, plan == .repair else { return false }
-        if phase == .stillWaiting && component == waitedAt { return false }
+    /// What the window does by itself, without a click: only after the button was pressed, never
+    /// while a run is going, only once the host answers; after a run that ended waiting for approval
+    /// only once the component state has moved (so a refused approval cannot loop).
+    static func automatic(intent: Bool, running: Bool, service: ServiceState, plan: SetupPlan,
+                          phase: OFTCSetupRepair.Phase, component: VPNComponentState,
+                          waitedAt: VPNComponentState?) -> Step? {
+        guard intent, !running else { return nil }
+        let next = step(service: service, plan: plan)
+        guard next == .runUpdate || next == .openForm else { return nil }
+        if next == .runUpdate, phase == .stillWaiting, component == waitedAt { return nil }
+        return next
+    }
+}
+
+/// How "Set up…" starts, from the plan: the entry points all end at the form or the one window.
+enum SetupEntry: Equatable {
+    case form, window, welcome, refresh
+
+    static func route(_ plan: SetupPlan) -> Self {
+        switch plan {
+        case .addForm: return .form
+        case .waitForHost, .repair: return .window       // the service is item 1; the window acts at once
+        case .newerInstalled, .waitForDisconnect: return .welcome
+        case .nothingToDo: return .refresh
+        }
+    }
+}
+
+/// Fetching the host's document while the window is visible: one request in flight, every
+/// `interval` ticks, doubling (to a cap) after a failed or slow fetch and back to the base on success.
+struct SetupPoller: Equatable {
+    static let base = 2
+    static let cap = 16
+    private(set) var inFlight = false
+    private(set) var interval = SetupPoller.base
+    private var sinceLast = SetupPoller.base   // the first tick after opening fetches
+
+    /// One tick of a one-second timer; true when a fetch should start now.
+    mutating func tick(visible: Bool) -> Bool {
+        guard visible else { sinceLast = interval; return false }   // reopening fetches at once
+        guard !inFlight else { return false }
+        sinceLast += 1
+        guard sinceLast >= interval else { return false }
+        sinceLast = 0
+        inFlight = true
         return true
+    }
+
+    mutating func finished(ok: Bool) {
+        inFlight = false
+        interval = ok ? Self.base : min(interval * 2, Self.cap)
     }
 }
 
@@ -127,23 +174,29 @@ struct ComponentUpdatePresentation: Equatable {
     var pane: HostSettingsPane
 
     /// `service`: the host's reachability (its LaunchAgent may still need approval, or not be running).
+    /// `failure`: why the last run stopped (kept until the next click), shown in the window itself.
     init(status document: HostStatus?, phase: OFTCSetupRepair.Phase, anyActive: Bool, succeeded: Bool = false,
-         service: ServiceState = .ready) {
+         service: ServiceState = .ready, failure: String? = nil) {
         let state = document.map { VPNComponentState($0.component.state) } ?? .unavailable
         let profiles = document?.profiles ?? []
         let missing = profiles.filter { $0.state == .setup }.count
         let serviceReady = service == .ready
         let loginPending = document.map { [$0.login.menuItem, $0.login.agent, $0.login.hostAgent].contains(.requiresApproval) } ?? false
-        let allDone = serviceReady && state == .ready && missing == 0 && document != nil && !loginPending
-        if succeeded || allDone {
+        // The optional "OFTC at login" item never blocks the end; it is a line of its own.
+        let optionalLogin = serviceReady && loginPending
+            ? "Optional: allow OFTC at login in System Settings → Login Items & Extensions." : ""
+        // Never "ready" with no VPN: with none, the next thing is the Add a VPN form.
+        let allDone = serviceReady && state == .ready && missing == 0 && !profiles.isEmpty && document != nil
+        if (succeeded && !profiles.isEmpty) || allDone {
             let build = document?.component.expectedBuild.map { "build \($0)" } ?? "the bundled build"
             finished = true
             title = "Your VPN is ready"
             intro = succeeded
                 ? "The OFTC VPN component is now \(build). Your saved VPNs and PSKs were kept, and no sign-in was started. Choose Connect in OFTC when you want to use a VPN."
                 : "The OFTC VPN component is \(build) and your saved VPNs are added to macOS. Choose Connect in OFTC when you want to use a VPN."
+            if !optionalLogin.isEmpty { intro += "\n" + optionalLogin }
             component = ""; builds = ""; login = []; status = ""
-            button = "Done"; canRun = false; showSettings = false; pane = .extensions
+            button = "Done"; canRun = false; showSettings = loginPending; pane = .loginItems
             return
         }
         builds = Self.builds(document?.component)
@@ -158,6 +211,7 @@ struct ComponentUpdatePresentation: Equatable {
         busy = running || service == .starting || service == .updating
         showSettings = waiting || state == .approval || loginPending || serviceApproval
         pane = serviceApproval || (loginPending && !(waiting || state == .approval)) ? .loginItems : .extensions
+        let needsForm = serviceReady && profiles.isEmpty
 
         // The checklist.
         let serviceLine: String
@@ -181,29 +235,33 @@ struct ComponentUpdatePresentation: Equatable {
         case .unavailable: extensionLine = serviceReady ? "○  Network extension: state unknown; continuing checks it" : "○  Network extension: checked once the service runs"
         }
         let vpnLine: String
-        if profiles.isEmpty { vpnLine = "○  VPN configurations: none yet" }
+        if profiles.isEmpty { vpnLine = "○  VPN configurations: none yet; you add one next" }
         else if missing == 0 { vpnLine = "✓  VPN configurations: \(profiles.count) of \(profiles.count) added" }
         else if running && state == .ready { vpnLine = "…  VPN configurations: adding \(missing)" }
         else { vpnLine = "○  VPN configurations: \(profiles.count - missing) of \(profiles.count) added" }
         items = [serviceLine, extensionLine, vpnLine]
         component = items.joined(separator: "\n")
 
-        // The approvals macOS will ask for, in order. Nothing else is asked.
+        // The approvals macOS will ask for, in order; nothing else is asked. The VPN-configurations
+        // dialog comes whenever a VPN entry is yet to be saved: entries missing, or no VPN added yet.
         var asks: [String] = []
         if !serviceReady { asks.append("Allow OFTC's background service (System Settings → Login Items & Extensions)") }
         if state != .ready && state != .newer { asks.append("Allow the network extension (System Settings → Network Extensions; your password may be needed)") }
-        if entriesMissing { asks.append("Add VPN configurations (one macOS dialog: Allow)") }
-        if serviceReady && loginPending { asks.append("Allow OFTC at login (System Settings → Login Items & Extensions)") }
+        if entriesMissing || profiles.isEmpty { asks.append("Allow VPN configurations (one macOS dialog: Allow\(profiles.isEmpty ? ", after you add your VPN here" : ""))") }
         approvals = asks.count
         let list = asks.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-        intro = "Your saved VPN settings and PSK are kept, and no sign-in is started. macOS will ask you \(asks.count == 1 ? "once" : "\(asks.count) times"), in this order:\n\(list)"
+        intro = asks.isEmpty
+            ? "Nothing is left for macOS to ask. Your saved VPN settings and PSK are kept."
+            : "Your saved VPN settings and PSK are kept, and no sign-in is started. macOS will ask you \(asks.count == 1 ? "once" : "\(asks.count) times"), in this order:\n\(list)"
+        if !optionalLogin.isEmpty { intro += "\n" + optionalLogin }
 
         switch phase {
         case .working: status = SetupProgress.working
         case .waiting: status = SetupProgress.waiting
         case .stillWaiting: status = SetupProgress.stillWaiting
         case .idle:
-            if blocked { status = "Disconnect OFTC before finishing setup." }
+            if let failure { status = failure }
+            else if blocked { status = "Disconnect OFTC before finishing setup." }
             else if serviceApproval { status = SetupProgress.serviceWaiting }
             else if service == .starting || service == .updating { status = SetupProgress.working }
             else if state == .ready && entriesMissing {
@@ -214,12 +272,12 @@ struct ComponentUpdatePresentation: Equatable {
         case .working: button = "Working…"
         case .waiting: button = "Waiting for you…"
         default:
-            button = serviceReady && state == .updateRequired && !entriesMissing ? "Update VPN component" : "Finish setup"
+            button = needsForm ? "Add a VPN" : serviceReady && state == .updateRequired && !entriesMissing ? "Update VPN component" : "Finish setup"
         }
         let serviceRunnable = service == .needsApproval || service == .notRunning
         canRun = (document != nil || serviceRunnable) && (phase == .idle || phase == .stillWaiting) && !blocked
             && state != .newer && state != .checking && (serviceReady || serviceRunnable)
-            && (serviceRunnable || state != .ready || entriesMissing)
+            && (serviceRunnable || needsForm || state != .ready || entriesMissing)
     }
 
     static func builds(_ component: HostComponent?) -> String {

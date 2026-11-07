@@ -528,14 +528,15 @@ final class HostEdge {
     /// the setup window finishing).
     /// `completion` runs on the delivery queue after the fetched document has been delivered (or
     /// the fetch failed), so a caller can decide from what the host says now.
-    func refresh(completion: (() -> Void)? = nil) {
+    /// `completion(true)` when a document was fetched, `false` when the fetch failed.
+    func refresh(completion: ((Bool) -> Void)? = nil) {
         request("status", timeout: 10) { [weak self] result in
             if case .success(let data) = result, let status = try? HostWire.decoder.decode(HostStatus.self, from: data) {
                 self?.queue.async {
                     self?.accept(status)
-                    if let completion { self?.deliver(completion) }
+                    if let completion { self?.deliver { completion(true) } }
                 }
-            } else if let completion { completion() }
+            } else if let completion { completion(false) }
         }
     }
 

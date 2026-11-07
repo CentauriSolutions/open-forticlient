@@ -101,7 +101,7 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         if next.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         runButton.title = next.button
         runButton.isEnabled = next.canRun
-        settingsButton.isHidden = next.finished || !next.showSettings
+        settingsButton.isHidden = !next.showSettings
     }
 
     @objc private func run() { onRun() }

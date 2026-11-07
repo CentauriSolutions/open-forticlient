@@ -8,8 +8,8 @@ One window ("Set up OFTC", `app/Host/ComponentUpdate.swift`) carries a profile t
 
 | Mac | Approvals, in order |
 | --- | --- |
-| Fresh Mac (no profile) | 1. Background service (Login Items & Extensions). 2. Network extension (Network Extensions; password may be needed). 3. Add VPN configurations (one dialog). A fourth, "OFTC at login", is offered once with the first profile and can be declined. |
-| Reinstalling Mac (profiles on disk) | The same list, minus whatever macOS kept: usually the service again (the uninstall removed it), the extension if it was removed, and the VPN configurations dialog if their entries are gone. Up to 3, and the window says how many before anything starts. |
+| Fresh Mac (no profile) | 3: 1. Background service (Login Items & Extensions). 2. Network extension (Network Extensions; password may be needed). 3. VPN configurations (one dialog, after you add your VPN in the form). Optional, not counted: "OFTC at login", offered with the first profile. |
+| Reinstalling Mac (profiles on disk) | Up to 3, announced in the window from what is actually missing: the service (the uninstall removed it), the extension (if removed), and the VPN configurations dialog (if the entries are gone). A plain update over an older install is 1 (the extension). Optional, not counted: "OFTC at login". |
 
 They cannot be merged: each is a different OS authorization (a LaunchAgent, a system extension and a
 NEVPNManager save). What the app controls is the order and that none is asked twice: the extension is
@@ -25,6 +25,10 @@ replaced only when it is not already current, and VPN entries are saved once, af
 | A run that ended while waiting needed another "Set up…" click | It starts again by itself when the component state moves, and not before (no loop) |
 | "Set up…" while a run was in progress returned silently | It brings the window forward |
 | Closing after success reopened Welcome | Done closes; Welcome is only shown when something is still left (#124) |
+| A new user with the service just allowed got "Finish setup", an extension install and "Your VPN is ready" with no VPN | With the service ready and no profile the window hands over to the Add a VPN form; the ready state is never shown with no profile |
+| A failed run (timeout, host died, key prompt cancelled) stopped the spinner and said nothing in the window | The failure text and the next action stay in the window until the next click |
+| The window only refreshed after the button | While visible it fetches the document (one request in flight, backing off to 16 s), and at once on reopening |
+| "OFTC at login" pending left a disabled button and no Done | It is an optional line; Done and the ready state are not blocked |
 
 ## Known limits
 
