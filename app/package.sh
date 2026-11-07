@@ -48,14 +48,15 @@ if [[ -n "$(find "$stage/Applications" -type d -name Frameworks -print -quit)" ]
 fi
 cp "$cli" "$stage/usr/local/bin/oftc"
 cp "$root/package-files/remove-package" "$stage/usr/local/libexec/oftc/remove-package"
-cp "$root/../client/man/oftc.1" "$stage/usr/local/share/man/man1/oftc.1"
+# The source man page and Distribution.xml carry @OFTC_VERSION@; the product version is the app's plist.
+sed "s/@OFTC_VERSION@/$version/g" "$root/../client/man/oftc.1" > "$stage/usr/local/share/man/man1/oftc.1"
 pkgbuild --root "$stage" --install-location / --ownership recommended \
     --identifier com.chris.openforticlient.oftc.pkg --version "$version" \
     --component-plist "$root/package-files/component.plist" --scripts "$root/package-scripts" "$component"
 # The component version comes from the app, so a version bump is one edit.
 mkdir -p "$build/package-resources"
 ditto "$root/package-resources" "$build/package-resources"
-sed -i '' -E "s/(pkg-ref id=\"com.chris.openforticlient.oftc.pkg\" version=\")[0-9.]+/\1$version/" \
+sed -i '' "s/@OFTC_VERSION@/$version/g" \
     "$build/package-resources/Distribution.xml"
 productbuild --distribution "$build/package-resources/Distribution.xml" \
     --resources "$build/package-resources" --package-path "$build" "$unsigned"
