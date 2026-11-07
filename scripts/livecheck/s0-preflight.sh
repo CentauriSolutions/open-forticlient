@@ -40,7 +40,7 @@ fi
 lc_step "system extension"
 lc_run -q systemextensionsctl list
 if lc_live; then
-  oftc_ext=$(print -r -- "$LC_OUT" | grep -i oftc || true)
+  oftc_ext=$(lc_ext_lines)
   lc_info "oftc extension entries: $(print -r -- "$oftc_ext" | grep -c . || true)"
   expect_not_contains "no stale 'terminated waiting to uninstall' extension" "$oftc_ext" "terminated waiting"
 fi

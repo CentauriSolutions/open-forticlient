@@ -26,7 +26,9 @@ struct WelcomePresentation {
     var button: String
     var action: Action
 
-    init(upgrade: Bool, configured: Bool, active: Bool, component: VPNComponentState) {
+    /// `profilesExist`: profiles are on disk although none is `configured` (their VPN entries are
+    /// gone, as after an uninstall and reinstall), so setup finishes them and asks for no form.
+    init(upgrade: Bool, configured: Bool, active: Bool, component: VPNComponentState, profilesExist: Bool = false) {
         title = upgrade ? "OFTC is updated" : "Welcome to OFTC"
         if active {
             heading = "Your VPN is running"
@@ -38,6 +40,11 @@ struct WelcomePresentation {
             detail = component.detail
             button = "Check again"
             action = .check
+        } else if !configured && profilesExist {
+            heading = "Finish setting up your VPN"
+            detail = "Your saved VPN settings are still here, but macOS needs them added back. Finishing setup asks for no details and starts no sign-in."
+            button = "Finish setup"
+            action = .setup
         } else if !configured {
             heading = "Set up your VPN"
             detail = "Choose your VPN profile and approve OFTC when macOS asks. Then choose Connect in OFTC and sign in with your browser."
@@ -85,23 +92,6 @@ enum AppLaunchReason {
 
 // This record contains UI acknowledgement only. It grants no connection,
 // service-registration, or extension-activation permission.
-// Whether the first-run choice for "Launch OFTC at login" has been made. A fresh
-// install turns it on so the tray icon is there after every login; an upgrade
-// leaves whatever the user had. Either way it is decided once, and never again,
-// so turning it off in Settings stays off.
-struct MenuLoginDefaultStore {
-    let directory: URL
-    private var url: URL { directory.appendingPathComponent("menu-login-default.json") }
-    var decided: Bool { FileManager.default.fileExists(atPath: url.path) }
-
-    func markDecided() throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        try Data("{}".utf8).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
-}
-
 struct LaunchExperienceStore {
     private struct Record: Codable { let acknowledgedBuild: String }
     let directory: URL

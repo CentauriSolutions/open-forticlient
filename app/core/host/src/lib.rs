@@ -19,6 +19,7 @@ pub mod env;
 pub mod intent;
 pub mod keychain;
 pub mod lease;
+pub mod menu_login;
 pub mod out;
 pub mod profile;
 pub mod reason;

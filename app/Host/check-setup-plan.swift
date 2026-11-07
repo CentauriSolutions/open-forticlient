@@ -61,11 +61,14 @@ import Foundation
 
         // The component window: what it offers follows the host's document alone.
         func document(_ state: HostComponentState, installed: String? = "35",
-                      login: HostLoginState = .enabled) -> HostStatus {
-            HostStatus(schema: 1, generated: "", seq: 1,
+                      login: HostLoginState = .enabled, entryMissing: Bool = false) -> HostStatus {
+            let profile = HostProfile(id: "lab", name: "Lab", gateway: "vpn.example.com", samlPort: 9443,
+                                      transport: "udp", autoStart: false,
+                                      state: entryMissing ? .setup : .disconnected)
+            return HostStatus(schema: 1, generated: "", seq: 1,
                        host: HostInfo(version: "1.0.14", build: "36", providerBuild: "36"),
                        component: HostComponent(state: state, installedBuild: installed, expectedBuild: "36"),
-                       login: HostLogin(menuItem: login, agent: .enabled, hostAgent: .enabled), profiles: [])
+                       login: HostLogin(menuItem: login, agent: .enabled, hostAgent: .enabled), profiles: [profile])
         }
         typealias W = ComponentUpdatePresentation
         let idle = W(status: document(.updateRequired), phase: .idle, anyActive: false)
@@ -77,6 +80,18 @@ import Foundation
         let waiting = W(status: document(.updateRequired), phase: .waiting, anyActive: false)
         precondition(waiting.showSettings && waiting.pane == .extensions && waiting.status == SetupProgress.waiting)
         precondition(W(status: document(.updateRequired), phase: .stillWaiting, anyActive: false).canRun, "run again after a wait")
+        // Component ready, every VPN entry gone (uninstall, then reinstall): the plan is a repair
+        // and the window must let it run, or Set up… and Close would loop for ever.
+        let gone = W(status: document(.ready, installed: "36", entryMissing: true), phase: .idle, anyActive: false)
+        precondition(plan(1, .ready) == .repair && gone.canRun && gone.button == "Finish setup")
+        precondition(gone.status == "Your saved VPNs will be added back to macOS. No sign-in is started.")
+        precondition(!W(status: document(.ready, entryMissing: true), phase: .idle, anyActive: true).canRun, "not beside a live tunnel")
+        precondition(!W(status: document(.ready), phase: .idle, anyActive: false).canRun, "ready with nothing missing")
+        precondition(!W(status: document(.newer, entryMissing: true), phase: .idle, anyActive: false).canRun)
+        precondition(!W(status: document(.checking, entryMissing: true), phase: .idle, anyActive: false).canRun)
+        let reinstall = WelcomePresentation(upgrade: false, configured: false, active: false, component: .ready, profilesExist: true)
+        precondition(reinstall.action == .setup && reinstall.button == "Finish setup")
+        precondition(WelcomePresentation(upgrade: false, configured: false, active: false, component: .ready).button == "Set up OFTC")
         let login = W(status: document(.ready, login: .requiresApproval), phase: .idle, anyActive: false)
         precondition(login.showSettings && login.pane == .loginItems && !login.canRun)
         precondition(login.login[0] == "OFTC at login: needs approval in Login Items & Extensions")

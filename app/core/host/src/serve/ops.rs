@@ -30,6 +30,7 @@ use super::{ops_setup, ops_update, Services};
 use crate::bundle;
 use crate::commands;
 use crate::lease;
+use crate::menu_login;
 use crate::profile;
 use crate::registry::{self, ProfileEntry};
 use crate::typed::Failure;
@@ -148,6 +149,7 @@ pub const OPS: &[&str] = &[
     "import_preview",
     "import",
     "settings_set",
+    "menu_login_default",
     "check_update",
     "open_settings",
     "add_profile",
@@ -181,6 +183,7 @@ pub fn run(request: &Request, cx: &OpCx) -> Option<OpResult> {
         "export" => args::<ExportArgs>(request).and_then(|a| export(cx, &a)),
         "import_preview" => args::<PathArgs>(request).and_then(|a| import_preview(cx, &a.path)),
         "import" => args::<PathArgs>(request).and_then(|a| import(cx, &a.path)),
+        "menu_login_default" => args::<FirstSetupArgs>(request).and_then(|a| menu_login_default(cx, &a)),
         "settings_set" => args::<SettingsArgs>(request).and_then(|a| settings_set(cx, &a)),
         "open_settings" => args::<oftc_ui_edge::PaneArgs>(request)
             .and_then(|a| ops_setup::open_settings(cx, a.pane)),
@@ -501,6 +504,24 @@ fn import(cx: &OpCx, path: &str) -> OpResult {
     value(&ImportResult { added })
 }
 
+#[derive(serde::Deserialize)]
+struct FirstSetupArgs {
+    first_setup: bool,
+}
+
+/// After a setup window made the first profile: offer the menu login item once
+/// (`menu_login::offer`). Never fails the setup: approval is the item's own state.
+fn menu_login_default(cx: &OpCx, args: &FirstSetupArgs) -> OpResult {
+    let made_one = !registry::entries(cx.root()).is_empty();
+    let outcome = menu_login::offer(cx.root(), cx.services.login, args.first_setup && made_one);
+    Ok(json!({ "state": match outcome {
+        menu_login::Outcome::Registered => "registered",
+        menu_login::Outcome::NeedsApproval => "requires_approval",
+        menu_login::Outcome::Skipped => "skipped",
+        menu_login::Outcome::Failed => "failed",
+    } }))
+}
+
 fn flag(setting: &SettingsArgs) -> Result<bool, Failure> {
     setting.value.as_bool().ok_or_else(|| {
         Failure::new(
@@ -516,6 +537,8 @@ fn settings_set(cx: &OpCx, setting: &SettingsArgs) -> OpResult {
     let services = cx.services;
     match setting.key.as_str() {
         "menu_login" => {
+            // From here on the state is the user's: the first-setup default never overrides it.
+            menu_login::remember_choice(cx.root());
             let item = LoginItem::MainApp;
             let done = if on {
                 services.login.register(&item)

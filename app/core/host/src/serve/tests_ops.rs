@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use super::tests::{me, settled, Client, Rig, FORTI_PSK};
 use crate::keychain::Keychain;
+use crate::profile::{Profile, Transport};
 use crate::profile::testutil::TempDir;
 use crate::registry;
 
@@ -606,6 +607,24 @@ fn component_update_installs_missing_vpn_entries() {
     });
 }
 
+/// The extension is already current but every VPN entry is gone (an uninstall, then a
+/// reinstall): `component_update` must not stop at "ready", it recreates the entries.
+#[test]
+fn component_update_recreates_entries_when_the_component_is_ready() {
+    let rig = Rig::new();
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        let profile = Profile::new("vpn.example.com", 9443, Transport::Udp, Some("Office VPN"), None).unwrap();
+        crate::commands::save_profile(rig.env.root(), &profile, None).unwrap();
+        rig.keychain.set("vpn.example.com", b"psk").unwrap();
+        let (progress, reply) = op(&mut client, r#"{"id":3,"op":"component_update"}"#);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(progress[4..], [json!(["vpn_entry", "running"]), json!(["vpn_entry", "done"])]);
+        assert_eq!(error(&op(&mut client, ADD).1), ("already_configured", 3));
+    });
+}
+
 /// A request id that is still running cannot be reused, and an op nobody knows is
 /// `unknown_op` without closing the connection.
 #[test]
@@ -779,5 +798,41 @@ fn flights_are_capped_and_stop_with_the_connection() {
             );
             thread::sleep(Duration::from_millis(50));
         }
+    });
+}
+
+/// `menu_login_default`: the setup window's completion offers the item once; a repair
+/// (`first_setup` false) and a choice made through `settings_set` never get it.
+#[test]
+fn the_menu_login_default_is_offered_once_and_a_choice_wins() {
+    use oftc_apple::login::{LoginItem, LoginItems, LoginStatus};
+    let state = |client: &mut Client, id: u32, first: bool| {
+        op(
+            client,
+            &format!(r#"{{"id":{id},"op":"menu_login_default","first_setup":{first}}}"#),
+        )
+        .1["result"]["state"]
+            .clone()
+    };
+    let rig = Rig::new();
+    rig.login.set_status(&LoginItem::MainApp, LoginStatus::NotRegistered);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        assert_eq!(state(&mut client, 2, false), "skipped");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
+        assert_eq!(state(&mut client, 3, true), "registered");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::Enabled);
+        assert_eq!(state(&mut client, 4, true), "skipped");
+    });
+    let rig = Rig::new();
+    rig.login.set_status(&LoginItem::MainApp, LoginStatus::NotRegistered);
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        let off = r#"{"id":2,"op":"settings_set","key":"menu_login","value":false}"#;
+        assert_eq!(op(&mut client, off).1["ok"], true);
+        assert_eq!(state(&mut client, 3, true), "skipped");
+        assert_eq!(rig.login.status(&LoginItem::MainApp), LoginStatus::NotRegistered);
     });
 }
