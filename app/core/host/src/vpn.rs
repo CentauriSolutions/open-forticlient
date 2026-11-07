@@ -115,6 +115,10 @@ pub(crate) fn stop_profile(a: &Access, entry: &ProfileEntry) -> Result<Stopped, 
             "Could not signal OFTC supervisor; VPN left running",
         ));
     }
+    // A failure the user is dismissing: with no supervisor left to stop, nothing
+    // else would ever replace its record.
+    crate::status::StatusStore::new(&registry::entry_directory(a.env.root(), &entry.id))
+        .clear_failure(std::time::SystemTime::now());
     match a.load_manager(entry)? {
         None => Ok(Stopped::NoConfiguration),
         Some(vpn) => {

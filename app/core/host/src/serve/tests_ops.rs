@@ -175,6 +175,38 @@ fn disconnect_shows_stopping_until_down() {
     });
 }
 
+/// A failed connect leaves the row in `attention`; `disconnect` of that row (no
+/// supervisor is running) dismisses it, and a failure recorded afterwards shows again.
+#[test]
+fn disconnect_dismisses_a_recorded_failure() {
+    let rig = Rig::new();
+    let directory = registry::entry_directory(rig.env.root(), "lab");
+    let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_794_800);
+    let lease = "A4DF24C9-D3A9-4D2E-896A-95AC0C2B535A";
+    let fail = || {
+        crate::status::StatusStore::new(&directory).publish_failure(
+            crate::status::Phase::Failed,
+            Some(201),
+            lease,
+            now,
+        )
+    };
+    rig.serving(&me, |socket| {
+        let mut client = Client::connect(socket);
+        ready(&mut client);
+        for round in 0..2 {
+            fail();
+            let status = client.call(r#"{"id":2,"op":"status"}"#)["result"].clone();
+            assert_eq!(status["profiles"][0]["state"], "attention", "{round}");
+            let (_, reply) = op(&mut client, r#"{"id":3,"op":"disconnect","profile":"lab"}"#);
+            assert_eq!(reply["ok"], true);
+            let status = client.call(r#"{"id":4,"op":"status"}"#)["result"].clone();
+            assert_eq!(status["profiles"][0]["state"], "disconnected", "{round}");
+            assert_eq!(status["profiles"][0]["error"], Value::Null);
+        }
+    });
+}
+
 /// `remove` stops the profile, waits for the tunnel, and erases its files, entry and
 /// PSK; a tunnel that never comes down removes nothing (`tunnels_active`), and a
 /// profile that is already gone is a success.
