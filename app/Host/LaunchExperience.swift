@@ -22,8 +22,10 @@ enum VPNComponentState: Equatable {
 /// after the window closed, never from what the window was opened with: a finished run, or a
 /// configured VPN with a ready component, has nothing left to set up.
 enum WelcomeAfterComponentWindow {
-    static func shouldShow(fromSetup: Bool, succeeded: Bool, configured: Bool, component: VPNComponentState) -> Bool {
-        fromSetup && !succeeded && !(configured && component == .ready)
+    /// `handedOff`: the window closed to open the Add a VPN form, which is the next window.
+    static func shouldShow(fromSetup: Bool, succeeded: Bool, configured: Bool, component: VPNComponentState,
+                           handedOff: Bool = false) -> Bool {
+        fromSetup && !succeeded && !handedOff && !(configured && component == .ready)
     }
 }
 

@@ -61,14 +61,14 @@ import Foundation
 
         // The component window: what it offers follows the host's document alone.
         func document(_ state: HostComponentState, installed: String? = "35",
-                      login: HostLoginState = .enabled, entryMissing: Bool = false) -> HostStatus {
+                      login: HostLoginState = .enabled, entryMissing: Bool = false, profiles count: Int = 1) -> HostStatus {
             let profile = HostProfile(id: "lab", name: "Lab", gateway: "vpn.example.com", samlPort: 9443,
                                       transport: "udp", autoStart: false,
                                       state: entryMissing ? .setup : .disconnected)
             return HostStatus(schema: 1, generated: "", seq: 1,
                        host: HostInfo(version: "1.0.14", build: "36", providerBuild: "36"),
                        component: HostComponent(state: state, installedBuild: installed, expectedBuild: "36"),
-                       login: HostLogin(menuItem: login, agent: .enabled, hostAgent: .enabled), profiles: [profile])
+                       login: HostLogin(menuItem: login, agent: .enabled, hostAgent: .enabled), profiles: count == 0 ? [] : [profile])
         }
         typealias W = ComponentUpdatePresentation
         let idle = W(status: document(.updateRequired), phase: .idle, anyActive: false)
@@ -97,16 +97,130 @@ import Foundation
         precondition(done.finished && done.title == "Your VPN is ready" && done.button == "Done" && !done.canRun && !done.showSettings)
         precondition(done.intro == "The OFTC VPN component is now build 36. Your saved VPNs and PSKs were kept, and no sign-in was started. Choose Connect in OFTC when you want to use a VPN.")
         precondition(done.component.isEmpty && done.builds.isEmpty && done.login.isEmpty && done.status.isEmpty)
-        precondition(!idle.finished && idle.title == "Update your OFTC VPN" && idle.intro.contains("saved VPN settings and PSK are kept"))
+        precondition(!idle.finished && idle.title == "Finish setting up OFTC" && idle.intro.contains("saved VPN settings and PSK are kept"))
         // Closing the window: Welcome only when something is left to set up, judged from fresh status.
         typealias A = WelcomeAfterComponentWindow
         precondition(!A.shouldShow(fromSetup: true, succeeded: true, configured: false, component: .missing), "never after a success")
         precondition(!A.shouldShow(fromSetup: true, succeeded: false, configured: true, component: .ready), "a ready VPN has nothing to set up")
         precondition(A.shouldShow(fromSetup: true, succeeded: false, configured: false, component: .approval))
         precondition(!A.shouldShow(fromSetup: false, succeeded: false, configured: false, component: .missing), "the options menu just closes")
+
+        // The walkthrough: every window state from "double-click install" to "ready", one row each.
+        // Columns: service, component, a VPN entry missing, phase, then what the window shows (the
+        // button, whether it can be pressed, whether something is in progress, the approvals still
+        // to come, and the first character of each checklist line).
+        struct Row { let name: String; let service: ServiceState; let component: HostComponentState
+                     var entryMissing = true; var phase: OFTCSetupRepair.Phase = .idle; var active = false
+                     let button: String; let canRun: Bool; let busy: Bool; let approvals: Int; let marks: String }
+        let walk: [Row] = [
+            .init(name: "reinstall: service needs approval, nothing else done", service: .needsApproval, component: .missing,
+                  button: "Finish setup", canRun: true, busy: false, approvals: 3, marks: "→○○"),
+            .init(name: "service not running yet (starts on click)", service: .notRunning, component: .missing,
+                  button: "Finish setup", canRun: true, busy: false, approvals: 3, marks: "○○○"),
+            .init(name: "service starting: working, nothing to press", service: .starting, component: .missing,
+                  button: "Finish setup", canRun: false, busy: true, approvals: 3, marks: "…○○"),
+            .init(name: "service ready, extension missing", service: .ready, component: .missing,
+                  button: "Finish setup", canRun: true, busy: false, approvals: 2, marks: "✓○○"),
+            .init(name: "click: working at once", service: .ready, component: .missing, phase: .working,
+                  button: "Working…", canRun: false, busy: true, approvals: 2, marks: "✓…○"),
+            .init(name: "macOS asks for the extension: waiting for you", service: .ready, component: .approval, phase: .waiting,
+                  button: "Waiting for you…", canRun: false, busy: true, approvals: 2, marks: "✓→○"),
+            .init(name: "request ended while waiting: runs again by itself", service: .ready, component: .approval, phase: .stillWaiting,
+                  button: "Finish setup", canRun: true, busy: false, approvals: 2, marks: "✓→○"),
+            .init(name: "extension approved, VPN entries being added", service: .ready, component: .ready, phase: .working,
+                  button: "Working…", canRun: false, busy: true, approvals: 1, marks: "✓✓…"),
+            .init(name: "update over an older install: one approval", service: .ready, component: .updateRequired, entryMissing: false,
+                  button: "Update VPN component", canRun: true, busy: false, approvals: 1, marks: "✓○✓"),
+            .init(name: "tunnel live during an update: blocked", service: .ready, component: .updateRequired, entryMissing: false, active: true,
+                  button: "Update VPN component", canRun: false, busy: false, approvals: 1, marks: "✓○✓"),
+            .init(name: "newer extension installed: blocked", service: .ready, component: .newer, entryMissing: false,
+                  button: "Finish setup", canRun: false, busy: false, approvals: 0, marks: "✓✗✓"),
+            .init(name: "old service too old: blocked", service: .unsupported, component: .missing,
+                  button: "Finish setup", canRun: false, busy: false, approvals: 3, marks: "✗○○"),
+        ]
+        for row in walk {
+            let got = W(status: document(row.component, installed: row.component == .missing ? nil : "35", entryMissing: row.entryMissing),
+                        phase: row.phase, anyActive: row.active, service: row.service)
+            let marks = String(got.items.compactMap(\.first))
+            precondition(got.button == row.button && got.canRun == row.canRun && got.busy == row.busy
+                         && got.approvals == row.approvals && marks == row.marks && !got.finished,
+                         "\(row.name): \(got.button) \(got.canRun) \(got.busy) \(got.approvals) \(marks)")
+        }
+        // The end: everything done is the success state on its own, with one Done.
+        let everything = W(status: document(.ready, installed: "36"), phase: .idle, anyActive: false)
+        precondition(everything.finished && everything.button == "Done" && !everything.canRun && everything.approvals == 0)
+        // Said in advance, in order, with how many.
+        let fresh = W(status: document(.missing, installed: nil, entryMissing: true), phase: .idle, anyActive: false, service: .needsApproval)
+        precondition(fresh.intro.contains("macOS will ask you 3 times, in this order:\n1. Allow OFTC's background service")
+                     && fresh.intro.contains("\n2. Allow the network extension") && fresh.intro.contains("\n3. Allow VPN configurations"))
+        precondition(fresh.showSettings && fresh.pane == .loginItems && fresh.status == SetupProgress.serviceWaiting)
+        // More walkthrough rows: host down, unknown states, no VPN yet.
+        let down = W(status: nil, phase: .idle, anyActive: false, service: .notRunning)
+        precondition(down.canRun && down.items[0].hasPrefix("○") && down.items[1] == "○  Network extension: checked once the service runs"
+                     && down.approvals == 3 && !down.finished, "host down: the button starts the service")
+        for state in [HostComponentState.checking, .unavailable] {
+            let unknown = W(status: document(state, entryMissing: false), phase: .idle, anyActive: false)
+            precondition(!unknown.finished && unknown.canRun == (state != .checking), "\(state)")
+        }
+        let updating = W(status: document(.ready, entryMissing: false), phase: .idle, anyActive: false, service: .updating)
+        precondition(updating.busy && !updating.canRun && !updating.finished && updating.items[0].hasPrefix("…"))
+        // No VPN yet: never the ready state, never a component update; the form is next.
+        let none = W(status: document(.ready, installed: "36", profiles: 0), phase: .idle, anyActive: false)
+        precondition(!none.finished && none.button == "Add a VPN" && none.canRun && none.approvals == 1 && none.items[2].hasPrefix("○"))
+        precondition(!W(status: document(.ready, installed: "36", profiles: 0), phase: .idle, anyActive: false, succeeded: true).finished,
+                     "a run that succeeded with no VPN is not 'VPN ready'")
+        let freshMac = W(status: document(.missing, installed: nil, profiles: 0), phase: .idle, anyActive: false, service: .needsApproval)
+        precondition(freshMac.approvals == 3 && freshMac.intro.contains("3. Allow VPN configurations (one macOS dialog: Allow, after you add your VPN here)"))
+        // The optional login item never blocks the end.
+        let optional = W(status: document(.ready, installed: "36", login: .requiresApproval), phase: .idle, anyActive: false)
+        precondition(optional.finished && optional.button == "Done" && optional.showSettings && optional.pane == .loginItems
+                     && optional.intro.contains("Optional: allow OFTC at login") && optional.approvals == 0)
+        // A failure stays in the window until the next click, with the next action.
+        let failed = W(status: document(.missing, installed: nil), phase: .idle, anyActive: false,
+                       failure: "Could not set up: timed out. Choose Finish setup to try again.")
+        precondition(failed.status.hasPrefix("Could not set up") && failed.canRun && !failed.busy)
+        precondition(W(status: document(.missing, installed: nil), phase: .working, anyActive: false, failure: "old").status == SetupProgress.working,
+                     "a new run replaces the failure")
+
+        // Every entry point ends at the form or the one window.
+        typealias E = SetupEntry
+        precondition(E.route(.addForm) == .form && E.route(.waitForHost) == .window && E.route(.repair) == .window
+                     && E.route(.newerInstalled) == .welcome && E.route(.waitForDisconnect) == .welcome && E.route(.nothingToDo) == .refresh)
+        // The window carries on by itself, but only after the button, and never in a loop.
+        typealias K = SetupContinuation
+        precondition(K.step(service: .needsApproval, plan: .waitForHost) == .startService && K.step(service: .notRunning, plan: .waitForHost) == .startService
+                     && K.step(service: .ready, plan: .repair) == .runUpdate && K.step(service: .ready, plan: .addForm) == .openForm
+                     && K.step(service: .starting, plan: .repair) == .wait && K.step(service: .unsupported, plan: .repair) == .wait
+                     && K.step(service: .ready, plan: .nothingToDo) == .wait)
+        func next(intent: Bool = true, running: Bool = false, service: ServiceState = .ready, plan: SetupPlan = .repair,
+                  phase: OFTCSetupRepair.Phase = .idle, component: C = .missing, waitedAt: C? = nil) -> K.Step? {
+            K.automatic(intent: intent, running: running, service: service, plan: plan, phase: phase, component: component, waitedAt: waitedAt)
+        }
+        precondition(next() == .runUpdate, "the service came up after the button: run the update")
+        precondition(next(plan: .addForm) == .openForm, "a new user reaches the form once the service is on")
+        precondition(next(intent: false) == nil && next(intent: false, plan: .addForm) == nil, "no click, no step")
+        precondition(next(running: true) == nil && next(service: .needsApproval, plan: .waitForHost) == nil && next(plan: .nothingToDo) == nil)
+        precondition(next(phase: .stillWaiting, component: .approval, waitedAt: .approval) == nil, "still not approved: do not loop")
+        precondition(next(phase: .stillWaiting, component: .ready, waitedAt: .approval) == .runUpdate, "approved in System Settings: continue by itself")
+        // Closing for the form opens neither Welcome nor anything else.
+        precondition(!WelcomeAfterComponentWindow.shouldShow(fromSetup: true, succeeded: false, configured: false, component: .approval, handedOff: true))
+        // Fetching the document while the window is visible: at once on opening, one in flight,
+        // backing off after a failure, never while hidden.
+        var poller = SetupPoller()
+        precondition(poller.tick(visible: true) && poller.inFlight, "opening fetches at once")
+        precondition(!poller.tick(visible: true) && !poller.tick(visible: true) && !poller.tick(visible: true), "one in flight at a time")
+        poller.finished(ok: false)
+        precondition(poller.interval == 4 && !poller.tick(visible: true) && !poller.tick(visible: true) && !poller.tick(visible: true)
+                     && poller.tick(visible: true), "backs off after a failure")
+        poller.finished(ok: true)
+        precondition(poller.interval == SetupPoller.base)
+        for _ in 0..<8 { _ = poller.tick(visible: true); poller.finished(ok: false) }
+        precondition(poller.interval == SetupPoller.cap, "the back-off is capped")
+        precondition(!poller.tick(visible: false) && poller.tick(visible: true), "hidden never fetches; reopening does at once")
         let login = W(status: document(.ready, login: .requiresApproval), phase: .idle, anyActive: false)
-        precondition(login.showSettings && login.pane == .loginItems && !login.canRun)
-        precondition(login.login[0] == "OFTC at login: needs approval in Login Items & Extensions")
+        precondition(login.showSettings && login.pane == .loginItems && !login.canRun && login.finished)
+        precondition(W(status: document(.missing, login: .requiresApproval), phase: .idle, anyActive: false).login[0]
+                     == "OFTC at login: needs approval in Login Items & Extensions")
         precondition(W(status: document(.missing, installed: nil), phase: .idle, anyActive: false).builds
                      == "Installed: not installed. This app: build 36.")
         precondition(!W(status: nil, phase: .idle, anyActive: false).canRun && W(status: nil, phase: .idle, anyActive: false).login.isEmpty)

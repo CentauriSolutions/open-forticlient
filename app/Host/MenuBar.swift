@@ -457,6 +457,17 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     private var componentWindow: OFTCComponentUpdate?
     /// The last component update succeeded and its window has not been closed yet.
     private var componentRunSucceeded = false
+    /// The user pressed the setup button: from then on the window carries on by itself as macOS
+    /// finishes each approval, until the run succeeds, fails, or the window closes.
+    private var setupIntent = false
+    /// The component state when a run last ended still waiting for approval; a run starts again
+    /// by itself only once that state has moved.
+    private var stillWaitingState: VPNComponentState?
+    private var setupPoller = SetupPoller()
+    /// Why the last run stopped; shown in the window until the next click.
+    private var setupFailure: String?
+    /// The window closed to open the Add a VPN form.
+    private var componentHandoff = false
     private var updateOffer: UpdateOffer?
     private var updateTimer: Timer?
     private var updateInFlight = false
@@ -680,6 +691,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
             || launchExperiencePending
         if visible != edgeActive { edgeActive = visible; edge?.setActive(visible) }
         reconcile()
+        continueSetup()
     }
 
     private func tunnelPresentation(_ runtime: TunnelRuntime) -> TunnelPresentation {
@@ -1029,12 +1041,16 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         welcome?.window?.orderOut(nil)
         if componentWindow == nil {
             componentWindow = OFTCComponentUpdate(
-                onRun: { [weak self] in self?.runRepair() },
+                onRun: { [weak self] in self?.setupStep() },
                 onSettings: { [weak self] pane in self?.edge?.openSettings(pane) },
                 onClose: { [weak self] in
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         let succeeded = self.componentRunSucceeded
+                        let handedOff = self.componentHandoff
+                        self.componentHandoff = false
+                        self.setupFailure = nil
+                        self.setupIntent = false
                         self.componentWindow = nil
                         self.componentRunSucceeded = false
                         // Decide from the status the host reports now, not from what was captured
@@ -1042,22 +1058,25 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
                         let decide = { [weak self] in
                             guard let self else { return }
                             if WelcomeAfterComponentWindow.shouldShow(fromSetup: fromSetup, succeeded: succeeded,
-                                                                      configured: self.configured, component: self.componentState) {
+                                                                      configured: self.configured, component: self.componentState,
+                                                                      handedOff: handedOff) {
                                 self.showWelcome()
                             } else { self.restoreAccessoryPolicyIfNeeded() }
                         }
-                        if let edge = self.edge { edge.refresh(completion: decide) } else { decide() }
+                        if let edge = self.edge { edge.refresh(completion: { _ in decide() }) } else { decide() }
                     }
                 })
         }
         updateComponentWindow()
         componentWindow?.show()
+        // Reopening fetches at once (the poller does so after any hidden tick): the document shown is
+        // the host's now, not the last one cached.
     }
 
     fileprivate func updateComponentWindow() {
         componentWindow?.update(ComponentUpdatePresentation(
             status: edge?.lastStatus, phase: repair.phase, anyActive: presentation.anyActive,
-            succeeded: componentRunSucceeded))
+            succeeded: componentRunSucceeded, service: service, failure: setupFailure))
     }
 
     private func showSettings(_ sender: NSButton) {
@@ -1436,22 +1455,69 @@ extension OFTCMenuBar {
     fileprivate func startSetup() {
         guard preview == nil else { return }
         if repair.isRunning {
+            // Never silent: bring the window that shows the progress back.
+            showComponentUpdate(fromSetup: true)
             if repair.phase == .waiting { repair.reopenSettings() }
             return
         }
-        switch setupPlan() {
-        case .addForm: showSetup()
-        case .waitForHost: serviceAction()   // start it, or open Login Items for its approval
-        case .newerInstalled, .waitForDisconnect: showWelcome()
-        case .nothingToDo: refresh()
-        case .repair: showComponentUpdate(fromSetup: true)
+        switch SetupEntry.route(setupPlan()) {
+        case .form: showSetup()
+        case .window:
+            // The service is the first item of the checklist: show it, and act on it now.
+            showComponentUpdate(fromSetup: true)
+            setupStep()
+        case .welcome: showWelcome()
+        case .refresh: refresh()
         }
     }
 
     fileprivate func runRepair() {
         globalError = nil
         componentRunSucceeded = false
+        stillWaitingState = nil
+        setupFailure = nil
         repair.start()
+        updateComponentWindow()
+    }
+
+    /// The setup button: the step that is next. The service first (start it, or open Login Items
+    /// for its approval), then the host's component update, or the Add a VPN form when there is no
+    /// VPN yet; the window continues by itself.
+    fileprivate func setupStep() {
+        setupIntent = true
+        setupFailure = nil
+        perform(SetupContinuation.step(service: service, plan: setupPlan()))
+        updateComponentWindow()
+    }
+
+    private func perform(_ step: SetupContinuation.Step) {
+        switch step {
+        case .startService: serviceAction()
+        case .runUpdate: runRepair()
+        case .openForm:
+            // The form is the next window, not a component update: hand over, and Welcome stays shut.
+            componentHandoff = true
+            componentWindow?.close()
+            showSetup()
+        case .wait: break
+        }
+    }
+
+    /// Once per second while the window is open: fetch the host's document (macOS finishing an
+    /// approval is not an event the host reports) with one request in flight, back off when it is
+    /// slow, refresh the checklist, and carry on by itself after the button.
+    private func continueSetup() {
+        let visible = componentWindow != nil && preview == nil
+        if setupPoller.tick(visible: visible && service == .ready) {
+            edge?.refresh { [weak self] ok in self?.setupPoller.finished(ok: ok) }
+        }
+        guard visible else { return }
+        updateComponentWindow()
+        if let step = SetupContinuation.automatic(
+            intent: setupIntent, running: repair.isRunning, service: service, plan: setupPlan(),
+            phase: repair.phase, component: componentState, waitedAt: stillWaitingState) {
+            perform(step)
+        }
     }
 
     fileprivate func autoRepairIfNeeded() {
@@ -1461,15 +1527,20 @@ extension OFTCMenuBar {
               setupPlan() == .repair
         else { return }
         autoRepairTried = true
+        showComponentUpdate(fromSetup: true)
+        setupIntent = true
         runRepair()
     }
 
     fileprivate func setupFinished(_ outcome: SetupOutcome) {
         switch outcome {
-        case .failure(let failure): globalError = failure.message(action: "set up")
-        case .needsKey(let id): askForKey(profileID: id)
-        case .done: globalError = nil; componentRunSucceeded = componentWindow != nil
-        default: globalError = nil
+        case .failure(let failure):
+            globalError = failure.message(action: "set up")
+            setupFailure = (globalError ?? "") + " Choose Finish setup to try again."
+            setupIntent = false
+        case .needsKey(let id): askForKey(profileID: id); setupIntent = false
+        case .done: globalError = nil; componentRunSucceeded = componentWindow != nil; setupIntent = false
+        case .waitingForApproval: globalError = nil; stillWaitingState = componentState
         }
         refresh()
         reconcile()
@@ -1480,6 +1551,8 @@ extension OFTCMenuBar {
         guard let id = profileID, let profile = runtimes[id]?.profile,
               var psk = OFTCKeyPrompt.ask(name: profile.name, gateway: profile.gateway) else {
             globalError = "Setup needs the VPN key. Choose Set up… to enter it."
+            setupFailure = "Setup needs the VPN key. Choose Finish setup to enter it."
+            updateComponentWindow()
             return
         }
         let executable = Bundle.main.executableURL
@@ -1489,7 +1562,12 @@ extension OFTCMenuBar {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if stored { self.runRepair() }
-                else { self.globalError = "Could not save the VPN key. Check Keychain access and try again."; self.reconcile() }
+                else {
+                    self.globalError = "Could not save the VPN key. Check Keychain access and try again."
+                    self.setupFailure = "Could not save the VPN key. Check Keychain access, then choose Finish setup to try again."
+                    self.reconcile()
+                    self.updateComponentWindow()
+                }
             }
         }
         psk.resetBytes(in: 0..<psk.count)
