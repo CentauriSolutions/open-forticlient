@@ -454,6 +454,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     private var bulkBusy = false
     private var onboarding: OFTCOnboarding?
     private var componentWindow: OFTCComponentUpdate?
+    /// The last component update succeeded and its window has not been closed yet.
+    private var componentRunSucceeded = false
     private var updateOffer: UpdateOffer?
     private var updateTimer: Timer?
     private var updateInFlight = false
@@ -1028,9 +1030,19 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
                 onClose: { [weak self] in
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
+                        let succeeded = self.componentRunSucceeded
                         self.componentWindow = nil
-                        self.refresh()
-                        if fromSetup { self.showWelcome() } else { self.restoreAccessoryPolicyIfNeeded() }
+                        self.componentRunSucceeded = false
+                        // Decide from the status the host reports now, not from what was captured
+                        // before the run: only then is "Set up" never offered for a ready VPN.
+                        let decide = { [weak self] in
+                            guard let self else { return }
+                            if WelcomeAfterComponentWindow.shouldShow(fromSetup: fromSetup, succeeded: succeeded,
+                                                                      configured: self.configured, component: self.componentState) {
+                                self.showWelcome()
+                            } else { self.restoreAccessoryPolicyIfNeeded() }
+                        }
+                        if let edge = self.edge { edge.refresh(completion: decide) } else { decide() }
                     }
                 })
         }
@@ -1040,7 +1052,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
 
     fileprivate func updateComponentWindow() {
         componentWindow?.update(ComponentUpdatePresentation(
-            status: edge?.lastStatus, phase: repair.phase, anyActive: presentation.anyActive))
+            status: edge?.lastStatus, phase: repair.phase, anyActive: presentation.anyActive,
+            succeeded: componentRunSucceeded))
     }
 
     private func showSettings(_ sender: NSButton) {
@@ -1433,6 +1446,7 @@ extension OFTCMenuBar {
 
     fileprivate func runRepair() {
         globalError = nil
+        componentRunSucceeded = false
         repair.start()
     }
 
@@ -1450,6 +1464,7 @@ extension OFTCMenuBar {
         switch outcome {
         case .failure(let failure): globalError = failure.message(action: "set up")
         case .needsKey(let id): askForKey(profileID: id)
+        case .done: globalError = nil; componentRunSucceeded = componentWindow != nil
         default: globalError = nil
         }
         refresh()

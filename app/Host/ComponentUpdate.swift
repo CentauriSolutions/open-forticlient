@@ -14,6 +14,8 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
     private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
                                   styleMask: [.titled, .closable, .miniaturizable],
                                   backing: .buffered, defer: false)
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let introLabel = NSTextField(wrappingLabelWithString: "")
     private let componentLabel = NSTextField(wrappingLabelWithString: "")
     private let buildsLabel = NSTextField(labelWithString: "")
     private let loginLabel = NSTextField(wrappingLabelWithString: "")
@@ -31,10 +33,9 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         window.title = "OFTC VPN component"
         window.isReleasedWhenClosed = false
         window.delegate = self
-        let title = NSTextField(labelWithString: "Update your OFTC VPN")
+        let title = titleLabel
+        let explanation = introLabel
         title.font = .boldSystemFont(ofSize: 22)
-        let explanation = NSTextField(wrappingLabelWithString:
-            "Your saved VPN settings and PSK are kept. Update the VPN component and approve OFTC if macOS asks. You’ll choose when to connect.")
         buildsLabel.textColor = .secondaryLabelColor
         loginLabel.textColor = .secondaryLabelColor
         statusLabel.maximumNumberOfLines = 4
@@ -79,13 +80,20 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
 
     func update(_ next: ComponentUpdatePresentation) {
         presentation = next
+        titleLabel.stringValue = next.title
+        introLabel.stringValue = next.intro
+        for label in [componentLabel, buildsLabel, loginLabel, statusLabel] { label.isHidden = next.finished }
+        // Finished: one primary button. The run button is gone, not merely disabled.
+        runButton.isHidden = next.finished
+        closeButton.title = next.finished ? "Done" : "Close"
+        closeButton.keyEquivalent = next.finished ? "\r" : ""
         componentLabel.stringValue = next.component
         buildsLabel.stringValue = next.builds
         loginLabel.stringValue = next.login.joined(separator: "\n")
         statusLabel.stringValue = next.status
         runButton.title = next.button
         runButton.isEnabled = next.canRun
-        settingsButton.isHidden = !next.showSettings
+        settingsButton.isHidden = next.finished || !next.showSettings
     }
 
     @objc private func run() { onRun() }
