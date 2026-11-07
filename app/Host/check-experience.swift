@@ -35,6 +35,8 @@ import Foundation
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .checking).action == .wait)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .unavailable).action == .check)
         precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .newer).action == .check)
+        precondition(WelcomePresentation(upgrade: true, configured: true, active: false, component: .ready).heading == "You're ready to connect",
+                     "a configured, ready VPN never gets the Set up welcome")
         try checkUpdateStore()
         print("Launch, welcome, update record and component checks passed (offline).")
     }

@@ -92,6 +92,18 @@ import Foundation
         let reinstall = WelcomePresentation(upgrade: false, configured: false, active: false, component: .ready, profilesExist: true)
         precondition(reinstall.action == .setup && reinstall.button == "Finish setup")
         precondition(WelcomePresentation(upgrade: false, configured: false, active: false, component: .ready).button == "Set up OFTC")
+        // A run that succeeded: a result and one Done button, never the form with its button re-enabled.
+        let done = W(status: document(.ready, installed: "36"), phase: .idle, anyActive: false, succeeded: true)
+        precondition(done.finished && done.title == "Your VPN is ready" && done.button == "Done" && !done.canRun && !done.showSettings)
+        precondition(done.intro == "The OFTC VPN component is now build 36. Your saved VPNs and PSKs were kept, and no sign-in was started. Choose Connect in OFTC when you want to use a VPN.")
+        precondition(done.component.isEmpty && done.builds.isEmpty && done.login.isEmpty && done.status.isEmpty)
+        precondition(!idle.finished && idle.title == "Update your OFTC VPN" && idle.intro.contains("saved VPN settings and PSK are kept"))
+        // Closing the window: Welcome only when something is left to set up, judged from fresh status.
+        typealias A = WelcomeAfterComponentWindow
+        precondition(!A.shouldShow(fromSetup: true, succeeded: true, configured: false, component: .missing), "never after a success")
+        precondition(!A.shouldShow(fromSetup: true, succeeded: false, configured: true, component: .ready), "a ready VPN has nothing to set up")
+        precondition(A.shouldShow(fromSetup: true, succeeded: false, configured: false, component: .approval))
+        precondition(!A.shouldShow(fromSetup: false, succeeded: false, configured: false, component: .missing), "the options menu just closes")
         let login = W(status: document(.ready, login: .requiresApproval), phase: .idle, anyActive: false)
         precondition(login.showSettings && login.pane == .loginItems && !login.canRun)
         precondition(login.login[0] == "OFTC at login: needs approval in Login Items & Extensions")
