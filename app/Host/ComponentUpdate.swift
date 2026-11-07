@@ -30,6 +30,7 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         super.init()
         window.title = "OFTC VPN component"
         window.isReleasedWhenClosed = false
+        OFTCWindowPolicy.apply(to: window)
         window.delegate = self
         let title = NSTextField(labelWithString: "Update your OFTC VPN")
         title.font = .boldSystemFont(ofSize: 22)

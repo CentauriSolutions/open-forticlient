@@ -439,6 +439,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     private let preview: MenuConnectionState?
     private let content = OFTCMenuViewController()
     private let popover = NSPopover()
+    private let popoverDismisser = OFTCPopoverDismisser()
     private var item: NSStatusItem?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -529,7 +530,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         item?.button?.target = self
         item?.button?.action = #selector(statusItemClicked)
         item?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        popover.behavior = .transient
+        popover.behavior = OFTCWindowPolicy.popoverBehavior
         popover.delegate = self
         popover.contentViewController = content
         configureActions(content)
@@ -863,6 +864,8 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         }
     }
 
+    func popoverDidClose(_ notification: Notification) { popoverDismisser.stop() }
+
     private func togglePopover() {
         if popover.isShown { popover.performClose(nil) }
         else { showPopover() }
@@ -876,6 +879,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popoverDismisser.start(closing: popover)
         edge?.retryNow()
     }
 
