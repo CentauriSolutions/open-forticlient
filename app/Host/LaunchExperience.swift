@@ -18,6 +18,15 @@ enum VPNComponentState: Equatable {
     }
 }
 
+/// Whether closing the component window opens Welcome. Decided from the status the host reports
+/// after the window closed, never from what the window was opened with: a finished run, or a
+/// configured VPN with a ready component, has nothing left to set up.
+enum WelcomeAfterComponentWindow {
+    static func shouldShow(fromSetup: Bool, succeeded: Bool, configured: Bool, component: VPNComponentState) -> Bool {
+        fromSetup && !succeeded && !(configured && component == .ready)
+    }
+}
+
 struct WelcomePresentation {
     enum Action: Equatable { case setup, controls, check, wait }
     var title: String

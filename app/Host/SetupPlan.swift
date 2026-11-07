@@ -73,6 +73,11 @@ enum SetupProgress {
 // What the component-update window shows, from the host's document alone (docs/ui-edge.md 4.5):
 // the system extension and the three login items, and whether approval is what the user must do.
 struct ComponentUpdatePresentation: Equatable {
+    var title = "Update your OFTC VPN"
+    /// The one paragraph under the title.
+    var intro = "Your saved VPN settings and PSK are kept, and no sign-in is started. Approve OFTC if macOS asks; you choose when to connect."
+    /// A run just succeeded: the window shows only the result and a single Done button.
+    var finished = false
     var component: String
     var builds: String
     var login: [String]
@@ -83,8 +88,17 @@ struct ComponentUpdatePresentation: Equatable {
     /// The System Settings pane that holds the pending approval.
     var pane: HostSettingsPane
 
-    init(status document: HostStatus?, phase: OFTCSetupRepair.Phase, anyActive: Bool) {
+    init(status document: HostStatus?, phase: OFTCSetupRepair.Phase, anyActive: Bool, succeeded: Bool = false) {
         let state = document.map { VPNComponentState($0.component.state) } ?? .unavailable
+        if succeeded {
+            let build = document?.component.expectedBuild.map { "build \($0)" } ?? "the bundled build"
+            finished = true
+            title = "Your VPN is ready"
+            intro = "The OFTC VPN component is now \(build). Your saved VPNs and PSKs were kept, and no sign-in was started. Choose Connect in OFTC when you want to use a VPN."
+            component = ""; builds = ""; login = []; status = ""
+            button = "Done"; canRun = false; showSettings = false; pane = .extensions
+            return
+        }
         component = state.detail
         builds = Self.builds(document?.component)
         login = Self.loginLines(document?.login)
