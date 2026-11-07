@@ -32,6 +32,7 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         super.init()
         window.title = "OFTC VPN component"
         window.isReleasedWhenClosed = false
+        OFTCWindowPolicy.apply(to: window)
         window.delegate = self
         let title = titleLabel
         let explanation = introLabel

@@ -69,6 +69,7 @@ final class OFTCOnboarding: NSObject, NSWindowDelegate {
     private func buildWindow() {
         window.title = "Add a VPN to OFTC"
         window.isReleasedWhenClosed = false
+        OFTCWindowPolicy.apply(to: window)
         window.delegate = self
         let content = NSView(frame: window.contentView!.bounds)
         window.contentView = content

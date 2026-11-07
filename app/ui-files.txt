@@ -19,5 +19,6 @@ Host/Onboarding.swift
 Host/RateSparklineView.swift
 Host/TrafficHistory.swift
 Host/Welcome.swift
+Host/WindowPolicy.swift
 Host/SetupPlan.swift
 Host/SetupRepair.swift
