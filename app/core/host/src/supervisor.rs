@@ -20,6 +20,7 @@
 //! polls for a stop request and for SIGINT/SIGTERM), so there is no concurrent state
 //! to reason about. `docs/host-verbs.md` lists the resulting differences.
 
+use std::cell::Cell;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -63,6 +64,23 @@ impl Signals for ManualSignals {
     }
 }
 
+/// Whether the user could answer a browser sign-in right now: the display is awake
+/// and the console session is theirs, active and unlocked. A recovery that opens the
+/// browser while this is false opens it into nothing and burns the attempt. The real
+/// implementation is in `hostlib`; tests set it by hand.
+pub trait Presence {
+    fn can_answer(&self) -> bool;
+}
+
+/// A [`Presence`] that is always there, for tests of other verbs.
+pub struct AlwaysPresent;
+
+impl Presence for AlwaysPresent {
+    fn can_answer(&self) -> bool {
+        true
+    }
+}
+
 /// Everything the supervisor reaches outside itself.
 pub struct Deps<'a> {
     pub vpn: &'a dyn VpnControl,
@@ -72,6 +90,7 @@ pub struct Deps<'a> {
     pub session_id: &'a dyn Fn() -> [u8; 16],
     pub launchctl: &'a dyn Launchctl,
     pub signals: &'a dyn Signals,
+    pub presence: &'a dyn Presence,
     /// Asks the user about an untrusted gateway certificate: host, port, profile name.
     pub review: &'a dyn Fn(&str, u32, &str) -> Trust,
     /// One diagnostic line (stderr in the host).
@@ -174,6 +193,13 @@ const BACKOFF_LAST: Duration = Duration::from_secs(30);
 /// After a certificate the user just trusted, the retry is almost immediate.
 const BACKOFF_TRUSTED: Duration = Duration::from_secs(1);
 const SAML_LOCK_POLL: Duration = Duration::from_millis(250);
+/// How often to ask whether the user is there: while waiting for them to come back,
+/// and while the browser waits for them. After a real wake this is the whole delay.
+const PRESENCE_POLL: Duration = Duration::from_secs(1);
+/// The browser wait polls every 100 ms. A gap this long between two polls means the
+/// process was suspended (the wait's own `Instant` does not count sleep), so the page
+/// it opened is stale and the sign-in starts over.
+const SLEEP_GAP: Duration = Duration::from_secs(10);
 
 pub struct Supervisor<'a> {
     d: &'a Deps<'a>,
@@ -197,6 +223,8 @@ pub struct Supervisor<'a> {
     unreachable_backoff: Duration,
     restart_after: Option<Duration>,
     published: Phase,
+    /// A recovery is on hold until the user can answer a browser sign-in.
+    waiting_for_user: bool,
     /// The provider failure code that ended the attempt, once known; published with `Failed`.
     failure: Option<i32>,
     /// The message and exit code, once the supervisor has stopped.
@@ -228,6 +256,7 @@ impl<'a> Supervisor<'a> {
             unreachable_backoff: BACKOFF_FIRST,
             restart_after: None,
             published: Phase::Acquiring,
+            waiting_for_user: false,
             failure: None,
             exit: None,
         }
@@ -397,6 +426,14 @@ impl<'a> Supervisor<'a> {
         if self.stop_requested() || self.status_now() != VpnStatus::Disconnected {
             return self.stop("OFTC status changed before supervised start", 1);
         }
+        // A recovery opens the browser, so it waits for someone to answer it. The first
+        // sign-in is the user's own request and is not held.
+        if self.ever_connected && !self.d.presence.can_answer() {
+            return self.wait_for_user();
+        }
+        if std::mem::take(&mut self.waiting_for_user) {
+            self.diag("user can answer again; resuming recovery");
+        }
         self.starting = true;
         self.publish(Phase::Acquiring);
         self.diag("begin attempt");
@@ -415,6 +452,9 @@ impl<'a> Supervisor<'a> {
         }
         if self.interrupted() {
             return self.stop("Supervisor stopped", 0);
+        }
+        if signed_in.absent {
+            return self.wait_for_user();
         }
         if signed_in.trust == Trust::Declined {
             return self.stop("Gateway certificate not trusted; supervisor stopped", 1);
@@ -461,23 +501,62 @@ impl<'a> Supervisor<'a> {
         self.observe();
     }
 
+    /// Puts the recovery on hold, with no attempt used and no deadline running, and
+    /// looks again in a second. The status says `Recovering`; the policy is untouched,
+    /// so a real outage still counts against it once the user is back.
+    fn wait_for_user(&mut self) {
+        self.starting = false;
+        self.acquisition_deadline = None;
+        self.start_deadline = None;
+        self.restart_after = Some(self.now() + PRESENCE_POLL);
+        if !std::mem::replace(&mut self.waiting_for_user, true) {
+            self.publish(Phase::Recovering);
+            self.diag("waiting for the user (display asleep or session not active)");
+        }
+    }
+
     /// The sign-in half of an attempt: the PSK, the one-at-a-time browser lock, the
     /// browser itself and, when the gateway was unreachable, the certificate review.
     fn sign_in(&self) -> SignedIn {
         let mut result = SignedIn {
             options: None,
             before_browser: false,
+            absent: false,
             trust: Trust::NotACertificateProblem,
         };
         // A missing or unusable PSK ends the attempt like any other sign-in failure.
         let Ok(psk) = self.d.keychain.get(&self.job.gateway) else {
             return result;
         };
-        let cancelled = || self.interrupted();
+        // Besides a stop request, the sign-in is abandoned when the user can no longer
+        // answer (display off, session locked) or the process was suspended.
+        let lost = Cell::new(false);
+        let last_poll = Cell::new(self.now());
+        let last_look = Cell::new(self.now());
+        let cancelled = || {
+            if self.interrupted() {
+                return true;
+            }
+            let now = self.now();
+            if now.saturating_sub(last_poll.replace(now)) > SLEEP_GAP {
+                lost.set(true);
+            }
+            if now.saturating_sub(last_look.get()) >= PRESENCE_POLL {
+                last_look.set(now);
+                if !self.d.presence.can_answer() {
+                    lost.set(true);
+                }
+            }
+            lost.get()
+        };
         let outcome = {
             // One browser sign-in at a time: each listens on a local port.
             let lock = SamlLock::acquire(self.job.root, &mut || cancelled(), SAML_LOCK_POLL);
-            if lock.is_some() && !self.stop_requested() {
+            // Whoever held the lock may have taken minutes: look again before the browser.
+            if lock.is_some() && !self.d.presence.can_answer() {
+                lost.set(true);
+                None
+            } else if lock.is_some() && !self.stop_requested() {
                 let profile = TunnelProfile {
                     name: self.job.entry.name().to_owned(),
                     gateway: self.job.gateway.clone(),
@@ -501,6 +580,13 @@ impl<'a> Supervisor<'a> {
         };
         match outcome {
             Some(Ok(options)) => result.options = Some(options),
+            // Abandoned or failed with nobody there: not a failure of the recovery.
+            Some(Err(_)) | None
+                if lost.get() && !self.interrupted()
+                    || matches!(outcome, Some(Err(_))) && !self.d.presence.can_answer() =>
+            {
+                result.absent = true;
+            }
             Some(Err(AcquireFailure::BeforeBrowser)) => {
                 result.before_browser = true;
                 if !self.job.insecure && !self.interrupted() {
@@ -636,6 +722,8 @@ struct SignedIn {
     options: Option<StartOptions>,
     /// The gateway could not be reached before the browser opened, so no token was spent.
     before_browser: bool,
+    /// Nobody could answer the browser, so nothing was tried: wait for the user.
+    absent: bool,
     trust: Trust,
 }
 
@@ -743,6 +831,8 @@ mod tests {
         takes: Duration,
         result: Result<(), AcquireFailure>,
         meanwhile: Option<Box<dyn Fn()>>,
+        /// Things that happen while the browser waits, at this much awake time in.
+        during: Vec<(Duration, Box<dyn Fn()>)>,
     }
 
     impl Step {
@@ -751,6 +841,7 @@ mod tests {
                 takes: Duration::ZERO,
                 result: Ok(()),
                 meanwhile: None,
+                during: Vec::new(),
             }
         }
         fn fail(failure: AcquireFailure) -> Step {
@@ -761,6 +852,11 @@ mod tests {
         }
         fn takes(mut self, secs: u64) -> Step {
             self.takes = Duration::from_secs(secs);
+            self
+        }
+        fn during(mut self, secs: u64, action: impl Fn() + 'static) -> Step {
+            self.during
+                .push((Duration::from_secs(secs), Box::new(action)));
             self
         }
         fn meanwhile(mut self, action: impl Fn() + 'static) -> Step {
@@ -853,14 +949,40 @@ mod tests {
         }
     }
 
+    /// Whether the user can answer, set by hand. `script` answers the next calls
+    /// first (a display that goes dark between two checks).
+    struct Awake {
+        now: AtomicBool,
+        script: Mutex<VecDeque<bool>>,
+    }
+
+    impl Awake {
+        fn set(&self, awake: bool) {
+            self.now.store(awake, Ordering::SeqCst);
+        }
+    }
+
+    impl Presence for Awake {
+        fn can_answer(&self) -> bool {
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| self.now.load(Ordering::SeqCst))
+        }
+    }
+
     struct Browser<'a> {
         clock: &'a Clk,
+        awake: &'a Awake,
+        /// Whether nobody could answer each time the browser was opened.
+        opened_away: &'a RefCell<Vec<bool>>,
         root: &'a std::path::Path,
         script: RefCell<VecDeque<Step>>,
         /// The clock at each sign-in, and what `cancelled` said after the step ran.
-        calls: RefCell<Vec<(Duration, bool)>>,
+        calls: &'a RefCell<Vec<(Duration, bool)>>,
         /// Whether `saml.lock` was held while the browser was open.
-        lock_held: RefCell<Vec<bool>>,
+        lock_held: &'a RefCell<Vec<bool>>,
     }
 
     impl Acquirer for Browser<'_> {
@@ -879,7 +1001,26 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .expect("no sign-in scripted");
-            self.clock.sleep(step.takes);
+            self.opened_away
+                .borrow_mut()
+                .push(!self.awake.now.load(Ordering::SeqCst));
+            // The wait polls `cancelled` once a second and counts awake time only, as
+            // the real one does (`Instant` stops while the Mac sleeps): a jump of the
+            // clock inside `during` is a sleep.
+            let mut waited = Duration::ZERO;
+            while waited < step.takes {
+                for (when, action) in &step.during {
+                    if *when == waited {
+                        action();
+                    }
+                }
+                if cancelled() {
+                    self.calls.borrow_mut().push((at, true));
+                    return Err(AcquireFailure::Other);
+                }
+                self.clock.sleep(Duration::from_secs(1));
+                waited += Duration::from_secs(1);
+            }
             if let Some(action) = &step.meanwhile {
                 action();
             }
@@ -900,7 +1041,7 @@ mod tests {
 
     /// Everything a supervisor needs, with scripts for the browser and the review.
     struct Rig {
-        _dir: TempDir,
+        _dir: Option<TempDir>,
         root: PathBuf,
         entry: ProfileEntry,
         vpn: Arc<MockVpn>,
@@ -908,11 +1049,13 @@ mod tests {
         mock: Arc<MockEntry>,
         keychain: MemoryKeychain,
         clock: Arc<Clk>,
+        awake: Arc<Awake>,
         launchctl: RecordingLaunchctl,
         signals: Arc<ManualSignals>,
         script: RefCell<VecDeque<Step>>,
         calls: RefCell<Vec<(Duration, bool)>>,
         lock_held: RefCell<Vec<bool>>,
+        opened_away: RefCell<Vec<bool>>,
         reviews: RefCell<VecDeque<Trust>>,
         /// Whether `saml.lock` was free each time the review was asked.
         lock_free_at_review: RefCell<Vec<bool>>,
@@ -922,8 +1065,18 @@ mod tests {
 
     impl Rig {
         fn new() -> Rig {
-            let dir = TempDir::new("supervisor");
-            let root = dir.0.clone();
+            Rig::build(None)
+        }
+
+        /// A second profile of the same user: the same root (so the same `saml.lock`),
+        /// clock and display, its own VPN entry and supervisor.
+        fn alongside(first: &Rig) -> Rig {
+            Rig::build(Some(first))
+        }
+
+        fn build(first: Option<&Rig>) -> Rig {
+            let dir = first.is_none().then(|| TempDir::new("supervisor"));
+            let root = first.map_or_else(|| dir.as_ref().unwrap().0.clone(), |r| r.root.clone());
             let profile = Profile::new(GATEWAY, 9443, Transport::Udp, Some("Lab"), None).unwrap();
             let entry = crate::registry::add(&root, &profile, None).unwrap();
             let vpn = Arc::new(MockVpn::new());
@@ -943,7 +1096,17 @@ mod tests {
                 vpn,
                 mock,
                 keychain,
-                clock: Arc::new(Clk::default()),
+                clock: first.map_or_else(|| Arc::new(Clk::default()), |r| r.clock.clone()),
+                awake: first.map_or_else(
+                    || {
+                        Arc::new(Awake {
+                            now: AtomicBool::new(true),
+                            script: Mutex::new(VecDeque::new()),
+                        })
+                    },
+                    |r| r.awake.clone(),
+                ),
+                opened_away: RefCell::new(Vec::new()),
                 launchctl: RecordingLaunchctl::new(true),
                 signals: Arc::new(ManualSignals::default()),
                 script: RefCell::new(VecDeque::new()),
@@ -991,10 +1154,12 @@ mod tests {
     fn with_supervisor<R>(rig: &Rig, body: impl FnOnce(&mut Supervisor) -> R) -> R {
         let browser = Browser {
             clock: &rig.clock,
+            awake: &rig.awake,
+            opened_away: &rig.opened_away,
             root: &rig.root,
             script: std::mem::take(&mut *rig.script.borrow_mut()).into(),
-            calls: RefCell::new(Vec::new()),
-            lock_held: RefCell::new(Vec::new()),
+            calls: &rig.calls,
+            lock_held: &rig.lock_held,
         };
         let review = |_: &str, _: u32, _: &str| {
             rig.asked.set(rig.asked.get() + 1);
@@ -1013,6 +1178,7 @@ mod tests {
             session_id: &|| [7; 16],
             launchctl: &rig.launchctl,
             signals: &*rig.signals,
+            presence: &*rig.awake,
             review: &review,
             diagnostic: &|_| {},
         };
@@ -1029,14 +1195,7 @@ mod tests {
         };
         let lease = SupervisorLease::acquire(&rig.directory()).unwrap();
         let mut supervisor = Supervisor::new(&deps, job, lease);
-        let result = body(&mut supervisor);
-        rig.calls
-            .borrow_mut()
-            .extend(browser.calls.borrow().iter().copied());
-        rig.lock_held
-            .borrow_mut()
-            .extend(browser.lock_held.borrow().iter().copied());
-        result
+        body(&mut supervisor)
     }
 
     fn exit<'s>(supervisor: &'s Supervisor) -> Option<(&'s str, i32)> {
@@ -1529,6 +1688,190 @@ mod tests {
             );
         });
         assert_eq!(rig.mock.stops(), 0);
+    }
+
+    // ----------------------------------------- sleep, dark wake and the user (#123)
+
+    /// Connected, then the gateway drops the tunnel with the rekey-probe code.
+    fn drop_with_501(rig: &Rig, s: &mut Supervisor) {
+        rig.mock.set_last_error(Some(provider(501)));
+        rig.mock.set_status(VpnStatus::Disconnected);
+        s.observe();
+        assert_eq!(exit(s), None);
+    }
+
+    /// Runs the supervisor's clock for `secs` seconds, a tick at a time.
+    fn run_for(rig: &Rig, s: &mut Supervisor, secs: u64) {
+        for _ in 0..secs {
+            rig.advance(1);
+            s.tick();
+        }
+    }
+
+    /// A dark wake: the tunnel is found dead while the display is off. No browser is
+    /// opened into nothing, the supervisor neither gives up nor spends the attempt,
+    /// and at the real wake the sign-in starts within a few seconds with a fresh
+    /// deadline, however long the Mac slept.
+    #[test]
+    fn a_dark_wake_does_not_open_the_browser_and_the_real_wake_recovers() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok(), Step::ok()]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            rig.awake.set(false);
+            drop_with_501(&rig, s);
+            run_for(&rig, s, 3);
+            // Asleep for 50 minutes, the clock counting it, as it does for real.
+            assert_eq!(rig.phase(), Some(Phase::Recovering));
+            rig.advance(3000);
+            s.tick();
+            assert_eq!(exit(s), None);
+            assert_eq!(rig.calls.borrow().len(), 1, "no sign-in while nobody is there");
+            rig.awake.set(true);
+            let woke = rig.clock.now();
+            run_for(&rig, s, 3);
+            assert_eq!(rig.calls.borrow().len(), 2);
+            assert!(rig.calls.borrow()[1].0 - woke <= Duration::from_secs(3));
+            rig.mock.set_status(VpnStatus::Connected);
+            s.observe();
+            assert_eq!(rig.phase(), Some(Phase::Connected));
+        });
+        assert_eq!(rig.opened_away.borrow()[..], [false, false]);
+    }
+
+    /// The user leaves while the browser waits (display off): the wait is abandoned,
+    /// which is not a failed recovery, and the next sign-in is at the next wake.
+    #[test]
+    fn a_sign_in_nobody_answered_is_not_a_failure() {
+        let rig = Rig::new();
+        let awake = rig.awake.clone();
+        rig.script(vec![
+            Step::ok(),
+            Step::fail(AcquireFailure::Other)
+                .takes(300)
+                .during(2, move || awake.set(false)),
+            Step::ok(),
+        ]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            run_for(&rig, s, 2);
+            assert_eq!(exit(s), None, "the first sign-in is the attempt that ends");
+            run_for(&rig, s, 600);
+            assert_eq!((exit(s), rig.phase()), (None, Some(Phase::Recovering)));
+            // The initial sign-in and the abandoned one; nothing while nobody is there.
+            assert_eq!(rig.calls.borrow().len(), 2);
+            rig.awake.set(true);
+            run_for(&rig, s, 3);
+            assert_eq!(rig.calls.borrow().len(), 3);
+            rig.mock.set_status(VpnStatus::Connected);
+            s.observe();
+            assert_eq!(rig.phase(), Some(Phase::Connected));
+        });
+    }
+
+    /// The Mac sleeps in the middle of the browser wait, whose own clock stops while
+    /// asleep: at the wake the stale wait is dropped and a fresh sign-in begins within
+    /// seconds, not when the remaining five minutes would have run out.
+    #[test]
+    fn a_sleep_in_the_middle_of_the_wait_ends_the_wait_at_the_wake() {
+        let rig = Rig::new();
+        let clock = rig.clock.clone();
+        rig.script(vec![
+            Step::ok(),
+            Step::fail(AcquireFailure::Other)
+                .takes(300)
+                .during(2, move || clock.sleep(Duration::from_secs(3000))),
+            Step::ok(),
+        ]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            // Dropped at 0 s, the sign-in starts at 2 s, and 2 s into its wait the Mac
+            // sleeps for 3000 s: awake again at 3004 s.
+            let woke = Duration::from_secs(3004);
+            run_for(&rig, s, 2);
+            let silent = rig.clock.now().saturating_sub(woke).as_secs();
+            assert_eq!(exit(s), None, "{silent}s after the wake, still in the old wait");
+            run_for(&rig, s, 5);
+            assert_eq!(rig.calls.borrow().len(), 3, "initial, abandoned, fresh");
+            let fresh = rig.calls.borrow()[2].0;
+            assert!(
+                fresh.saturating_sub(woke) <= Duration::from_secs(5),
+                "fresh sign-in {}s after the wake",
+                fresh.saturating_sub(woke).as_secs()
+            );
+        });
+    }
+
+    /// Two profiles drop in the same dark wake: neither opens a browser, and at the
+    /// real wake both come back, one browser at a time, neither stopped.
+    #[test]
+    fn two_profiles_recover_together_at_the_real_wake() {
+        let (one, two) = {
+            let one = Rig::new();
+            let two = Rig::alongside(&one);
+            (one, two)
+        };
+        for rig in [&one, &two] {
+            rig.script(vec![Step::ok(), Step::ok()]);
+        }
+        with_supervisor(&one, |a| {
+            with_supervisor(&two, |b| {
+                connect(&one, a);
+                connect(&two, b);
+                one.awake.set(false);
+                drop_with_501(&one, a);
+                drop_with_501(&two, b);
+                for _ in 0..3 {
+                    one.advance(1);
+                    a.tick();
+                    b.tick();
+                }
+                one.advance(3000);
+                a.tick();
+                b.tick();
+                assert_eq!((one.calls.borrow().len(), two.calls.borrow().len()), (1, 1));
+                one.awake.set(true);
+                for _ in 0..3 {
+                    one.advance(1);
+                    a.tick();
+                    b.tick();
+                }
+                assert_eq!((one.calls.borrow().len(), two.calls.borrow().len()), (2, 2));
+                assert_eq!((exit(a), exit(b)), (None, None));
+                one.mock.set_status(VpnStatus::Connected);
+                two.mock.set_status(VpnStatus::Connected);
+                a.observe();
+                b.observe();
+                assert_eq!(
+                    (one.phase(), two.phase()),
+                    (Some(Phase::Connected), Some(Phase::Connected))
+                );
+            });
+        });
+        assert!(one.opened_away.borrow().iter().all(|away| !away));
+        assert!(two.opened_away.borrow().iter().all(|away| !away));
+    }
+
+    /// The display goes dark while a profile waits for `saml.lock` (another profile's
+    /// browser): when the lock comes free the browser still does not open.
+    #[test]
+    fn the_browser_does_not_open_after_the_lock_wait_if_nobody_is_there() {
+        let rig = Rig::new();
+        rig.script(vec![Step::ok(), Step::ok()]);
+        with_supervisor(&rig, |s| {
+            connect(&rig, s);
+            drop_with_501(&rig, s);
+            // Present when the recovery starts, gone by the time the lock is ours.
+            rig.awake.script.lock().unwrap().push_back(true);
+            rig.awake.set(false);
+            run_for(&rig, s, 3);
+            assert_eq!((exit(s), rig.calls.borrow().len()), (None, 1));
+            rig.awake.set(true);
+            run_for(&rig, s, 3);
+            assert_eq!(rig.calls.borrow().len(), 2);
+        });
     }
 
     /// The runner: woken by status changes, it ends on a stop request.

@@ -81,7 +81,10 @@ user just trusted its certificate, until 390 s after the first attempt). A drop 
 established tunnel is recovered with a fresh sign-in after 2 s when its error is one of
 the provider's established-SA codes or an `NEVPNConnectionError` overslept, no network,
 unrecoverable network change, server not responding, dead or disconnected, at most
-three times in ten minutes. An untrusted gateway certificate is shown by the Swift
+three times in ten minutes. The fresh sign-in waits (polling every second, no attempt or
+deadline running) until the display is awake and the console session is active and
+unlocked, and a sign-in cut short by the display going off or by sleep is not a failure.
+An untrusted gateway certificate is shown by the Swift
 prompt (`OFTCAgent review-certificate`), once, only after such an unreachable result.
 Diagnostics go to stderr as `OFTC supervisor: <event>`.
 

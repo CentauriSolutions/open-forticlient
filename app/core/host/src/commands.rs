@@ -31,7 +31,7 @@ use crate::typed::Failure;
 use oftc_ui_edge::ErrorCode;
 use crate::serve;
 use crate::start::parse_start_flags;
-use crate::supervisor::Signals;
+use crate::supervisor::{Presence, Signals};
 use crate::trust::Outcome as Trust;
 use crate::vpn::{self, Ctx, Rekey};
 
@@ -405,6 +405,8 @@ pub struct Backends<'a> {
     pub session_id: &'a dyn Fn() -> [u8; 16],
     /// SIGINT and SIGTERM, for the supervisor.
     pub signals: &'a dyn Signals,
+    /// Whether the user can answer a browser sign-in now, for the supervisor.
+    pub presence: &'a dyn Presence,
     /// Asks the user about an untrusted gateway certificate (host, port, profile
     /// name); the host builds it from `trust`.
     pub review: &'a dyn Fn(&str, u32, &str) -> Trust,
@@ -1675,6 +1677,7 @@ mod tests {
                 clock: &*self.clock,
                 session_id: &unique_session_id,
                 signals: &ManualSignals::default(),
+                presence: &crate::supervisor::AlwaysPresent,
                 review: &|_, _, _| Trust::NotACertificateProblem,
                 diagnostic: &|_| {},
             };

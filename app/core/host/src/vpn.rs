@@ -612,6 +612,7 @@ fn supervise_for(
         session_id: b.session_id,
         launchctl: b.launchctl,
         signals: b.signals,
+        presence: b.presence,
         review: b.review,
         diagnostic: b.diagnostic,
     };
