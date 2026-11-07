@@ -456,6 +456,13 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     private var componentWindow: OFTCComponentUpdate?
     /// The last component update succeeded and its window has not been closed yet.
     private var componentRunSucceeded = false
+    /// The user pressed the setup button: from then on the window carries on by itself as macOS
+    /// finishes each approval, until the run succeeds, fails, or the window closes.
+    private var setupIntent = false
+    /// The component state when a run last ended still waiting for approval; a run starts again
+    /// by itself only once that state has moved.
+    private var stillWaitingState: VPNComponentState?
+    private var setupPolls = 0
     private var updateOffer: UpdateOffer?
     private var updateTimer: Timer?
     private var updateInFlight = false
@@ -679,6 +686,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
             || launchExperiencePending
         if visible != edgeActive { edgeActive = visible; edge?.setActive(visible) }
         reconcile()
+        continueSetup()
     }
 
     private func tunnelPresentation(_ runtime: TunnelRuntime) -> TunnelPresentation {
@@ -1025,12 +1033,13 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
         welcome?.window?.orderOut(nil)
         if componentWindow == nil {
             componentWindow = OFTCComponentUpdate(
-                onRun: { [weak self] in self?.runRepair() },
+                onRun: { [weak self] in self?.setupStep() },
                 onSettings: { [weak self] pane in self?.edge?.openSettings(pane) },
                 onClose: { [weak self] in
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         let succeeded = self.componentRunSucceeded
+                        self.setupIntent = false
                         self.componentWindow = nil
                         self.componentRunSucceeded = false
                         // Decide from the status the host reports now, not from what was captured
@@ -1053,7 +1062,7 @@ final class OFTCMenuBar: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSM
     fileprivate func updateComponentWindow() {
         componentWindow?.update(ComponentUpdatePresentation(
             status: edge?.lastStatus, phase: repair.phase, anyActive: presentation.anyActive,
-            succeeded: componentRunSucceeded))
+            succeeded: componentRunSucceeded, service: service))
     }
 
     private func showSettings(_ sender: NSButton) {
@@ -1432,12 +1441,17 @@ extension OFTCMenuBar {
     fileprivate func startSetup() {
         guard preview == nil else { return }
         if repair.isRunning {
+            // Never silent: bring the window that shows the progress back.
+            showComponentUpdate(fromSetup: true)
             if repair.phase == .waiting { repair.reopenSettings() }
             return
         }
         switch setupPlan() {
         case .addForm: showSetup()
-        case .waitForHost: serviceAction()   // start it, or open Login Items for its approval
+        case .waitForHost:
+            // The background service is the first item of the checklist: show it, and act on it now.
+            showComponentUpdate(fromSetup: true)
+            setupStep()
         case .newerInstalled, .waitForDisconnect: showWelcome()
         case .nothingToDo: refresh()
         case .repair: showComponentUpdate(fromSetup: true)
@@ -1447,7 +1461,35 @@ extension OFTCMenuBar {
     fileprivate func runRepair() {
         globalError = nil
         componentRunSucceeded = false
+        stillWaitingState = nil
         repair.start()
+        updateComponentWindow()
+    }
+
+    /// The setup button: the step that is next. The service first (start it, or open Login Items
+    /// for its approval), then the host's component update; the window continues by itself.
+    fileprivate func setupStep() {
+        setupIntent = true
+        switch SetupContinuation.step(service: service) {
+        case .startService: serviceAction()
+        case .runUpdate: runRepair()
+        case .wait: break
+        }
+        updateComponentWindow()
+    }
+
+    /// Once per second while the window is open and the button was pressed: fetch the document
+    /// (macOS finishing an approval is not an event the host reports), refresh the checklist, and
+    /// start the next step when it can run.
+    private func continueSetup() {
+        guard componentWindow != nil, preview == nil else { return }
+        setupPolls += 1
+        if setupIntent || service != .ready, setupPolls % 2 == 0 { edge?.refresh() }
+        updateComponentWindow()
+        guard SetupContinuation.shouldRunNext(intent: setupIntent, running: repair.isRunning, service: service,
+                                              plan: setupPlan(), phase: repair.phase, component: componentState,
+                                              waitedAt: stillWaitingState) else { return }
+        runRepair()
     }
 
     fileprivate func autoRepairIfNeeded() {
@@ -1457,15 +1499,17 @@ extension OFTCMenuBar {
               setupPlan() == .repair
         else { return }
         autoRepairTried = true
+        showComponentUpdate(fromSetup: true)
+        setupIntent = true
         runRepair()
     }
 
     fileprivate func setupFinished(_ outcome: SetupOutcome) {
         switch outcome {
-        case .failure(let failure): globalError = failure.message(action: "set up")
-        case .needsKey(let id): askForKey(profileID: id)
-        case .done: globalError = nil; componentRunSucceeded = componentWindow != nil
-        default: globalError = nil
+        case .failure(let failure): globalError = failure.message(action: "set up"); setupIntent = false
+        case .needsKey(let id): askForKey(profileID: id); setupIntent = false
+        case .done: globalError = nil; componentRunSucceeded = componentWindow != nil; setupIntent = false
+        case .waitingForApproval: globalError = nil; stillWaitingState = componentState
         }
         refresh()
         reconcile()

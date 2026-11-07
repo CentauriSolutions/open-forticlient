@@ -11,12 +11,13 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
     private let onRun: () -> Void
     private let onSettings: (HostSettingsPane) -> Void
     private var presentation: ComponentUpdatePresentation?
-    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
+    private let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
                                   styleMask: [.titled, .closable, .miniaturizable],
                                   backing: .buffered, defer: false)
     private let titleLabel = NSTextField(labelWithString: "")
     private let introLabel = NSTextField(wrappingLabelWithString: "")
     private let componentLabel = NSTextField(wrappingLabelWithString: "")
+    private let spinner = NSProgressIndicator()
     private let buildsLabel = NSTextField(labelWithString: "")
     private let loginLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
@@ -30,7 +31,7 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         self.onSettings = onSettings
         self.onClose = onClose
         super.init()
-        window.title = "OFTC VPN component"
+        window.title = "Set up OFTC"
         window.isReleasedWhenClosed = false
         window.delegate = self
         let title = titleLabel
@@ -46,7 +47,11 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         settingsButton.action = #selector(openSettings)
         closeButton.target = self
         closeButton.action = #selector(closeFromButton)
-        let buttons = NSStackView(views: [settingsButton, NSView(), closeButton, runButton])
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = true
+        let buttons = NSStackView(views: [settingsButton, spinner, NSView(), closeButton, runButton])
         let stack = NSStackView(views: [title, explanation, componentLabel, buildsLabel, loginLabel, statusLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -63,6 +68,7 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         for label in [explanation, componentLabel, loginLabel, statusLabel] {
+            label.preferredMaxLayoutWidth = 504
             label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
     }
@@ -91,6 +97,8 @@ final class OFTCComponentUpdate: NSObject, NSWindowDelegate {
         buildsLabel.stringValue = next.builds
         loginLabel.stringValue = next.login.joined(separator: "\n")
         statusLabel.stringValue = next.status
+        spinner.isHidden = !next.busy
+        if next.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         runButton.title = next.button
         runButton.isEnabled = next.canRun
         settingsButton.isHidden = next.finished || !next.showSettings
