@@ -37,6 +37,16 @@ zsh app/gate-build.sh   # fresh /private/tmp/oftc-build-gate-*, sign, notarize; 
 It uses the same environment as `release.sh` (`~/.config/oftc/release.env`), needs no
 installer identity, and installs nothing. Afterwards run `zsh app/release-dev-assets.sh`.
 
+## Minimum macOS
+
+The product's minimum is `LSMinimumSystemVersion` in `app/Host/Info.plist` (the provider plist
+must agree). `app/build.sh` exports it as `MACOSX_DEPLOYMENT_TARGET` for the Rust builds and uses
+it for every Swift `-target`, so each shipped Mach-O has `minos` equal to it whatever SDK or macOS
+the build machine runs. `app/check-minos.sh` then reads `vtool -show-build` for the app, the
+provider, the CLI and any dylib, and fails on any other platform or `minos`, or on a link-log
+"built for newer" warning; `app/check-minos-test.sh` pins that it fails on minos 13.0 and 27.0.
+Raising the minimum is one plist edit (both plists) and bumps the provider, since its binary changes.
+
 ## Version policy
 
 macOS moves a system extension forward only. It will not replace an activated
@@ -58,8 +68,8 @@ than every build ever activated.
   keeps `main` from shipping below it.
 - The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
   update notice use it. It is not subject to the extension rule.
-- Until the release is cut the host is numbered 0.9.0, build 44, and the provider 1.3.2
-  build 52. The release commit changes the host's display version to 1.0.0 (one plist
+- Until the release is cut the host is numbered 0.9.0, build 44, and the provider 1.3.3
+  build 53. The release commit changes the host's display version to 1.0.0 (one plist
   edit) once the team agrees the build is the one to ship. A suffix such as `1.0.0~b1` or
   `1.0.0-beta1` is not used: git refuses `~` in a tag, `app/package.sh` accepts only dotted
   numbers, and the update check cannot read the installed version at all when it has a
@@ -73,7 +83,7 @@ than every build ever activated.
   1.3.0 have no in-app update notice, so the first public release reaches those users by
   being handed to them.
 - The provider is separate: it must stay above the activated floor (here 1.3.1 build 51,
-  the highest activated on a maintained Mac), so it is 1.3.2/52.
+  the highest activated on a maintained Mac), so it is 1.3.3/53.
 
 ## Cutting a release
 

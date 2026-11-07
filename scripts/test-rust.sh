@@ -10,5 +10,7 @@
 # The client has no ignored tests, so it always runs with defaults.
 set -euo pipefail
 root="${0:A:h:h}"
+# Same deployment target as app/build.sh, so cc-built objects and rustc agree here too.
+export MACOSX_DEPLOYMENT_TARGET=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$root/app/Host/Info.plist")
 cargo test --locked --manifest-path "$root/app/Cargo.toml" --workspace "$@"
 cargo test --locked --manifest-path "$root/client/Cargo.toml"
