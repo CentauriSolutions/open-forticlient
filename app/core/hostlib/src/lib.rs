@@ -25,6 +25,7 @@ use oftc_host::trust::{
     ChainProbe, ChildPrompt, OpensslChainSource, OpensslText, ProcessChild, Reviewer,
     SystemTrustEvaluator,
 };
+use oftc_host::supervisor::Presence;
 use oftc_host::{OsSignals, TtyPrompt};
 use oftc_provider::envelope::{LIVE_KEY, MODE_KEY, PREFLIGHT_KEY};
 use zeroize::Zeroizing;
@@ -33,14 +34,88 @@ use zeroize::Zeroizing;
 // in this one static library; `oftc-migration` is no longer linked on its own.
 pub use oftc_migration::{oftc_migrate_free, oftc_migrate_profile_psk};
 
+type CfRef = *const std::ffi::c_void;
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGSessionCopyCurrentDictionary() -> *const std::ffi::c_void;
+    fn CGSessionCopyCurrentDictionary() -> CfRef;
+    fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayIsAsleep(display: u32) -> u32;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CFRelease(object: *const std::ffi::c_void);
+    fn CFRelease(object: CfRef);
+    fn CFStringCreateWithCString(
+        allocator: CfRef,
+        text: *const std::ffi::c_char,
+        encoding: u32,
+    ) -> CfRef;
+    fn CFDictionaryGetValue(dictionary: CfRef, key: CfRef) -> CfRef;
+    fn CFBooleanGetValue(boolean: CfRef) -> u8;
+}
+
+const CF_UTF8: u32 = 0x0800_0100;
+
+/// A boolean the session dictionary holds under `key`, if it holds one.
+fn session_flag(session: CfRef, key: &std::ffi::CStr) -> Option<bool> {
+    // SAFETY: `key` is NUL-terminated; the string it makes is released below, and the
+    // value is borrowed from `session`, which the caller keeps alive for the call.
+    unsafe {
+        let name = CFStringCreateWithCString(std::ptr::null(), key.as_ptr(), CF_UTF8);
+        if name.is_null() {
+            return None;
+        }
+        let value = CFDictionaryGetValue(session, name);
+        CFRelease(name);
+        (!value.is_null()).then(|| CFBooleanGetValue(value) != 0)
+    }
+}
+
+/// Whether the displays are known to be all asleep: the list call worked, at least
+/// one display is online, and every one reports asleep. When that cannot be
+/// determined (an error, or no display at all, as on a headless Mac) the user is
+/// assumed able to answer, so recovery is never held for good.
+fn all_displays_asleep(status: i32, asleep: &[bool]) -> bool {
+    status == 0 && !asleep.is_empty() && asleep.iter().all(|asleep| *asleep)
+}
+
+fn displays_asleep() -> bool {
+    let mut displays = [0u32; 16];
+    let mut count = 0u32;
+    // SAFETY: `displays` has room for the 16 ids we ask for and `count` is a valid
+    // out-pointer.
+    let status = unsafe { CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count) };
+    let online = &displays[..(count as usize).min(16)];
+    // SAFETY: takes a display id by value.
+    let asleep: Vec<bool> = online
+        .iter()
+        .map(|display| unsafe { CGDisplayIsAsleep(*display) } != 0)
+        .collect();
+    all_displays_asleep(status, &asleep)
+}
+
+/// Whether the user could answer a browser sign-in now: a display is awake
+/// and the console session is this user's, logged in and not locked. A dark wake
+/// (network up, display off) and the login window both read false.
+struct OsPresence;
+
+impl Presence for OsPresence {
+    fn can_answer(&self) -> bool {
+        if displays_asleep() {
+            return false;
+        }
+        // SAFETY: returns a retained dictionary or null.
+        let session = unsafe { CGSessionCopyCurrentDictionary() };
+        if session.is_null() {
+            return false;
+        }
+        let on_console = session_flag(session, c"kCGSSessionOnConsoleKey");
+        let locked = session_flag(session, c"CGSSessionScreenIsLocked");
+        // SAFETY: `session` is a live Core Foundation object we own.
+        unsafe { CFRelease(session) };
+        on_console == Some(true) && locked != Some(true)
+    }
 }
 
 /// Whether a user is logged in to a GUI session, so a window can be shown. The
@@ -129,6 +204,7 @@ fn host_main(args: Vec<String>, bundle_id: &str) -> i32 {
                 login: &ServiceLoginItems,
                 launchctl: &SystemLaunchctl,
                 signals: &OsSignals,
+                presence: &OsPresence,
                 review: &|host, port, name| reviewer.review(host, port, name),
                 diagnostic: &diagnostic,
             };
@@ -189,4 +265,27 @@ pub unsafe extern "C" fn oftc_host_main(
         process::exit(code)
     });
     dispatch2::dispatch_main()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_displays_asleep;
+
+    /// Hold only when displays exist and every one is asleep; any doubt lets the
+    /// recovery run.
+    #[test]
+    fn only_all_online_displays_asleep_holds_the_recovery() {
+        // (list status, each online display asleep?, hold)
+        let rows: [(i32, &[bool], bool); 6] = [
+            (0, &[], false),             // headless: no display to be asleep
+            (-1, &[true, true], false),  // the call failed: unknown
+            (0, &[true, false], false),  // one awake is enough
+            (0, &[false], false),
+            (0, &[true], true),
+            (0, &[true, true], true),
+        ];
+        for (status, asleep, hold) in rows {
+            assert_eq!(all_displays_asleep(status, asleep), hold, "{status} {asleep:?}");
+        }
+    }
 }
