@@ -72,19 +72,27 @@ fn session_flag(session: CfRef, key: &std::ffi::CStr) -> Option<bool> {
     }
 }
 
-/// Whether any display is awake: a closed lid with an external display, or a main
-/// display that sleeps while another is on, still has someone looking at a screen.
-fn any_display_awake() -> bool {
+/// Whether the displays are known to be all asleep: the list call worked, at least
+/// one display is online, and every one reports asleep. When that cannot be
+/// determined (an error, or no display at all, as on a headless Mac) the user is
+/// assumed able to answer, so recovery is never held for good.
+fn all_displays_asleep(status: i32, asleep: &[bool]) -> bool {
+    status == 0 && !asleep.is_empty() && asleep.iter().all(|asleep| *asleep)
+}
+
+fn displays_asleep() -> bool {
     let mut displays = [0u32; 16];
     let mut count = 0u32;
     // SAFETY: `displays` has room for the 16 ids we ask for and `count` is a valid
     // out-pointer.
     let status = unsafe { CGGetOnlineDisplayList(16, displays.as_mut_ptr(), &mut count) };
-    status == 0
-        && displays[..(count as usize).min(16)]
-            // SAFETY: takes a display id by value.
-            .iter()
-            .any(|display| unsafe { CGDisplayIsAsleep(*display) } == 0)
+    let online = &displays[..(count as usize).min(16)];
+    // SAFETY: takes a display id by value.
+    let asleep: Vec<bool> = online
+        .iter()
+        .map(|display| unsafe { CGDisplayIsAsleep(*display) } != 0)
+        .collect();
+    all_displays_asleep(status, &asleep)
 }
 
 /// Whether the user could answer a browser sign-in now: a display is awake
@@ -94,7 +102,7 @@ struct OsPresence;
 
 impl Presence for OsPresence {
     fn can_answer(&self) -> bool {
-        if !any_display_awake() {
+        if displays_asleep() {
             return false;
         }
         // SAFETY: returns a retained dictionary or null.
@@ -257,4 +265,27 @@ pub unsafe extern "C" fn oftc_host_main(
         process::exit(code)
     });
     dispatch2::dispatch_main()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_displays_asleep;
+
+    /// Hold only when displays exist and every one is asleep; any doubt lets the
+    /// recovery run.
+    #[test]
+    fn only_all_online_displays_asleep_holds_the_recovery() {
+        // (list status, each online display asleep?, hold)
+        let rows: [(i32, &[bool], bool); 6] = [
+            (0, &[], false),             // headless: no display to be asleep
+            (-1, &[true, true], false),  // the call failed: unknown
+            (0, &[true, false], false),  // one awake is enough
+            (0, &[false], false),
+            (0, &[true], true),
+            (0, &[true, true], true),
+        ];
+        for (status, asleep, hold) in rows {
+            assert_eq!(all_displays_asleep(status, asleep), hold, "{status} {asleep:?}");
+        }
+    }
 }
