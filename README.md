@@ -40,7 +40,7 @@ the app can import an existing FortiClient profile once, during setup.
 
 - macOS 15 or later on Apple silicon.
 - A FortiGate IPsec IKEv2 VPN that signs in with SAML, and its pre-shared key. Gateway
-  admins: see [docs/fortigate.md](docs/fortigate.md) (TCP fallback matters).
+  admins: see [docs/fortigate.md](docs/fortigate.md) for what the client expects from the gateway.
   (The PSK is not the secret that protects access; your SAML sign-in is.)
 - An administrator password to install, and approval of OFTC's system extension
   in *System Settings → General → Login Items & Extensions* the first time.
