@@ -4,28 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
-	<key>CFBundleExecutable</key>
-	<string>OFTCAgent</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.chris.openforticlient.oftc</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>OFTC</string>
 	<key>CFBundleDisplayName</key>
 	<string>Open Forticlient</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>en</string>
-	</array>
-	<key>CFBundleIconFile</key>
-	<string>OFTC</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>0.9.0</string>
-	<key>CFBundleVersion</key>
-	<string>44</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -43,19 +23,49 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleExecutable</key>
+	<string>OFTCAgent</string>
+	<key>CFBundleIconFile</key>
+	<string>OFTC</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.chris.openforticlient.oftc</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>OFTC</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.9.1</string>
+	<key>CFBundleVersion</key>
+	<string>45</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>OFTC (Open Forticlient): a FortiGate IPsec VPN client for macOS</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Runs the OFTC provider for an explicitly requested VPN connection.</string>
+	<key>OFTCUpdateFeedURL</key>
+	<string>https://api.github.com/repos/CentauriSolutions/open-forticlient/releases/latest</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.chris.openforticlient.oftc.profiles</string>
-			<key>UTTypeIconFile</key>
-			<string>OFTCDocument</string>
-			<key>UTTypeDescription</key>
-			<string>OFTC VPN profiles</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>OFTC VPN profiles</string>
+			<key>UTTypeIconFile</key>
+			<string>OFTCDocument</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.chris.openforticlient.oftc.profiles</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -65,15 +75,5 @@
 			</dict>
 		</dict>
 	</array>
-	<key>LSMinimumSystemVersion</key>
-	<string>15.0</string>
-	<key>LSUIElement</key>
-	<true/>
-	<key>OFTCUpdateFeedURL</key>
-	<string>https://api.github.com/repos/CentauriSolutions/open-forticlient/releases/latest</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>OFTC (Open Forticlient): a FortiGate IPsec VPN client for macOS</string>
-	<key>NSSystemExtensionUsageDescription</key>
-	<string>Runs the OFTC provider for an explicitly requested VPN connection.</string>
 </dict>
 </plist>

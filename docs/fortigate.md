@@ -52,12 +52,16 @@ Plain observations, not a diagnosis of FortiOS; your gateway may differ.
   all, schedule always), TCP connects to both 4500 and 4443 were accepted from outside,
   and the client connected through its UDP-to-TCP fallback from a network that blocks
   UDP 4500. We do not know why 4443 also opened.
+- On a later run on the same gateway, deleting that policy again left TCP 4443 and 4500
+  answering from outside, so the policy was not the only thing that decided it. We have not
+  found what else did.
 - A 7.6.6 gateway with `transport auto` accepted the client's TCP connects to 4443 and
   4500 with no extra policy.
 
 All we conclude: TCP fallback is a gateway requirement. On the observed 7.4.11 gateway
-an explicit local-in policy for the IKE TCP port was needed; on 7.6.6 with `transport
-auto` it was not. If your users connect from known networks, you can scope the policy's source to them; a
+an explicit local-in policy for the IKE TCP port made TCP reachable at first, but later
+observations show it is not the only factor; on 7.6.6 with `transport auto` it was not
+needed. Test from a network that blocks UDP rather than assuming either way. If your users connect from known networks, you can scope the policy's source to them; a
 dial-up gateway that serves users anywhere normally allows any source and relies on the
 phase1's authentication (PSK, EAP with SAML, an authorised user group) and DPD. Do not trust the configuration alone: verify with a TCP
 connect to `<ike-tcp-port>` from outside the gateway's network.

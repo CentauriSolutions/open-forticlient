@@ -68,8 +68,10 @@ than every build ever activated.
   keeps `main` from shipping below it.
 - The host (`app/Host/Info.plist`) is the product version: the tag, the package and the
   update notice use it. It is not subject to the extension rule.
-- Until the release is cut the host is numbered 0.9.0, build 44, and the provider 1.3.3
-  build 53. The release commit changes the host's display version to 1.0.0 (one plist
+- Until the release is cut the host is numbered 0.9.1, build 45, and the provider 1.3.3
+  build 53. Every host build that is installed on another Mac bumps the patch and the
+  build (0.9.2/46 next) in the same PR that changes the line above, because
+  `app/check-version-parity.sh` fails when this sentence and the plist disagree. The release commit changes the host's display version to 1.0.0 (one plist
   edit) once the team agrees the build is the one to ship. A suffix such as `1.0.0~b1` or
   `1.0.0-beta1` is not used: git refuses `~` in a tag, `app/package.sh` accepts only dotted
   numbers, and the update check cannot read the installed version at all when it has a
@@ -83,7 +85,9 @@ than every build ever activated.
   1.3.0 have no in-app update notice, so the first public release reaches those users by
   being handed to them.
 - The provider is separate: it must stay above the activated floor (here 1.3.1 build 51,
-  the highest activated on a maintained Mac), so it is 1.3.3/53.
+  raised in #121; the shipping provider 1.3.3/53 is above it). `app/check-versions.sh` needs the
+  provider strictly above the floor, so raise the floor to a build that is already activated
+  only in the PR that also bumps the provider past it.
 
 ## Cutting a release
 
